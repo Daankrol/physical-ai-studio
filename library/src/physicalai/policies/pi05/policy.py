@@ -100,6 +100,10 @@ class Pi05(ExportablePolicyMixin, Policy):
         time_sampling_offset: float = 0.001,
         min_period: float = 4e-3,
         max_period: float = 4.0,
+        snapflow_enabled: bool = False,
+        snapflow_alpha: float = 0.5,
+        snapflow_lambda: float = 1.0,
+        snapflow_num_inference_steps: int = 1,
         # Image preprocessing
         image_resolution: tuple[int, int] = (224, 224),
         empty_cameras: int = 0,
@@ -150,6 +154,10 @@ class Pi05(ExportablePolicyMixin, Policy):
                 scheduler_warmup_steps=scheduler_warmup_steps,
                 scheduler_decay_steps=scheduler_decay_steps,
                 scheduler_decay_lr=scheduler_decay_lr,
+                snapflow_enabled=snapflow_enabled,
+                snapflow_alpha=snapflow_alpha,
+                snapflow_lambda=snapflow_lambda,
+                snapflow_num_inference_steps=snapflow_num_inference_steps,
             )
         else:
             self.config = Pi05Config(
@@ -168,6 +176,10 @@ class Pi05(ExportablePolicyMixin, Policy):
                 time_sampling_offset=time_sampling_offset,
                 min_period=min_period,
                 max_period=max_period,
+                snapflow_enabled=snapflow_enabled,
+                snapflow_alpha=snapflow_alpha,
+                snapflow_lambda=snapflow_lambda,
+                snapflow_num_inference_steps=snapflow_num_inference_steps,
                 image_resolution=image_resolution,
                 empty_cameras=empty_cameras,
                 tokenizer_max_length=tokenizer_max_length,
@@ -223,6 +235,10 @@ class Pi05(ExportablePolicyMixin, Policy):
             time_sampling_offset=self.config.time_sampling_offset,
             min_period=self.config.min_period,
             max_period=self.config.max_period,
+            snapflow_enabled=self.config.snapflow_enabled,
+            snapflow_alpha=self.config.snapflow_alpha,
+            snapflow_lambda=self.config.snapflow_lambda,
+            snapflow_num_inference_steps=self.config.snapflow_num_inference_steps,
             image_resolution=self.config.image_resolution,
             freeze_vision_encoder=self.config.freeze_vision_encoder,
             train_expert_only=self.config.train_expert_only,
@@ -274,6 +290,10 @@ class Pi05(ExportablePolicyMixin, Policy):
         n_action_steps: int | None = 10,
         max_state_dim: int | None = None,
         num_inference_steps: int | None = None,
+        snapflow_enabled: bool | None = None,
+        snapflow_alpha: float | None = None,
+        snapflow_lambda: float | None = None,
+        snapflow_num_inference_steps: int | None = None,
         gradient_checkpointing: bool = False,
         compile_model: bool = False,
         compile_mode: str | None = "max-autotune",
@@ -383,6 +403,14 @@ class Pi05(ExportablePolicyMixin, Policy):
             hf_config["max_state_dim"] = max_state_dim
         if num_inference_steps is not None:
             hf_config["num_inference_steps"] = num_inference_steps
+        if snapflow_enabled is not None:
+            hf_config["snapflow_enabled"] = snapflow_enabled
+        if snapflow_alpha is not None:
+            hf_config["snapflow_alpha"] = snapflow_alpha
+        if snapflow_lambda is not None:
+            hf_config["snapflow_lambda"] = snapflow_lambda
+        if snapflow_num_inference_steps is not None:
+            hf_config["snapflow_num_inference_steps"] = snapflow_num_inference_steps
         hf_config["gradient_checkpointing"] = gradient_checkpointing
         hf_config["compile_model"] = compile_model
         if compile_mode is not None:

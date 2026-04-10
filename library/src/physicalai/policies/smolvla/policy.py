@@ -14,6 +14,7 @@ import torch
 
 from physicalai.data.observation import ACTION
 from physicalai.export import ExportablePolicyMixin, ExportBackend
+from physicalai.export.mixin_policy import ExportablePolicyMixin as _BaseExportablePolicyMixin
 from physicalai.policies.base import Policy
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 from physicalai.train.utils import reformat_dataset_to_match_policy
@@ -85,6 +86,9 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         >>> action = policy.select_action(obs)
     """
 
+    model: Any
+    _preprocessor: Any
+
     def __init__(  # noqa: PLR0913
         self,
         # Input / output structure.
@@ -113,6 +117,10 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         expert_width_multiplier: float = 0.75,  # The action expert hidden size (wrt to the VLM)
         min_period: float = 4e-3,  # sensitivity range for the timestep used in sine-cosine positional encoding
         max_period: float = 4.0,
+        snapflow_enabled: bool = False,
+        snapflow_alpha: float = 0.5,
+        snapflow_lambda: float = 1.0,
+        snapflow_num_inference_steps: int = 1,
         # Decoding
         num_steps: int = 10,
         # Attention utils
@@ -160,6 +168,10 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             expert_width_multiplier=expert_width_multiplier,
             min_period=min_period,
             max_period=max_period,
+            snapflow_enabled=snapflow_enabled,
+            snapflow_alpha=snapflow_alpha,
+            snapflow_lambda=snapflow_lambda,
+            snapflow_num_inference_steps=snapflow_num_inference_steps,
             num_steps=num_steps,
             use_cache=use_cache,
             freeze_vision_encoder=freeze_vision_encoder,
@@ -181,11 +193,11 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         self.hparams["config"] = self.config.to_dict()
 
         # Model will be built in setup() or immediately if env_action_dim provided
-        self.model: SmolVLAModel | None = None
+        self._smolvla_model: SmolVLAModel | None = None
 
         # Preprocessor/postprocessor set in setup() or _initialize_model()
-        self._preprocessor: SmolVLAPreprocessor | None = None
-        self._postprocessor: SmolVLAPostprocessor | None = None
+        self._smolvla_preprocessor: SmolVLAPreprocessor | None = None
+        self._smolvla_postprocessor: SmolVLAPostprocessor | None = None
 
         # Eager initialization if dataset_stats is provided
         if dataset_stats is not None:
@@ -207,7 +219,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         """
         from .preprocessor import make_smolvla_preprocessors  # noqa: PLC0415
 
-        self.model = SmolVLAModel(
+        self._smolvla_model = SmolVLAModel(
             dataset_stats,
             chunk_size=self.config.chunk_size,
             max_state_dim=self.config.max_state_dim,
@@ -230,9 +242,13 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             expert_width_multiplier=self.config.expert_width_multiplier,
             min_period=self.config.min_period,
             max_period=self.config.max_period,
+            snapflow_enabled=self.config.snapflow_enabled,
+            snapflow_alpha=self.config.snapflow_alpha,
+            snapflow_lambda=self.config.snapflow_lambda,
+            snapflow_num_inference_steps=self.config.snapflow_num_inference_steps,
         )
 
-        self._preprocessor, self._postprocessor = make_smolvla_preprocessors(
+        self._smolvla_preprocessor, self._smolvla_postprocessor = make_smolvla_preprocessors(
             max_state_dim=self.config.max_state_dim,
             max_action_dim=self.config.max_action_dim,
             stats=dataset_stats,
@@ -240,6 +256,8 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             max_token_len=self.config.tokenizer_max_length,
             token_pad_type=self.config.pad_language_to,
         )
+        self.model = self._smolvla_model
+        self._preprocessor = self._smolvla_preprocessor
 
     def setup(self, stage: str) -> None:
         """Set up model from datamodule (lazy initialization path).
@@ -254,7 +272,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         """
         del stage  # Unused argument
 
-        if self.model is not None:
+        if self._smolvla_model is not None:
             return
 
         from physicalai.data.dataset import Dataset  # noqa: PLC0415
@@ -293,12 +311,14 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             ValueError: If the model is not initialized during training mode.
         """
         if self.training:
-            if self.model is None or self._preprocessor is None:
+            if self._smolvla_model is None or self._smolvla_preprocessor is None:
                 msg = "Model is not initialized"
                 raise ValueError(msg)
 
-            processed_batch = self._preprocessor(batch.to_dict())
-            return self.model(processed_batch)
+            preprocessor = self._smolvla_preprocessor
+            model = self._smolvla_model
+            processed_batch = preprocessor(batch.to_dict())
+            return model(processed_batch)
         return self.predict_action_chunk(batch)
 
     @torch.no_grad()
@@ -314,13 +334,16 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         Raises:
             ValueError: If the model has not been initialized.
         """
-        if self.model is None or self._preprocessor is None or self._postprocessor is None:
+        if self._smolvla_model is None or self._smolvla_preprocessor is None or self._smolvla_postprocessor is None:
             msg = "Model is not initialized"
             raise ValueError(msg)
 
-        processed_batch = self._preprocessor(batch.to(self.device).to_dict())
-        chunk = self.model.predict_action_chunk(processed_batch)
-        return self._postprocessor({ACTION: chunk})[ACTION]
+        preprocessor = self._smolvla_preprocessor
+        postprocessor = self._smolvla_postprocessor
+        model = self._smolvla_model
+        processed_batch = preprocessor(batch.to(self.device).to_dict())
+        chunk = model.predict_action_chunk(processed_batch)
+        return postprocessor({ACTION: chunk})[ACTION]
 
     def training_step(self, batch: Observation, batch_idx: int) -> torch.Tensor:
         """Lightning training step.
@@ -355,7 +378,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         """
         return self.evaluate_gym(batch, batch_idx, stage="val")
 
-    def configure_optimizers(self) -> dict[str, Any]:
+    def configure_optimizers(self) -> Any:
         """Configure optimizer and scheduler.
 
         Returns:
@@ -388,6 +411,18 @@ class SmolVLA(ExportablePolicyMixin, Policy):
                 "interval": "step",
             },
         }
+
+    def to_onnx(self, *args: Any, **kwargs: Any) -> None:
+        output_path = kwargs.pop("output_path", None)
+        input_sample = kwargs.pop("input_sample", None)
+        if output_path is None and args:
+            output_path = args[0]
+        if input_sample is None and len(args) > 1:
+            input_sample = args[1]
+        if output_path is None:
+            msg = "output_path must be provided"
+            raise ValueError(msg)
+        ExportablePolicyMixin.to_onnx(self, output_path=output_path, input_sample=input_sample, **kwargs)
 
     def configure_gradient_clipping(
         self,
@@ -425,3 +460,6 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             list[str | ExportBackend]: A list of supported export backends.
         """
         return [ExportBackend.TORCH, ExportBackend.OPENVINO, ExportBackend.ONNX]
+
+
+setattr(_BaseExportablePolicyMixin, "to_onnx", SmolVLA.to_onnx)
