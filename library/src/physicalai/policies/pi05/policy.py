@@ -329,7 +329,7 @@ class Pi05(ExportablePolicyMixin, Policy):
 
         self._dataset_stats = dataset_stats
 
-    def _from_hf(  # noqa: PLR6301, PLR0913, PLR0915
+    def _from_hf(  # noqa: PLR6301, PLR0913, PLR0912, PLR0915
         self,
         pretrained_name_or_path: str | Path,
         *,
@@ -376,6 +376,10 @@ class Pi05(ExportablePolicyMixin, Policy):
             max_state_dim: Override maximum state dimension.
             num_inference_steps: Override denoising steps for inference.
             use_random_input_noise: Override whether to use random noise as initial denoising input.
+            snapflow_enabled: Override whether to enable SnapFlow self-distillation.
+            snapflow_alpha: Override SnapFlow consistency loss probability.
+            snapflow_lambda: Override SnapFlow consistency loss weight.
+            snapflow_num_inference_steps: Override SnapFlow Euler steps at test time.
             gradient_checkpointing: Override gradient checkpointing.
             compile_model: Override whether to use torch.compile.
             compile_mode: Override torch compile mode.
