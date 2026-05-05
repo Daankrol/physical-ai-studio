@@ -170,26 +170,7 @@ class TrainingWorker(BaseProcessWorker):
             trainer = _create_trainer()
 
             dispatcher.start()
-
-            try:
-                trainer.fit(model=policy, datamodule=l_dm)
-            except Exception as fit_exc:
-                if not payload.compile_model:
-                    raise
-
-                logger.exception(f"Training with compile failed: {fit_exc} — retrying without compilation")
-                compile_fallback_msg = "Model compilation failed, falling back to non-compiled training."
-                job = await JobService.update_job_status(
-                    job_id=job.id, status=JobStatus.RUNNING, message=compile_fallback_msg
-                )
-                self.queue.put((EventType.JOB_UPDATE, job))
-
-                if base_model is not None:
-                    policy = load_policy(base_model, compile_model=False)
-                else:
-                    policy = setup_policy(model, compile_model=False)
-                trainer = _create_trainer()
-                trainer.fit(model=policy, datamodule=l_dm)
+            trainer.fit(model=policy, datamodule=l_dm)
 
             for backend in settings.supported_backends:
                 export_dir = path / "exports" / backend

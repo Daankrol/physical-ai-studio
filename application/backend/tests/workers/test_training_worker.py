@@ -17,7 +17,6 @@ from schemas.base_job import JobStatus, JobType
 from schemas.dataset import Snapshot
 from schemas.job import TrainingPrecision, TrainJobPayload
 from schemas.model import Model
-from services.event_processor import EventType
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -126,100 +125,12 @@ def worker(stop_event, interrupt_event, event_queue):
 # ---------------------------------------------------------------------------
 
 
-class TestCompileFallback:
-    """Tests for the compile-failure fallback mechanism in _train_model."""
+class TestTraining:
+    """Tests for _train_model behavior."""
 
     @pytest.mark.anyio
-    async def test_fallback_retries_without_compile_on_failure(self, worker, event_queue, tmp_path):
-        """When compile_model=True and trainer.fit raises, the worker should:
-        1. Notify via JOB_UPDATE with a fallback message
-        2. Re-create the policy with compile_model=False
-        3. Retry trainer.fit successfully
-        """
-        payload = _make_payload(compile_model=True)
-        model = _make_model(tmp_path)
-        snapshot = _make_snapshot(tmp_path)
-        job = _make_job(payload)
-
-        first_policy = MagicMock()
-        second_policy = MagicMock()
-        setup_policy_returns = [first_policy, second_policy]
-
-        first_trainer = MagicMock()
-        first_trainer.fit = MagicMock(side_effect=RuntimeError("compile failed"))
-        second_trainer = MagicMock()
-        second_trainer.fit = MagicMock()
-        trainer_returns = [first_trainer, second_trainer]
-
-        updated_job = MagicMock()
-        updated_job.id = job.id
-        updated_job.status = JobStatus.RUNNING
-        updated_job.message = "Model compilation failed, falling back to non-compiled training."
-
-        completed_job = MagicMock()
-        completed_job.id = job.id
-        completed_job.status = JobStatus.COMPLETED
-
-        with (
-            patch(f"{MODULE}.setup_policy", side_effect=setup_policy_returns) as mock_setup,
-            patch(f"{MODULE}.Trainer", side_effect=trainer_returns),
-            patch(f"{MODULE}.JobService") as MockJobService,
-            patch(f"{MODULE}.ModelService") as MockModelService,
-            patch(f"{MODULE}.LeRobotDataModule"),
-            patch(f"{MODULE}.get_settings", return_value=_make_settings(tmp_path)),
-            patch(f"{MODULE}.CSVLogger"),
-            patch(f"{MODULE}.ModelCheckpoint"),
-            patch(f"{MODULE}.TrainingTrackingDispatcher") as MockDispatcher,
-            patch(f"{MODULE}.TrainingTrackingCallback"),
-            patch(f"{MODULE}.TrainingLogCallback"),
-            patch(f"{MODULE}.get_torch_device", return_value="cpu"),
-            patch(f"{MODULE}.get_lightning_strategy", return_value="auto"),
-        ):
-            MockDispatcher.return_value = MagicMock()
-            MockDispatcher.return_value.start = MagicMock()
-            MockDispatcher.return_value.is_alive = MagicMock(return_value=False)
-
-            MockJobService.update_job_status = AsyncMock(
-                side_effect=[
-                    MagicMock(),  # "Training started"
-                    updated_job,  # compile fallback notification
-                    completed_job,  # "Training finished"
-                ]
-            )
-            MockModelService.create_model = AsyncMock(return_value=model)
-
-            await worker._train_model(job, model, snapshot, payload, base_model=None)
-
-            # setup_policy called twice: first with compile, then without
-            assert mock_setup.call_count == 2
-            assert mock_setup.call_args_list[0].kwargs["compile_model"] is True
-            assert mock_setup.call_args_list[1].kwargs["compile_model"] is False
-
-            # First trainer.fit was called (and raised), second was called (and succeeded)
-            first_trainer.fit.assert_called_once()
-            second_trainer.fit.assert_called_once()
-
-            # JobService.update_job_status called with fallback message
-            fallback_call = MockJobService.update_job_status.call_args_list[1]
-            assert fallback_call.kwargs["status"] == JobStatus.RUNNING
-            assert "falling back" in fallback_call.kwargs["message"].lower()
-
-            # Final status is COMPLETED
-            completed_call = MockJobService.update_job_status.call_args_list[2]
-            assert completed_call.kwargs["status"] == JobStatus.COMPLETED
-
-            # Queue received JOB_UPDATE with fallback message
-            events = []
-            while not event_queue.empty():
-                events.append(event_queue.get_nowait())
-
-            job_updates = [e for e in events if e[0] == EventType.JOB_UPDATE]
-            assert any("falling back" in str(getattr(e[1], "message", "")).lower() for e in job_updates)
-
-    @pytest.mark.anyio
-    async def test_no_fallback_when_compile_disabled(self, worker, event_queue, tmp_path):
-        """When compile_model=False and trainer.fit raises, the error should propagate
-        without any fallback attempt."""
+    async def test_training_failure_propagates_as_failed_job(self, worker, event_queue, tmp_path):
+        """When trainer.fit raises, the job should end as FAILED."""
         payload = _make_payload(compile_model=False)
         model = _make_model(tmp_path)
         snapshot = _make_snapshot(tmp_path)
@@ -261,86 +172,15 @@ class TestCompileFallback:
 
             await worker._train_model(job, model, snapshot, payload, base_model=None)
 
-            # setup_policy only called once — no fallback retry
-            assert mock_setup.call_count == 1
-
-            # trainer.fit only called once
+            mock_setup.assert_called_once()
             trainer.fit.assert_called_once()
 
-            # Job ended as FAILED
             failed_call = MockJobService.update_job_status.call_args_list[1]
             assert failed_call.kwargs["status"] == JobStatus.FAILED
 
     @pytest.mark.anyio
-    async def test_fallback_failure_still_marks_job_failed(self, worker, event_queue, tmp_path):
-        """When compile_model=True, the first fit fails triggering fallback, but the
-        second fit also fails — the job should end as FAILED."""
-        payload = _make_payload(compile_model=True)
-        model = _make_model(tmp_path)
-        snapshot = _make_snapshot(tmp_path)
-        job = _make_job(payload)
-
-        first_policy = MagicMock()
-        second_policy = MagicMock()
-
-        first_trainer = MagicMock()
-        first_trainer.fit = MagicMock(side_effect=RuntimeError("compile failed"))
-        second_trainer = MagicMock()
-        second_trainer.fit = MagicMock(side_effect=RuntimeError("also failed without compile"))
-        trainer_returns = [first_trainer, second_trainer]
-
-        updated_job = MagicMock()
-        updated_job.id = job.id
-        updated_job.message = "Model compilation failed, falling back to non-compiled training."
-
-        failed_job = MagicMock()
-        failed_job.id = job.id
-        failed_job.status = JobStatus.FAILED
-
-        with (
-            patch(f"{MODULE}.setup_policy", side_effect=[first_policy, second_policy]) as mock_setup,
-            patch(f"{MODULE}.Trainer", side_effect=trainer_returns),
-            patch(f"{MODULE}.JobService") as MockJobService,
-            patch(f"{MODULE}.ModelService"),
-            patch(f"{MODULE}.LeRobotDataModule"),
-            patch(f"{MODULE}.get_settings", return_value=_make_settings(tmp_path)),
-            patch(f"{MODULE}.CSVLogger"),
-            patch(f"{MODULE}.ModelCheckpoint"),
-            patch(f"{MODULE}.TrainingTrackingDispatcher") as MockDispatcher,
-            patch(f"{MODULE}.TrainingTrackingCallback"),
-            patch(f"{MODULE}.TrainingLogCallback"),
-            patch(f"{MODULE}.get_torch_device", return_value="cpu"),
-            patch(f"{MODULE}.get_lightning_strategy", return_value="auto"),
-        ):
-            MockDispatcher.return_value = MagicMock()
-            MockDispatcher.return_value.start = MagicMock()
-            MockDispatcher.return_value.is_alive = MagicMock(return_value=False)
-
-            MockJobService.update_job_status = AsyncMock(
-                side_effect=[
-                    MagicMock(),  # "Training started"
-                    updated_job,  # compile fallback notification
-                    failed_job,  # "Training failed"
-                ]
-            )
-
-            await worker._train_model(job, model, snapshot, payload, base_model=None)
-
-            # setup_policy called twice (compile + fallback)
-            assert mock_setup.call_count == 2
-
-            # Both trainers had fit called
-            first_trainer.fit.assert_called_once()
-            second_trainer.fit.assert_called_once()
-
-            # Job ended as FAILED
-            failed_call = MockJobService.update_job_status.call_args_list[2]
-            assert failed_call.kwargs["status"] == JobStatus.FAILED
-
-    @pytest.mark.anyio
-    async def test_successful_compile_no_fallback(self, worker, event_queue, tmp_path):
-        """When compile_model=True and trainer.fit succeeds on the first try,
-        no fallback should occur."""
+    async def test_successful_training_with_compile(self, worker, event_queue, tmp_path):
+        """When compile_model=True and trainer.fit succeeds, job completes normally."""
         payload = _make_payload(compile_model=True)
         model = _make_model(tmp_path)
         snapshot = _make_snapshot(tmp_path)
@@ -383,17 +223,12 @@ class TestCompileFallback:
 
             await worker._train_model(job, model, snapshot, payload, base_model=None)
 
-            # setup_policy called only once — no fallback
             assert mock_setup.call_count == 1
             assert mock_setup.call_args_list[0].kwargs["compile_model"] is True
 
-            # trainer.fit called only once
             trainer.fit.assert_called_once()
 
-            # No fallback message in update_job_status calls
-            for call in MockJobService.update_job_status.call_args_list:
-                msg = call.kwargs.get("message", "")
-                assert "falling back" not in msg.lower()
+            assert MockJobService.update_job_status.call_args_list[1].kwargs["status"] == JobStatus.COMPLETED
 
     @pytest.mark.anyio
     async def test_precision_fp32_passes_32_true_to_trainer(self, worker, event_queue, tmp_path):

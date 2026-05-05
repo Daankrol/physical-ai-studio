@@ -352,8 +352,7 @@ const TrainingParameters = ({
                         <Content>
                             <Text>
                                 Enables torch.compile for all policies. Can significantly speed up training after an
-                                initial compilation warmup, but increases startup time. If compilation fails, training
-                                automatically retries without compilation.
+                                initial compilation warmup, but increases startup time.
                             </Text>
                         </Content>
                     </ContextualHelp>
