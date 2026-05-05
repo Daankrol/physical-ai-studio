@@ -13,7 +13,6 @@ from lightning.pytorch.loggers import CSVLogger
 
 from core.logging.utils import job_logging_ctx
 from models.utils import load_policy, setup_policy
-from schemas.job import TrainingPrecision
 from services.snapshot_service import SnapshotService
 from settings import get_settings
 
@@ -39,7 +38,7 @@ from services.training_service import (
     TrainingTrackingCallback,
     TrainingTrackingDispatcher,
 )
-from utils.device import get_default_precision, get_lightning_strategy, get_torch_device
+from utils.device import get_lightning_strategy, get_torch_device
 from workers.base import BaseProcessWorker
 
 SCHEDULE_INTERVAL_SEC = 5
@@ -136,10 +135,7 @@ class TrainingWorker(BaseProcessWorker):
             else:
                 policy = setup_policy(model, compile_model=payload.compile_model)
 
-            if payload.precision != TrainingPrecision.DEFAULT:
-                precision = str(payload.precision)
-            else:
-                precision = get_default_precision(accelerator)
+            precision = str(payload.precision)
 
             checkpoint_callback = ModelCheckpoint(
                 dirpath=path,
@@ -188,7 +184,10 @@ class TrainingWorker(BaseProcessWorker):
                 )
                 self.queue.put((EventType.JOB_UPDATE, job))
 
-                policy = setup_policy(model, compile_model=False)
+                if base_model is not None:
+                    policy = load_policy(base_model, compile_model=False)
+                else:
+                    policy = setup_policy(model, compile_model=False)
                 trainer = _create_trainer()
                 trainer.fit(model=policy, datamodule=l_dm)
 

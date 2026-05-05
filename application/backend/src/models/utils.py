@@ -27,7 +27,7 @@ def load_policy(model: Model, *, compile_model: bool = False) -> Policy:
         raise ValueError(f"Policy {model.policy} not implemented.")
 
     if compile_model:
-        compile_mode = "default"
+        compile_mode = getattr(policy.config, "compile_mode", "default")
         policy.forward = torch.compile(policy.forward, mode=compile_mode)  # type: ignore[method-assign]
     return policy
 

@@ -66,7 +66,7 @@ class Trainer(lightning.Trainer):
         # physicalai-specific parameters
         experiment_name: str | None = None,
         auto_scale_batch_size: bool = False,
-        allow_tf32: bool = True,
+        allow_tf32: bool = False,
         cudnn_benchmark: bool = True,
         # Hardware
         accelerator: str | Any = "auto",
@@ -133,7 +133,8 @@ class Trainer(lightning.Trainer):
                 largest batch size that fits in memory before training.
                 ``False`` (default) disables it.  ``True`` enables exponential (power) scaling.
             allow_tf32: Enable TF32 precision for matmul on Ampere+ GPUs. Provides ~3x speedup
-                for float32 operations with minimal accuracy loss. Defaults to True.
+                for float32 operations with minimal accuracy loss. Defaults to False to match
+                PyTorch's default. Consider enabling when using 32-true precision.
             cudnn_benchmark: Enable cuDNN benchmark mode to auto-tune convolution algorithms.
                 Speeds up training when input sizes are constant. Defaults to True.
             default_root_dir: Root directory for experiments (default: "experiments" instead of current dir)

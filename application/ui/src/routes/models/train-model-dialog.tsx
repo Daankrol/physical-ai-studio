@@ -309,10 +309,9 @@ const TrainingParameters = ({
                 contextualHelp={
                     <ContextualHelp variant='info'>
                         <Heading>Training precision</Heading>
-                        <Content>
+                         <Content>
                             <Text>
-                                Controls numerical precision during training. Auto selects the optimal precision for
-                                your device (BF16 Mixed for CUDA, 32-bit for XPU). BF16 Mixed uses half-precision where
+                                Controls numerical precision during training. BF16 Mixed uses half-precision where
                                 safe for faster training and lower memory usage. 32-bit uses full precision for maximum
                                 numerical stability.
                             </Text>
@@ -320,9 +319,8 @@ const TrainingParameters = ({
                     </ContextualHelp>
                 }
             >
-                <Item key='default'>Auto</Item>
                 <Item key='bf16-mixed'>BF16 Mixed</Item>
-                <Item key='32'>32-bit</Item>
+                <Item key='32-true'>32-bit</Item>
             </Picker>
             <Flex direction='column' gap='size-150' width='100%' justifyContent='end'>
                 <Flex direction='row' gap='size-100' alignItems='center'>
@@ -361,7 +359,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxSteps = 10000 }: 
     const [batchSize, setBatchSize] = useState<number>(8);
     const [numWorkers, setNumWorkers] = useState<Key | null>('auto');
     const [autoScaleBatchSize, setAutoScaleBatchSize] = useState<boolean>(bestDevice?.type === 'cuda');
-    const [precision, setPrecision] = useState<Key | null>('default');
+    const [precision, setPrecision] = useState<Key | null>(bestDevice?.type === 'cuda' ? 'bf16-mixed' : '32-true');
     const [compileModel, setCompileModel] = useState<boolean>(false);
 
     const trainMutation = $api.useMutation('post', '/api/jobs:train', {
@@ -386,7 +384,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxSteps = 10000 }: 
             batch_size: batchSize,
             num_workers: numWorkers === 'auto' ? 'auto' : Number(numWorkers),
             auto_scale_batch_size: autoScaleBatchSize,
-            precision: (precision?.toString() ?? 'default') as SchemaJob['payload']['precision'],
+            precision: (precision?.toString() ?? 'bf16-mixed') as SchemaJob['payload']['precision'],
             compile_model: compileModel,
             val_split: 0.1,
             ...extraPayload,

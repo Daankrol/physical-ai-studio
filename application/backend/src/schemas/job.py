@@ -10,11 +10,14 @@ from schemas.hardware import DeviceType
 
 
 class TrainingPrecision(StrEnum):
-    """Supported training precision modes."""
+    """Supported training precision modes.
 
-    DEFAULT = "default"
+    Values align with Lightning's precision strings and can be passed
+    directly to ``Trainer(precision=...)``.
+    """
+
+    FP32 = "32-true"
     BF16_MIXED = "bf16-mixed"
-    FULL_32 = "32"
 
 
 class JobList(BaseModel):
@@ -75,7 +78,7 @@ class TrainJobPayload(BaseModel):
     )
     device: TrainingDevice | None = Field(default=None, description="Target training device (auto-detected if null)")
     precision: TrainingPrecision = Field(
-        default=TrainingPrecision.DEFAULT, description="Training precision mode ('default', 'bf16-mixed', '32')"
+        default=TrainingPrecision.BF16_MIXED, description="Training precision ('32-true', 'bf16-mixed')"
     )
     compile_model: bool = Field(default=False, description="Enable torch.compile for supported policies")
 
