@@ -18,6 +18,7 @@ class TrainingPrecision(StrEnum):
 
     FP32 = "32-true"
     BF16_MIXED = "bf16-mixed"
+    BF16_TRUE = "bf16-true"
 
 
 class JobList(BaseModel):
@@ -67,7 +68,8 @@ class TrainJobPayload(BaseModel):
     batch_size: int = Field(default=8, ge=1, le=256, description="Training batch size")
     num_workers: int | Literal["auto"] = Field(default="auto", description="DataLoader workers ('auto' or 0-16)")
     auto_scale_batch_size: bool = Field(
-        default=False, description="Run batch-size finder before training (power scaling)"
+        default=False,
+        description="Run batch-size finder before training (power scaling)",
     )
     base_model_id: UUID | None = Field(default=None, description="Model ID to resume training from")
     val_split: float = Field(
@@ -78,7 +80,8 @@ class TrainJobPayload(BaseModel):
     )
     device: TrainingDevice | None = Field(default=None, description="Target training device (auto-detected if null)")
     precision: TrainingPrecision = Field(
-        default=TrainingPrecision.BF16_MIXED, description="Training precision ('32-true', 'bf16-mixed')"
+        default=TrainingPrecision.BF16_MIXED,
+        description="Training precision ('32-true', 'bf16-mixed')",
     )
     compile_model: bool = Field(default=False, description="Enable torch.compile for supported policies")
 

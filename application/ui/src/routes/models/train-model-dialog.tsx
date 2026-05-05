@@ -204,6 +204,7 @@ interface TrainingParametersProps {
     compileModel: boolean;
     onCompileModelChange: (value: boolean) => void;
     isAutoScaleBatchDisabled: boolean;
+    deviceType: string | undefined;
 }
 
 const TrainingParameters = ({
@@ -220,6 +221,7 @@ const TrainingParameters = ({
     compileModel,
     onCompileModelChange,
     isAutoScaleBatchDisabled,
+    deviceType,
 }: TrainingParametersProps) => (
     <Flex direction='column' gap='size-150' width='100%'>
         <Flex direction='row' gap='size-150' width='100%'>
@@ -303,7 +305,7 @@ const TrainingParameters = ({
         <Flex direction='row' gap='size-150' width='100%'>
             <Picker
                 width='100%'
-                label='Precision'
+                label={deviceType ? `Precision (recommended for ${deviceType.toUpperCase()})` : 'Precision'}
                 selectedKey={precision}
                 onSelectionChange={onPrecisionChange}
                 contextualHelp={
@@ -312,14 +314,15 @@ const TrainingParameters = ({
                          <Content>
                             <Text>
                                 Controls numerical precision during training. BF16 Mixed uses half-precision where
-                                safe for faster training and lower memory usage. 32-bit uses full precision for maximum
-                                numerical stability.
+                                safe for faster training and lower memory usage. BF16 True runs entirely in BF16
+                                for maximum speed. 32-bit uses full precision for maximum numerical stability.
                             </Text>
                         </Content>
                     </ContextualHelp>
                 }
             >
                 <Item key='bf16-mixed'>BF16 Mixed</Item>
+                <Item key='bf16-true'>BF16 True</Item>
                 <Item key='32-true'>32-bit</Item>
             </Picker>
             <Flex direction='column' gap='size-150' width='100%' justifyContent='end'>
@@ -457,6 +460,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxSteps = 10000 }: 
                                     compileModel={compileModel}
                                     onCompileModelChange={setCompileModel}
                                     isAutoScaleBatchDisabled={bestDevice?.type !== 'cuda'}
+                                    deviceType={bestDevice?.type}
                                 />
                             </DisclosurePanel>
                         </Disclosure>
