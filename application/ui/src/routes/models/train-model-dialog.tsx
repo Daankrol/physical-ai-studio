@@ -318,9 +318,7 @@ const TrainingParameters = ({
                 label='Precision'
                 description={
                     deviceType
-                        ? `${PRECISION_LABELS[RECOMMENDED_PRECISION[deviceType] ?? '32-true']} recommended for ${
-                              deviceType.toUpperCase()
-                          }`
+                        ? `${PRECISION_LABELS[RECOMMENDED_PRECISION[deviceType] ?? '32-true']} recommended for ${deviceType.toUpperCase()}`
                         : undefined
                 }
                 selectedKey={precision}
@@ -328,11 +326,11 @@ const TrainingParameters = ({
                 contextualHelp={
                     <ContextualHelp variant='info'>
                         <Heading>Training precision</Heading>
-                         <Content>
+                        <Content>
                             <Text>
-                                Controls numerical precision during training. BF16 Mixed uses half-precision where
-                                safe for faster training and lower memory usage. BF16 True runs entirely in BF16
-                                for maximum speed. 32-bit uses full precision for maximum numerical stability.
+                                Controls numerical precision during training. BF16 Mixed uses half-precision where safe
+                                for faster training and lower memory usage. BF16 True runs entirely in BF16 for maximum
+                                speed. 32-bit uses full precision for maximum numerical stability.
                             </Text>
                         </Content>
                     </ContextualHelp>
