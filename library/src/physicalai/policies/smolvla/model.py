@@ -1168,37 +1168,83 @@ class VLAFlowMatching(nn.Module):
             state=state,
         )
 
-        fm_losses = self._forward_fm(
-            images,
-            img_masks,
-            lang_tokens,
-            lang_masks,
-            state,
-            actions,
-            noise,
-            time,
-            prefix_embs,
-            prefix_pad_masks,
-            prefix_att_masks,
-        )
-
         bsize = actions.shape[0]
         device = actions.device
         fm_mask = torch.rand(bsize, device=device) < self._snapflow_alpha
+        fm_idx = fm_mask.nonzero(as_tuple=True)[0]
+        cd_idx = (~fm_mask).nonzero(as_tuple=True)[0]
 
-        x_1 = self._sample_noise(actions.shape, actions.device)
-        t1 = torch.ones(bsize, dtype=torch.float32, device=device)
-        with torch.no_grad():
-            v_1 = self._predict_velocity(x_1, t1, t1, prefix_embs, prefix_pad_masks, prefix_att_masks)
-            x_half = x_1 - 0.5 * v_1
-            t_half = torch.full((bsize,), 0.5, dtype=torch.float32, device=device)
-            v_half = self._predict_velocity(x_half, t_half, t_half, prefix_embs, prefix_pad_masks, prefix_att_masks)
-            v_target = 0.5 * (v_1 + v_half)
+        losses = torch.zeros(
+            bsize,
+            actions.shape[1],
+            actions.shape[2],
+            device=device,
+            dtype=actions.dtype,
+        )
 
-        t_zero = torch.zeros(bsize, dtype=torch.float32, device=device)
-        v_pred = self._predict_velocity(x_1, t1, t_zero, prefix_embs, prefix_pad_masks, prefix_att_masks)
-        consistency_losses = F.mse_loss(v_pred, v_target.detach(), reduction="none")
-        return torch.where(fm_mask[:, None, None], fm_losses, self._snapflow_lambda * consistency_losses)
+        if fm_idx.numel() > 0:
+            fm_losses = self._forward_fm(
+                images,
+                img_masks,
+                lang_tokens,
+                lang_masks,
+                state,
+                actions[fm_idx],
+                noise[fm_idx],
+                time[fm_idx],
+                prefix_embs[fm_idx],
+                prefix_pad_masks[fm_idx],
+                prefix_att_masks[fm_idx],
+            )
+            losses[fm_idx] = fm_losses
+
+        if cd_idx.numel() > 0:
+            cd_actions_shape = (cd_idx.numel(), *actions.shape[1:])
+            x_1 = self._sample_noise(cd_actions_shape, device)
+            cd_prefix_embs = prefix_embs[cd_idx]
+            cd_prefix_pad_masks = prefix_pad_masks[cd_idx]
+            cd_prefix_att_masks = prefix_att_masks[cd_idx]
+            cd_bsize = cd_idx.numel()
+
+            with torch.no_grad():
+                t1 = torch.ones(cd_bsize, dtype=torch.float32, device=device)
+                v_1 = self._predict_velocity(
+                    x_1,
+                    t1,
+                    t1,
+                    cd_prefix_embs,
+                    cd_prefix_pad_masks,
+                    cd_prefix_att_masks,
+                )
+                x_half = x_1 - 0.5 * v_1
+                t_half = torch.full((cd_bsize,), 0.5, dtype=torch.float32, device=device)
+                v_half = self._predict_velocity(
+                    x_half,
+                    t_half,
+                    t_half,
+                    cd_prefix_embs,
+                    cd_prefix_pad_masks,
+                    cd_prefix_att_masks,
+                )
+                v_target = 0.5 * (v_1 + v_half)
+
+            t_zero = torch.zeros(cd_bsize, dtype=torch.float32, device=device)
+            t1 = torch.ones(cd_bsize, dtype=torch.float32, device=device)
+            v_pred = self._predict_velocity(
+                x_1,
+                t1,
+                t_zero,
+                cd_prefix_embs,
+                cd_prefix_pad_masks,
+                cd_prefix_att_masks,
+            )
+            losses[cd_idx] = self._snapflow_lambda * F.mse_loss(
+                v_pred,
+                v_target.detach(),
+                reduction="none",
+            )
+
+        return losses
 
     def sample_actions(  # noqa: PLR0914
         self,
