@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import {
     Button,
@@ -190,6 +190,16 @@ const TrainingDeviceInfo = () => {
     );
 };
 
+const RECOMMENDED_PRECISION: Record<string, string> = {
+    cuda: 'bf16-mixed',
+};
+
+const PRECISION_LABELS: Record<string, string> = {
+    'bf16-mixed': 'BF16 Mixed',
+    'bf16-true': 'BF16 True',
+    '32-true': '32-bit',
+};
+
 interface TrainingParametersProps {
     maxSteps: number;
     onMaxStepsChange: (value: number) => void;
@@ -305,7 +315,14 @@ const TrainingParameters = ({
         <Flex direction='row' gap='size-150' width='100%'>
             <Picker
                 width='100%'
-                label={deviceType ? `Precision (recommended for ${deviceType.toUpperCase()})` : 'Precision'}
+                label='Precision'
+                description={
+                    deviceType
+                        ? `${PRECISION_LABELS[RECOMMENDED_PRECISION[deviceType] ?? '32-true']} recommended for ${
+                              deviceType.toUpperCase()
+                          }`
+                        : undefined
+                }
                 selectedKey={precision}
                 onSelectionChange={onPrecisionChange}
                 contextualHelp={
@@ -325,7 +342,7 @@ const TrainingParameters = ({
                 <Item key='bf16-true'>BF16 True</Item>
                 <Item key='32-true'>32-bit</Item>
             </Picker>
-            <Flex direction='column' gap='size-150' width='100%' justifyContent='end'>
+            <Flex direction='column' gap='size-150' width='100%' justifyContent='center'>
                 <Flex direction='row' gap='size-100' alignItems='center'>
                     <Checkbox isSelected={compileModel} onChange={onCompileModelChange}>
                         Compile model
@@ -364,6 +381,13 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxSteps = 10000 }: 
     const [autoScaleBatchSize, setAutoScaleBatchSize] = useState<boolean>(bestDevice?.type === 'cuda');
     const [precision, setPrecision] = useState<Key | null>(bestDevice?.type === 'cuda' ? 'bf16-mixed' : '32-true');
     const [compileModel, setCompileModel] = useState<boolean>(false);
+
+    useEffect(() => {
+        if (bestDevice?.type === 'cuda') {
+            setPrecision('bf16-mixed');
+            setAutoScaleBatchSize(true);
+        }
+    }, [bestDevice]);
 
     const trainMutation = $api.useMutation('post', '/api/jobs:train', {
         meta: {
