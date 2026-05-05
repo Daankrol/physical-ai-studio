@@ -318,7 +318,9 @@ const TrainingParameters = ({
                 label='Precision'
                 description={
                     deviceType
-                        ? `${PRECISION_LABELS[RECOMMENDED_PRECISION[deviceType] ?? '32-true']} recommended for ${deviceType.toUpperCase()}`
+                        ? `${
+                              PRECISION_LABELS[RECOMMENDED_PRECISION[deviceType] ?? '32-true']
+                          } recommended for ${deviceType.toUpperCase()}`
                         : undefined
                 }
                 selectedKey={precision}
