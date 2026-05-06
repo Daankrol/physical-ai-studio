@@ -36,23 +36,33 @@ class ActionChunking(InferenceRunner):
     enqueued and one is returned.  Subsequent calls pop from the queue
     without running inference.
 
+    When ``rtc_max_delay > 0``, enables Training-Time Real-Time Chunking
+    (TT-RTC): inference is triggered early — when the queue has
+    ``rtc_max_delay`` or fewer actions remaining — and the remaining
+    actions are passed as ``action_prefix`` to condition the next chunk.
+    Only the newly generated postfix actions are enqueued, avoiding
+    duplicate execution of prefix actions.
+
     Args:
         runner: The inner runner to delegate inference to.
         chunk_size: Number of actions per chunk.  Must match the inner
             runner's output temporal dimension.
         action_key: Key in the runner output dict that holds the action
             tensor.  Defaults to ``"action"``.
+        rtc_max_delay: Maximum prefix length for TT-RTC conditioning.
+            0 disables TT-RTC (default).
+        action_dim: Action dimension (required when ``rtc_max_delay > 0``
+            to construct the padded prefix tensor).
 
     Examples:
-        Wrap a single-pass runner with action chunking:
+        Standard action chunking (no RTC):
 
         >>> runner = ActionChunking(SinglePass(), chunk_size=10)
-        >>> outputs = runner.run(adapter, inputs)  # runs inference, queues 10 actions
-        >>> outputs = runner.run(adapter, inputs)  # pops from queue, no inference
+        >>> outputs = runner.run(adapter, inputs)
 
-        Compose with any runner (e.g. future flow-matching):
+        With TT-RTC conditioning:
 
-        >>> runner = ActionChunking(FlowMatching(num_steps=20), chunk_size=5)
+        >>> runner = ActionChunking(SinglePass(), chunk_size=50, rtc_max_delay=10, action_dim=7)
     """
 
     def __init__(
@@ -60,17 +70,14 @@ class ActionChunking(InferenceRunner):
         runner: InferenceRunner,
         chunk_size: int = 1,
         action_key: str = ACTION,
+        rtc_max_delay: int = 0,
+        action_dim: int = 0,
     ) -> None:
-        """Initialize with an inner runner and chunk configuration.
-
-        Args:
-            runner: The inner runner to wrap.
-            chunk_size: Number of actions per chunk.
-            action_key: Key for the action tensor in the output dict.
-        """
         self.runner = runner
         self.chunk_size = chunk_size
         self.action_key = action_key
+        self.rtc_max_delay = rtc_max_delay
+        self.action_dim = action_dim
         self._action_queue: deque[np.ndarray] = deque()
 
     def run(
@@ -78,7 +85,23 @@ class ActionChunking(InferenceRunner):
         adapter: RuntimeAdapter,
         inputs: dict[str, np.ndarray],
     ) -> dict[str, np.ndarray]:
-        """Return the next action, running inference only when the queue is empty.
+        """Return the next action, running inference when the queue runs low.
+
+        Without TT-RTC (``rtc_max_delay=0``): inference runs when the
+        queue is empty.
+
+        With TT-RTC: inference runs when the queue has
+        ``rtc_max_delay`` or fewer items remaining.  The remaining
+        actions are injected as ``action_prefix`` and ``delay`` into
+        the model inputs so the denoiser conditions on them.
+
+        .. note::
+
+            Currently synchronous — the call blocks while inference
+            runs.  A future optimization could trigger inference
+            asynchronously (e.g. in a background thread) when the
+            queue crosses the delay threshold, so the robot keeps
+            executing queued actions while the next chunk is computed.
 
         Args:
             adapter: The loaded runtime adapter.
@@ -88,6 +111,9 @@ class ActionChunking(InferenceRunner):
             Output dict with a single action of shape
             ``(batch_size, action_dim)``.
         """
+        if self.rtc_max_delay > 0:
+            return self._run_with_rtc(adapter, inputs)
+
         if len(self._action_queue) > 0:
             return {self.action_key: self._action_queue.popleft()}
 
@@ -95,6 +121,47 @@ class ActionChunking(InferenceRunner):
         actions = outputs[self.action_key]
 
         batch_actions = np.transpose(actions, (1, 0, 2))
+        self._action_queue.extend(batch_actions)
+
+        return {self.action_key: self._action_queue.popleft()}
+
+    def _run_with_rtc(
+        self,
+        adapter: RuntimeAdapter,
+        inputs: dict[str, np.ndarray],
+    ) -> dict[str, np.ndarray]:
+        queue_len = len(self._action_queue)
+
+        if queue_len > self.rtc_max_delay:
+            return {self.action_key: self._action_queue.popleft()}
+
+        delay = queue_len
+
+        if delay > 0:
+            remaining = list(self._action_queue)
+            # remaining is list of (batch, action_dim) arrays
+            prefix_actions = np.stack(remaining, axis=0)  # (delay, batch, action_dim)
+            prefix_actions = np.transpose(prefix_actions, (1, 0, 2))  # (batch, delay, action_dim)
+            batch_size = prefix_actions.shape[0]
+
+            # Pad to full chunk_size along temporal axis
+            pad_width = self.chunk_size - delay
+            action_prefix = np.pad(
+                prefix_actions,
+                ((0, 0), (0, pad_width), (0, 0)),
+                mode="constant",
+                constant_values=0.0,
+            )  # (batch, chunk_size, action_dim)
+
+            inputs = {**inputs, "action_prefix": action_prefix, "delay": np.array(delay)}
+        outputs = self.runner.run(adapter, inputs)
+        actions = outputs[self.action_key]  # (batch, chunk_size, action_dim)
+
+        # Discard prefix echo, keep only postfix
+        postfix_actions = actions[:, delay:]  # (batch, chunk_size - delay, action_dim)
+        batch_actions = np.transpose(postfix_actions, (1, 0, 2))
+
+        self._action_queue.clear()
         self._action_queue.extend(batch_actions)
 
         return {self.action_key: self._action_queue.popleft()}

@@ -364,12 +364,16 @@ class TestModelUtilities:
             _create_sinusoidal_pos_embedding(time, 65, min_period=4e-3, max_period=4.0, device=time.device)
 
     def test_create_sinusoidal_pos_embedding_wrong_ndim(self) -> None:
-        """Test sinusoidal embedding raises for wrong ndim."""
+        """Test sinusoidal embedding raises for 3D+ input but accepts 2D (per-token)."""
         from physicalai.policies.pi05.model import _create_sinusoidal_pos_embedding
 
-        time = torch.tensor([[0.5]])  # 2D instead of 1D
+        time_2d = torch.tensor([[0.5]])
+        result = _create_sinusoidal_pos_embedding(time_2d, 64, min_period=4e-3, max_period=4.0, device=time_2d.device)
+        assert result.ndim == 3
+
+        time_3d = torch.tensor([[[0.5]]])
         with pytest.raises(ValueError, match="batch_size"):
-            _create_sinusoidal_pos_embedding(time, 64, min_period=4e-3, max_period=4.0, device=time.device)
+            _create_sinusoidal_pos_embedding(time_3d, 64, min_period=4e-3, max_period=4.0, device=time_3d.device)
 
     def test_sample_beta(self) -> None:
         """Test sample_beta returns correct shape."""
@@ -760,6 +764,7 @@ class TestSampleInput:
         class _Stub:
             def __init__(self, stats: dict) -> None:
                 self._dataset_stats = stats
+                self._enable_training_time_rtc = False
                 # sample_input only reads device from this module's parameters.
                 self.paligemma_with_expert = torch.nn.Linear(1, 1)
 
@@ -1111,3 +1116,113 @@ class TestPi05ExtraExportArgs:
             assert types.index("normalize") < types.index("pi05"), (
                 f"{backend}: normalize must precede pi05, got {types}"
             )
+
+
+class TestTrainingTimeRTC:
+    def test_rtc_config_defaults(self) -> None:
+        """Test TT-RTC configuration defaults."""
+        config = Pi05Config()
+        assert config.enable_training_time_rtc is False
+        assert config.rtc_max_delay == 10
+        assert config.rtc_delay_sampling == "uniform"
+
+    def test_rtc_config_validation(self) -> None:
+        """Test TT-RTC delay validation against chunk size."""
+        with pytest.raises(ValueError, match="rtc_max_delay"):
+            Pi05Config(enable_training_time_rtc=True, rtc_max_delay=60)
+
+    def test_sample_rtc_delay_uniform(self) -> None:
+        """Test uniform TT-RTC delay sampling stays within bounds."""
+        max_delay = 10
+        delays = torch.randint(0, max_delay + 1, (100,))
+
+        assert delays.min() >= 0
+        assert delays.max() <= max_delay
+
+    def test_sample_rtc_delay_exponential(self) -> None:
+        """Test exponential TT-RTC delay sampling favors zero delay."""
+        max_delay = 10
+        weights = torch.tensor([2.0 ** (-i) for i in range(max_delay + 1)])
+        torch.manual_seed(0)
+        delays = torch.multinomial(weights.expand(10_000, -1), 1).squeeze(-1)
+        counts = torch.bincount(delays, minlength=max_delay + 1)
+
+        assert delays.min() >= 0
+        assert delays.max() <= max_delay
+        assert counts.argmax().item() == 0
+
+    def test_rtc_prefix_mask_construction(self) -> None:
+        """Test TT-RTC prefix mask construction from known delays."""
+        chunk_size = 5
+        delay = torch.tensor([0, 2, 4])
+
+        prefix_mask = torch.arange(chunk_size)[None, :] < delay[:, None]
+        expected = torch.tensor([
+            [False, False, False, False, False],
+            [True, True, False, False, False],
+            [True, True, True, True, False],
+        ])
+
+        torch.testing.assert_close(prefix_mask, expected)
+
+    def test_rtc_time_per_token(self) -> None:
+        """Test TT-RTC per-token times zero out prefix positions."""
+        prefix_mask = torch.tensor([
+            [True, True, False, False],
+            [False, True, False, True],
+        ])
+        time = torch.tensor([0.3, 0.8])
+
+        time_per_token = torch.where(prefix_mask, 0.0, time[:, None])
+        expected = torch.tensor([
+            [0.0, 0.0, 0.3, 0.3],
+            [0.8, 0.0, 0.8, 0.0],
+        ])
+
+        torch.testing.assert_close(time_per_token, expected)
+
+    def test_rtc_clean_prefix_in_xt(self) -> None:
+        """Test TT-RTC clean prefixes remain equal to actions in x_t."""
+        actions = torch.tensor([
+            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+            [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]],
+        ])
+        noise = torch.tensor([
+            [[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]],
+            [[70.0, 80.0], [90.0, 100.0], [110.0, 120.0]],
+        ])
+        time_per_token = torch.tensor([
+            [0.0, 0.0, 0.5],
+            [0.0, 0.25, 0.75],
+        ])
+
+        x_t = time_per_token[..., None] * noise + (1 - time_per_token[..., None]) * actions
+
+        torch.testing.assert_close(x_t[0, 0], actions[0, 0])
+        torch.testing.assert_close(x_t[0, 1], actions[0, 1])
+        torch.testing.assert_close(x_t[1, 0], actions[1, 0])
+
+    def test_rtc_postfix_loss_masking(self) -> None:
+        """Test TT-RTC loss masking keeps only postfix token losses."""
+        losses = torch.tensor([
+            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+            [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]],
+        ])
+        prefix_mask = torch.tensor([
+            [True, False, False],
+            [True, True, False],
+        ])
+        postfix_mask = (~prefix_mask).unsqueeze(-1)
+        scalar_postfix_mask = postfix_mask.expand_as(losses)
+
+        masked_losses = losses * postfix_mask
+        loss = masked_losses.sum() / scalar_postfix_mask.sum().clamp_min(1)
+
+        expected_masked_losses = torch.tensor([
+            [[0.0, 0.0], [3.0, 4.0], [5.0, 6.0]],
+            [[0.0, 0.0], [0.0, 0.0], [11.0, 12.0]],
+        ])
+        expected_loss = torch.tensor((3.0 + 4.0 + 5.0 + 6.0 + 11.0 + 12.0) / 6.0)
+
+        torch.testing.assert_close(masked_losses, expected_masked_losses)
+        torch.testing.assert_close(loss, expected_loss)

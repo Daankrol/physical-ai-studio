@@ -145,6 +145,10 @@ class Pi05(ExportablePolicyMixin, Policy):
         train_expert_only: bool = False,
         # Normalization
         normalization_mode: Literal["MEAN_STD", "QUANTILES"] = "QUANTILES",
+        # Training-Time RTC
+        enable_training_time_rtc: bool = False,
+        rtc_max_delay: int = 10,
+        rtc_delay_sampling: Literal["uniform", "exponential"] = "uniform",
         # Optimizer
         optimizer_lr: float = 2.5e-5,
         optimizer_betas: tuple[float, float] = (0.9, 0.95),
@@ -210,6 +214,9 @@ class Pi05(ExportablePolicyMixin, Policy):
                 freeze_vision_encoder=freeze_vision_encoder,
                 train_expert_only=train_expert_only,
                 normalization_mode=normalization_mode,
+                enable_training_time_rtc=enable_training_time_rtc,
+                rtc_max_delay=rtc_max_delay,
+                rtc_delay_sampling=rtc_delay_sampling,
                 optimizer_lr=optimizer_lr,
                 optimizer_betas=optimizer_betas,
                 optimizer_eps=optimizer_eps,
@@ -264,6 +271,9 @@ class Pi05(ExportablePolicyMixin, Policy):
             gradient_checkpointing=self.config.gradient_checkpointing,
             compile_model=self.config.compile_model,
             use_random_input_noise=self.config.use_random_input_noise,
+            enable_training_time_rtc=self.config.enable_training_time_rtc,
+            rtc_max_delay=self.config.rtc_max_delay,
+            rtc_delay_sampling=self.config.rtc_delay_sampling,
         )
         if weights_file is not None:
             # load raw state dict
@@ -554,6 +564,78 @@ class Pi05(ExportablePolicyMixin, Policy):
         return self.model.compute_val_loss(processed_batch)
 
     @torch.no_grad()
+    def select_action(self, batch: Observation) -> torch.Tensor:
+        """Select action with TT-RTC prefix conditioning when enabled.
+
+        When TT-RTC is enabled and the action queue has remaining items
+        (up to ``rtc_max_delay``), those items are passed as
+        ``action_prefix`` to condition the next chunk prediction.
+        Only the newly generated postfix actions are enqueued.
+
+        Args:
+            batch: Input observation batch.
+
+        Returns:
+            Single action tensor.
+        """
+        if not self.config.enable_training_time_rtc:
+            return super().select_action(batch)
+
+        queued = self._get_queued_action()
+        if queued is not None and len(self._action_queue) >= self.config.rtc_max_delay:
+            return queued
+
+        # Re-insert the popped action if we're going to re-infer
+        remaining_actions: list[torch.Tensor] = []
+        if queued is not None:
+            remaining_actions.append(queued)
+        while len(self._action_queue) > 0:
+            remaining_actions.append(self._action_queue.popleft())
+
+        delay = len(remaining_actions)
+        action_prefix: torch.Tensor | None = None
+
+        if delay > 0:
+            action_prefix = torch.stack(remaining_actions, dim=0)  # (delay, *action_shape)
+            if action_prefix.dim() == 2:  # noqa: PLR2004
+                action_prefix = action_prefix.unsqueeze(0)  # (1, delay, D)
+            # Pad to chunk_size along temporal axis
+            pad_size = self.config.chunk_size - delay
+            if pad_size > 0:
+                action_prefix = torch.nn.functional.pad(action_prefix, (0, 0, 0, pad_size))
+
+        actions = self._predict_action_chunk_with_prefix(batch, action_prefix, delay)
+
+        # Discard prefix echo, enqueue only postfix
+        if actions.dim() == 3:  # noqa: PLR2004
+            postfix = actions[:, delay:]
+            self._action_queue.extend(postfix.transpose(0, 1))
+        else:
+            postfix = actions[delay:]
+            self._action_queue.extend(postfix)
+
+        return self._action_queue.popleft()
+
+    @torch.no_grad()
+    def _predict_action_chunk_with_prefix(
+        self,
+        batch: Observation,
+        action_prefix: torch.Tensor | None,
+        delay: int,
+    ) -> torch.Tensor:
+        if self.model is None or self._preprocessor is None or self._postprocessor is None:
+            msg = "Model is not initialized"
+            raise ValueError(msg)
+
+        processed_batch = self._preprocessor(batch.to(self.device).to_dict())
+        if action_prefix is not None:
+            processed_batch["action_prefix"] = action_prefix.to(self.device)
+            processed_batch["delay"] = delay
+        actions = self.model.predict_action_chunk(processed_batch)
+
+        return self._postprocessor({ACTION: actions})[ACTION]
+
+    @torch.no_grad()
     def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
         """Predict a chunk of actions from observation.
 
@@ -658,6 +740,19 @@ class Pi05(ExportablePolicyMixin, Policy):
             list[str | ExportBackend]: A list of supported export backends.
         """
         return [ExportBackend.TORCH, ExportBackend.OPENVINO]
+
+    @property
+    def metadata_extra(self) -> dict[str, Any]:
+        """Return extra metadata for policy export."""
+        meta: dict[str, Any] = {
+            "chunk_size": self.config.chunk_size,
+            "use_action_queue": True,
+        }
+        if self.config.enable_training_time_rtc:
+            original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1]) if self._dataset_stats else 0
+            meta["rtc_max_delay"] = self.config.rtc_max_delay
+            meta["rtc_action_dim"] = original_action_dim
+        return meta
 
     @property
     def extra_export_args(self) -> dict[str, ExportParameters]:

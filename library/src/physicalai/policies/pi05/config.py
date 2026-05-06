@@ -68,6 +68,14 @@ class Pi05Config(Config):
         scheduler_decay_lr: Final learning rate after decay. Defaults to 2.5e-6.
         use_random_input_noise: Whether to use random noise as the initial input for the denoising process
             during inference. If False, zeros are used instead. Defaults to False.
+        enable_training_time_rtc: Enable Training-Time Real-Time Chunking. When True, simulates
+            inference delay at training time by conditioning on action prefixes, eliminating
+            inference-time inpainting overhead. See arXiv:2512.05964. Defaults to False.
+        rtc_max_delay: Maximum simulated inference delay in action timesteps for TT-RTC.
+            Must be less than chunk_size. Defaults to 10.
+        rtc_delay_sampling: Distribution for sampling delays during TT-RTC training.
+            "uniform" samples from [0, rtc_max_delay). "exponential" uses exponentially
+            decreasing weights for higher delays. Defaults to "uniform".
     """
 
     paligemma_variant: Literal["gemma_300m", "gemma_2b"] = "gemma_2b"
@@ -116,6 +124,11 @@ class Pi05Config(Config):
 
     use_random_input_noise: bool = True
 
+    # Training-Time Real-Time Chunking (TT-RTC)
+    enable_training_time_rtc: bool = False
+    rtc_max_delay: int = 10
+    rtc_delay_sampling: Literal["uniform", "exponential"] = "uniform"
+
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization.
 
@@ -136,4 +149,8 @@ class Pi05Config(Config):
 
         if self.dtype not in {"bfloat16", "float32"}:
             msg = f"Invalid dtype: {self.dtype}"
+            raise ValueError(msg)
+
+        if self.rtc_max_delay >= self.chunk_size:
+            msg = f"rtc_max_delay ({self.rtc_max_delay}) must be less than chunk_size ({self.chunk_size})"
             raise ValueError(msg)

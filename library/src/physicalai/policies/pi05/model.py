@@ -85,9 +85,13 @@ def _create_sinusoidal_pos_embedding(
         msg = f"dimension ({dimension}) must be divisible by 2"
         raise ValueError(msg)
 
-    if time.ndim != 1:
-        msg = "The time tensor is expected to be of shape `(batch_size, )`."
+    if time.ndim not in (1, 2):
+        msg = "The time tensor is expected to be of shape `(batch_size,)` or `(batch_size, seq_len)`."
         raise ValueError(msg)
+
+    original_shape = time.shape
+    if time.ndim == 2:  # noqa: PLR2004
+        time = time.flatten()
 
     dtype = (
         torch.float32
@@ -99,7 +103,12 @@ def _create_sinusoidal_pos_embedding(
 
     scaling_factor = 1.0 / period * 2 * math.pi
     sin_input = scaling_factor[None, :] * time[:, None]
-    return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
+    result = torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
+
+    if len(original_shape) == 2:  # noqa: PLR2004
+        result = result.reshape(*original_shape, dimension)
+
+    return result
 
 
 def _sample_beta(
@@ -568,6 +577,9 @@ class Pi05Model(ExportableModelMixin, Model):
         gradient_checkpointing: bool = False,
         compile_model: bool = False,
         use_random_input_noise: bool = False,
+        enable_training_time_rtc: bool = False,
+        rtc_max_delay: int = 10,
+        rtc_delay_sampling: Literal["uniform", "exponential"] = "uniform",
     ) -> None:
         """Initialize Pi05Model.
 
@@ -614,6 +626,9 @@ class Pi05Model(ExportableModelMixin, Model):
         self._image_resolution = image_resolution
         self._tokenizer_max_length = tokenizer_max_length
         self._use_random_input_noise = use_random_input_noise
+        self._enable_training_time_rtc = enable_training_time_rtc
+        self._rtc_max_delay = rtc_max_delay
+        self._rtc_delay_sampling = rtc_delay_sampling
 
         paligemma_config = get_gemma_config(paligemma_variant)
         action_expert_config = get_gemma_config(action_expert_variant)
@@ -696,6 +711,11 @@ class Pi05Model(ExportableModelMixin, Model):
                     )
 
         sample_input[TASK] = "sample_task"
+
+        if self._enable_training_time_rtc:
+            action_shape = cast("tuple", self._dataset_stats[ACTION]["shape"])
+            sample_input["action_prefix"] = torch.zeros(1, self._chunk_size, action_shape[-1], device=device)
+            sample_input["delay"] = torch.tensor(0, device=device)
 
         return sample_input
 
@@ -812,6 +832,26 @@ class Pi05Model(ExportableModelMixin, Model):
         time = time_beta * self._time_sampling_scale + self._time_sampling_offset
         return time.to(dtype=torch.float32, device=device)
 
+    def _sample_rtc_delay(self, bsize: int, device: torch.device) -> Tensor:
+        """Sample RTC delay per batch item for training-time action conditioning.
+
+        Args:
+            bsize: Batch size.
+            device: Device to create tensor on.
+
+        Returns:
+            Integer delay tensor of shape ``(bsize,)`` in ``[0, rtc_max_delay]``.
+        """
+        if self._rtc_delay_sampling == "uniform":
+            return torch.randint(0, self._rtc_max_delay + 1, (bsize,), device=device)
+        # Exponential: higher delays get geometrically less weight
+        weights = torch.tensor(
+            [2.0 ** (-i) for i in range(self._rtc_max_delay + 1)],
+            device=device,
+        )
+        indices = torch.multinomial(weights.expand(bsize, -1), 1).squeeze(-1)
+        return indices
+
     def embed_prefix(
         self,
         images: Tensor,
@@ -868,12 +908,19 @@ class Pi05Model(ExportableModelMixin, Model):
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Embed noisy_actions and timestep for Expert Gemma processing.
 
+        Args:
+            noisy_actions: Noisy action chunk of shape (B, H, action_dim).
+            timestep: Flow matching timestep(s). Shape (B,) for uniform time
+                across all tokens, or (B, H) for per-token time (TT-RTC).
+
         Returns:
             Tuple of (embeddings, padding masks, attention masks, adarms conditioning).
         """
         embs = []
         pad_masks = []
         att_masks = []
+
+        per_token = timestep.ndim == 2  # noqa: PLR2004
 
         time_emb = _create_sinusoidal_pos_embedding(
             timestep,
@@ -895,7 +942,13 @@ class Pi05Model(ExportableModelMixin, Model):
             x = self.time_mlp_out(x)
             return F.silu(x)
 
-        time_emb = self._apply_checkpoint(time_mlp_func, time_emb)
+        if per_token:
+            bsize, seq_len, dim = time_emb.shape
+            time_emb_flat = time_emb.reshape(bsize * seq_len, dim)
+            time_emb_flat = self._apply_checkpoint(time_mlp_func, time_emb_flat)
+            time_emb = time_emb_flat.reshape(bsize, seq_len, -1)
+        else:
+            time_emb = self._apply_checkpoint(time_mlp_func, time_emb)
         action_time_emb = action_emb
         adarms_cond = time_emb
 
@@ -966,12 +1019,31 @@ class Pi05Model(ExportableModelMixin, Model):
         noise = self.sample_noise(actions.shape, actions.device)
         time = self.sample_time(actions.shape[0], actions.device)
 
-        time_expanded = time[:, None, None]
-        x_t = time_expanded * noise + (1 - time_expanded) * actions
-        u_t = noise - actions
+        prefix_mask: Tensor | None = None
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, time)
+        if self._enable_training_time_rtc:
+            bsize = actions.shape[0]
+            delay = self._sample_rtc_delay(bsize, actions.device)
+
+            prefix_mask = torch.arange(self._chunk_size, device=actions.device)[None, :] < delay[:, None]
+
+            # Per-token time: prefix gets t=0 (clean actions), postfix gets sampled t
+            # In this codebase: t=0 → clean, t=1 → pure noise
+            time_per_token = torch.where(prefix_mask, torch.zeros_like(time[:, None]), time[:, None])
+
+            time_expanded = time_per_token[:, :, None]
+            x_t = time_expanded * noise + (1 - time_expanded) * actions
+            u_t = noise - actions
+
+            prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+            suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, time_per_token)
+        else:
+            time_expanded = time[:, None, None]
+            x_t = time_expanded * noise + (1 - time_expanded) * actions
+            u_t = noise - actions
+
+            prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+            suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, time)
 
         if (
             self.paligemma_with_expert.paligemma.model.language_model.layers[0].self_attn.q_proj.weight.dtype
@@ -1028,7 +1100,13 @@ class Pi05Model(ExportableModelMixin, Model):
         original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1])
         losses = losses[:, :, :original_action_dim]
 
-        loss = losses.mean()
+        if self._enable_training_time_rtc:
+            postfix_mask = ~prefix_mask
+            losses = losses * postfix_mask[:, :, None].float()
+            num_postfix_elements = postfix_mask.sum() * original_action_dim
+            loss = losses.sum() / (num_postfix_elements + 1e-8)
+        else:
+            loss = losses.mean()
         return loss, {"loss": loss.item()}
 
     @torch.no_grad()
@@ -1066,6 +1144,8 @@ class Pi05Model(ExportableModelMixin, Model):
         Args:
             batch: Preprocessed batch dict containing IMAGES, IMAGE_MASKS,
                 TOKENIZED_PROMPT, and TOKENIZED_PROMPT_MASK.
+                Optionally ``"action_prefix"`` and ``"delay"`` for TT-RTC
+                inference conditioning.
 
         Returns:
             Denoised action tensor, unpadded and clipped to n_action_steps.
@@ -1074,7 +1154,16 @@ class Pi05Model(ExportableModelMixin, Model):
         img_masks = batch[IMAGE_MASKS]
         tokens = batch[TOKENIZED_PROMPT]
         masks = batch[TOKENIZED_PROMPT_MASK]
-        actions = self.sample_actions(images, img_masks, tokens, masks)
+        action_prefix = batch.get("action_prefix")
+        delay = batch.get("delay", 0)
+        actions = self.sample_actions(
+            images,
+            img_masks,
+            tokens,
+            masks,
+            action_prefix=action_prefix,
+            delay=delay,
+        )
 
         # Unpad actions to actual action dimension
         original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1])
@@ -1096,8 +1185,15 @@ class Pi05Model(ExportableModelMixin, Model):
         masks: Tensor,
         noise: Tensor | None = None,
         num_steps: int | None = None,
+        action_prefix: Tensor | None = None,
+        delay: int | Tensor = 0,
     ) -> Tensor:
         """Inference forward pass: sample actions via iterative denoising.
+
+        Args:
+            action_prefix: Ground-truth action prefix of shape ``(B, H, D)``
+                for TT-RTC conditioning. Only the first ``delay`` tokens are used.
+            delay: Number of prefix action tokens to condition on.
 
         Returns:
             Denoised action tensor.
@@ -1129,19 +1225,35 @@ class Pi05Model(ExportableModelMixin, Model):
 
         dt = -1.0 / num_steps
 
+        use_rtc = action_prefix is not None and (isinstance(delay, Tensor) or delay > 0)
+        delay_int = int(delay) if isinstance(delay, Tensor) else delay
+
+        if use_rtc:
+            prefix_mask = torch.arange(self._chunk_size, device=device)[None, :] < delay_int
+
         x_t = noise
         for step in range(num_steps):
             time = 1.0 + step * dt
-            time_tensor = torch.tensor(time, dtype=torch.float32, device=device).expand(bsize)
+
+            if use_rtc:
+                x_t[:, :delay_int] = action_prefix[:, :delay_int]
+                time_per_token = torch.full((bsize, self._chunk_size), time, device=device)
+                time_per_token[:, :delay_int] = 0.0
+                timestep = time_per_token
+            else:
+                timestep = torch.tensor(time, dtype=torch.float32, device=device).expand(bsize)
 
             v_t = self.denoise_step(
                 prefix_pad_masks=prefix_pad_masks,
                 past_key_values=past_key_values,
                 x_t=x_t,
-                timestep=time_tensor,
+                timestep=timestep,
             )
 
             x_t += dt * v_t
+
+        if use_rtc:
+            x_t[:, :delay_int] = action_prefix[:, :delay_int]
 
         return x_t
 

@@ -129,11 +129,15 @@ class ExportablePolicyMixin:
         postprocessors_specs: list[ComponentSpec] = metadata.get("postprocessors", [])
 
         if use_action_queue:
-            runner = ComponentSpec.from_class(
-                ActionChunking,
-                runner=ComponentSpec.from_class(SinglePass),
-                chunk_size=chunk_size,
-            )
+            action_chunking_kwargs: dict[str, Any] = {
+                "runner": ComponentSpec.from_class(SinglePass),
+                "chunk_size": chunk_size,
+            }
+            rtc_max_delay = metadata.get("rtc_max_delay", 0)
+            if rtc_max_delay > 0:
+                action_chunking_kwargs["rtc_max_delay"] = rtc_max_delay
+                action_chunking_kwargs["action_dim"] = metadata.get("rtc_action_dim", 0)
+            runner = ComponentSpec.from_class(ActionChunking, **action_chunking_kwargs)
         else:
             runner = ComponentSpec.from_class(SinglePass)
 

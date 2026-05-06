@@ -138,7 +138,7 @@ class PiGemmaRMSNorm(nn.Module):
             msg = f"Expected cond dim {self.cond_dim}, got {cond.shape[-1]}"
             raise ValueError(msg)
         modulation = self.dense(cond)
-        if len(x.shape) == 3:  # noqa: PLR2004
+        if modulation.ndim == 2 and len(x.shape) == 3:  # noqa: PLR2004
             modulation = modulation.unsqueeze(1)
         scale, shift, gate = modulation.chunk(3, dim=-1)
         normed = normed * (1 + scale.float()) + shift.float()
