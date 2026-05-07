@@ -327,6 +327,35 @@ def _build_synthetic_model(*, rtc_enabled: bool, variant: str, dtype: str, devic
     return model
 
 
+def _build_synthetic_batch(
+    model: Any,
+    *,
+    device: torch.device,
+    rtc_enabled: bool,
+) -> dict[str, Any]:
+    """Build a complete preprocessed batch with all keys predict_action_chunk expects."""
+    from physicalai.data.constants import IMAGE_MASKS, IMAGES, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK  # noqa: PLC0415
+
+    num_images = 1
+    image_resolution = model._image_resolution if hasattr(model, "_image_resolution") else (224, 224)
+    tokenizer_max_length = model._tokenizer_max_length if hasattr(model, "_tokenizer_max_length") else 200
+
+    batch: dict[str, Any] = {
+        IMAGES: torch.randn(1, num_images, 3, *image_resolution, device=device),
+        IMAGE_MASKS: torch.ones(1, num_images, dtype=torch.bool, device=device),
+        TOKENIZED_PROMPT: torch.ones(1, tokenizer_max_length, dtype=torch.long, device=device),
+        TOKENIZED_PROMPT_MASK: torch.ones(1, tokenizer_max_length, dtype=torch.bool, device=device),
+    }
+
+    if rtc_enabled:
+        chunk_size = model._chunk_size
+        action_dim = int(model._dataset_stats["action"]["shape"][-1])
+        batch["action_prefix"] = torch.zeros(1, chunk_size, action_dim, device=device)
+        batch["delay"] = torch.tensor(5, device=device)
+
+    return batch
+
+
 def run_inference_benchmark(
     *,
     rtc_enabled: bool,
@@ -357,18 +386,7 @@ def run_inference_benchmark(
             device=device,
         )
 
-        batch = model.sample_input
-
-        if rtc_enabled and "action_prefix" not in batch:
-            chunk_size = model._chunk_size
-            action_dim = int(model._dataset_stats["action"]["shape"][-1])
-            batch["action_prefix"] = torch.zeros(
-                1,
-                chunk_size,
-                action_dim,
-                device=device,
-            )
-            batch["delay"] = torch.tensor(5, device=device)
+        batch = _build_synthetic_batch(model, device=device, rtc_enabled=rtc_enabled)
 
         total_iters = warmup_iterations + num_iterations
         latencies: list[float] = []
