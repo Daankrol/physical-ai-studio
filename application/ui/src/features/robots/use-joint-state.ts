@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import useWebSocket from 'react-use-websocket';
-import { degToRad } from 'three/src/math/MathUtils.js';
 
 import { fetchClient } from '../../api/client';
-import { useRobotModels } from './robot-models-context';
+import { mapJointToURDFJoint, useRobotModels } from './robot-models-context';
+import { SchemaRobotType } from './robot-types';
+import { urdfPathForType } from './robots-configuration';
 
 type JointsState = Array<{
     name: string;
@@ -27,30 +28,18 @@ const getNewJointState = (newJoints: StateWasUpdatedEvent['state']) => {
     });
 };
 
-export const useSynchronizeModelJoints = (joints: JointsState, urdfPath: string) => {
+export const useSynchronizeModelJoints = (joints: JointsState, robotType: SchemaRobotType) => {
     const { getModel } = useRobotModels();
+    const urdfPath = urdfPathForType(robotType);
     const model = getModel(urdfPath);
-
-    function removeSuffix(str: string, suffix: string): string {
-        return str.endsWith(suffix) ? str.slice(0, -suffix.length) : str;
-    }
 
     useEffect(() => {
         if (!model) return;
 
         joints.forEach((joint) => {
-            const name = removeSuffix(joint.name, '.pos');
-
-            if (name === 'gripper' && model.robotName == 'wxai') {
-                model.setJointValue('left_carriage_joint', joint.value); // meters
-                return;
-            }
-
-            if (model.joints[name]) {
-                model.setJointValue(name, degToRad(joint.value));
-            }
+            mapJointToURDFJoint(joint, model, robotType);
         });
-    }, [model, joints]);
+    }, [model, joints, robotType]);
 };
 
 export const useJointState = (project_id: string, robot_id: string) => {

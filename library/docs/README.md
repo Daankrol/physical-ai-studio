@@ -23,7 +23,7 @@ physicalai fit --config configs/physicalai/act.yaml
 
 # Benchmark
 physicalai benchmark \
-    --benchmark physicalai.benchmark.LiberoBenchmark \
+    --benchmark physicalai.benchmark.gyms.LiberoBenchmark \
     --policy physicalai.policies.ACT \
     --ckpt_path ./checkpoints/model.ckpt
 
@@ -35,3 +35,21 @@ policy.export("./exports", backend="openvino")
 
 - **[Library README](../README.md)** - Installation and overview
 - **[Main Repository](../../README.md)** - Project overview
+
+## Pyrefly baseline
+
+The library uses a Pyrefly baseline file (`pyrefly-baseline.json`) to track known
+existing type-check errors while still failing on newly introduced issues.
+
+Common commands from the `library/` directory:
+
+```bash
+# Run Pyrefly with the configured baseline
+uv run pyrefly check -c pyproject.toml
+
+# Regenerate/update the baseline after intentional typing changes
+uv run pyrefly check -c pyproject.toml --baseline="pyrefly-baseline.json" --update-baseline
+```
+
+When updating the baseline, include a short note in your PR explaining why the
+baseline changed and which error categories were added or removed.

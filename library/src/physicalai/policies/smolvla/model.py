@@ -20,13 +20,6 @@ from torch import nn
 from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.observation import ACTION, EXTRA, IMAGES, STATE, TASK, FeatureType
 from physicalai.export import ExportableModelMixin
-from physicalai.export.backends import (
-    ExportParameters,
-    ONNXExportParameters,
-    OpenVINOExportParameters,
-    TorchExportParameters,
-)
-from physicalai.inference.manifest import ComponentSpec
 from physicalai.policies.base import Model
 
 if TYPE_CHECKING:
@@ -71,7 +64,6 @@ class SmolVLAModel(ExportableModelMixin, Model):
         chunk_size: int = 50,
         max_state_dim: int = 32,
         max_action_dim: int = 32,
-        resize_imgs_with_padding: tuple[int, int] | None = (512, 512),
         adapt_to_pi_aloha: bool = False,
         empty_cameras: int = 0,
         num_steps: int = 10,
@@ -92,6 +84,7 @@ class SmolVLAModel(ExportableModelMixin, Model):
         max_period: float = 4.0,
         use_random_input_noise: bool = True,
         tokenizer_max_length: int = 48,
+        compile_model: bool = False,
     ) -> None:
         """Initialize the SmolVLA model.
 
@@ -102,7 +95,6 @@ class SmolVLAModel(ExportableModelMixin, Model):
             chunk_size: Size of action chunks for prediction.
             max_state_dim: Maximum dimension for state vectors; shorter vectors will be padded.
             max_action_dim: Maximum dimension for action vectors; shorter vectors will be padded.
-            resize_imgs_with_padding: Target size (height, width) for image preprocessing with padding.
             adapt_to_pi_aloha: Whether to convert joint and gripper values from standard Aloha space
                 to pi internal runtime space.
             empty_cameras: Number of empty camera slots to append as placeholder images.
@@ -125,16 +117,17 @@ class SmolVLAModel(ExportableModelMixin, Model):
             use_random_input_noise: Whether to use random noise as the initial input for the
                 denoising process during inference. If False, zeros are used instead.
             tokenizer_max_length: Maximum token length for the tokenizer. Default: 48.
+            compile_model: Whether to apply torch.compile to the model.
         """
         super().__init__()
         self._chunk_size = chunk_size
         self._max_state_dim = max_state_dim
         self._max_action_dim = max_action_dim
-        self._resize_imgs_with_padding = resize_imgs_with_padding
         self._adapt_to_pi_aloha = adapt_to_pi_aloha
         self._empty_cameras = empty_cameras
         self._tokenizer_max_length = tokenizer_max_length
         self._vlm_model_name = vlm_model_name
+        self._tokenizer_max_length = tokenizer_max_length
         self._model = VLAFlowMatching(
             chunk_size=chunk_size,
             max_state_dim=max_state_dim,
@@ -158,6 +151,12 @@ class SmolVLAModel(ExportableModelMixin, Model):
             use_random_input_noise=use_random_input_noise,
         )
         self._dataset_stats = dataset_stats
+
+        if compile_model:
+            torch.set_float32_matmul_precision("high")
+            compile_mode = "default"
+            self.predict_action_chunk = torch.compile(self.predict_action_chunk, mode=compile_mode)  # type: ignore[method-assign]
+            self.forward = torch.compile(self.forward, mode=compile_mode)  # type: ignore[method-assign]
 
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
         """Forward pass for the SmolVLA model.
@@ -309,13 +308,15 @@ class SmolVLAModel(ExportableModelMixin, Model):
 
         sample_input = {}
 
-        num_image_features = sum(1 for key in self._dataset_stats if "image" in key)
+        num_image_features = sum(
+            1 for key in self._dataset_stats if str(FeatureType.VISUAL) in self._dataset_stats[key]["type"]
+        )
 
         for feature_id in self._dataset_stats:
             if STATE in feature_id:
                 state_feature = self._dataset_stats[feature_id]
                 sample_input[STATE] = torch.randn(1, *cast("tuple", state_feature["shape"]), device=device)
-            elif "image" in feature_id:
+            elif str(FeatureType.VISUAL) in self._dataset_stats[feature_id]["type"]:
                 image_feature = self._dataset_stats[feature_id]
                 if num_image_features == 1:
                     sample_input[IMAGES] = torch.randn(1, *cast("tuple", image_feature["shape"]), device=device)
@@ -329,75 +330,6 @@ class SmolVLAModel(ExportableModelMixin, Model):
         sample_input[TASK] = ["sample_task"]
 
         return sample_input
-
-    @property
-    def extra_export_args(self) -> dict[str, ExportParameters]:
-        """Additional export arguments for model conversion.
-
-        This property provides extra configuration parameters needed when exporting
-        the model to different formats (ONNX, OpenVINO, and PyTorch).
-
-        Returns:
-            dict[str, ExportParameters]: A dictionary mapping format names to their export parameters.
-            Supported formats: 'onnx', 'openvino', 'torch'.
-
-        Example:
-            >>> model = SmolVLA(input_features, output_features)
-            >>> export_args = model.extra_export_args
-            >>> onnx_args = export_args['onnx']
-            >>> print(onnx_args.exporter_kwargs)
-            {'output_names': ['action']}
-        """
-        extra_args: dict[str, ExportParameters] = {}
-        base_preproc_specs = [
-            ComponentSpec(type="smolvla_resize", image_resolution=self._resize_imgs_with_padding),
-            ComponentSpec(type="new_line"),
-            ComponentSpec(
-                type="normalize",
-                stats={STATE: self._dataset_stats[f"observation.{STATE}"]},
-                mode="mean_std",
-            ),
-        ]
-        postproc_specs = [
-            ComponentSpec(
-                type="denormalize",
-                stats={ACTION: self._dataset_stats[ACTION]},
-                mode="mean_std",
-            ),
-        ]
-        extra_args["onnx"] = ONNXExportParameters(
-            exporter_kwargs={
-                "output_names": [ACTION],
-            },
-            preprocessors_specs=[
-                *base_preproc_specs,
-                ComponentSpec(
-                    type="hf_tokenizer",
-                    tokenizer_name=self._vlm_model_name,
-                    revision="7b375e1b73b11138ff12fe22c8f2822d8fe03467",
-                    max_token_len=self._tokenizer_max_length,
-                ),
-            ],
-            postprocessors_specs=postproc_specs,
-            export_tokenizer=False,
-        )
-        extra_args["openvino"] = OpenVINOExportParameters(
-            outputs=[ACTION],
-            compress_to_fp16=False,
-            export_tokenizer=True,
-            exporter_kwargs={},
-            preprocessors_specs=[
-                *base_preproc_specs,
-                ComponentSpec(
-                    type="ov_tokenizer",
-                    artifact="tokenizer.xml",
-                ),
-            ],
-            postprocessors_specs=postproc_specs,
-        )
-        extra_args["torch"] = TorchExportParameters()
-
-        return extra_args
 
     @property
     def reward_delta_indices(self) -> None:
@@ -427,6 +359,10 @@ class SmolVLAModel(ExportableModelMixin, Model):
             list[int]: A list of relative observation indices.
         """
         return [0]
+
+    def set_dataset_stats(self, dataset_stats: dict) -> None:
+        """Update dataset statistics used for normalization."""
+        self._dataset_stats = dataset_stats
 
     def _preprocess_batch(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         if self._adapt_to_pi_aloha:
@@ -458,6 +394,7 @@ class SmolVLAModel(ExportableModelMixin, Model):
 
     @staticmethod
     def _pi_aloha_encode_actions(actions: torch.Tensor) -> torch.Tensor:
+        actions = actions.clone()
         # Flip the joints.
         for motor_idx in [1, 2, 8, 9]:
             actions[:, :, motor_idx] *= -1
@@ -468,6 +405,7 @@ class SmolVLAModel(ExportableModelMixin, Model):
 
     @staticmethod
     def _pi_aloha_encode_actions_inv(actions: torch.Tensor) -> torch.Tensor:
+        actions = actions.clone()
         # Flip the joints again.
         for motor_idx in [1, 2, 8, 9]:
             actions[:, :, motor_idx] *= -1
@@ -925,6 +863,16 @@ class VLAFlowMatching(nn.Module):
         embs = []
         pad_masks = []
         att_masks = []
+
+        batched_embs = torch.empty(0)
+        if not self.add_image_special_tokens:
+            num_cameras = images.shape[0]
+            bsize = images.shape[1]
+            imgs_flat = images.reshape(num_cameras * bsize, *images.shape[2:])
+            batched_embs = self.vlm_with_expert.embed_image(imgs_flat)
+            num_img_embs = batched_embs.shape[1]
+            batched_embs = batched_embs.reshape(num_cameras, bsize, num_img_embs, -1)
+
         for _img_idx, (
             img,
             img_mask,
@@ -945,8 +893,9 @@ class VLAFlowMatching(nn.Module):
                 att_masks += [0] * (image_start_mask.shape[-1])
                 embs.append(image_start_token)
                 pad_masks.append(image_start_mask)
-
-            img_emb = self.vlm_with_expert.embed_image(img)
+                img_emb = self.vlm_with_expert.embed_image(img)
+            else:
+                img_emb = batched_embs[_img_idx]
 
             # Normalize image embeddings
             img_emb_dim = img_emb.shape[-1]
@@ -1209,7 +1158,7 @@ class VLAFlowMatching(nn.Module):
         num_steps = self._num_steps
         dt = -1.0 / num_steps
 
-        x_t = noise
+        x_t = noise.clone()
         for step in range(num_steps):
             time = 1.0 + step * dt
             time_tensor = torch.tensor(time, dtype=torch.float32, device=device).expand(bsize)
@@ -1334,7 +1283,7 @@ class _SmolVLMWithExpertModel(nn.Module):
         num_vlm_layers: int = -1,
         self_attn_every_n_layers: int = -1,
         expert_width_multiplier: float = 0.5,
-        device: str = "auto",
+        device: str | None = None,
     ) -> None:
         super().__init__()
 
@@ -1671,7 +1620,7 @@ class _SmolVLMWithExpertModel(nn.Module):
             )
             att_outputs.append(att_output)
         else:
-            expert_position_id = position_ids
+            expert_position_id = position_ids.clone()
 
         if use_cache:
             if past_key_values is None:

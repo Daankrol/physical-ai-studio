@@ -1,12 +1,13 @@
+from typing import Literal
+
 from physicalai.robot.so101 import SO101, SO101Calibration
+from physicalai.robot.trossen import BimanualWidowXAI, WidowXAI
 
 from exceptions import ResourceNotFoundError, ResourceType
+from robots.physicalai_adapter import PhysicalAIRobotAdapter, PhysicalAIRobotAdapterConfig
 from robots.robot_client import RobotClient
-from robots.so101.adapter import SO101Adapter
-from robots.widowxai.trossen_widowx_ai_follower import TrossenWidowXAIFollower
-from robots.widowxai.trossen_widowx_ai_leader import TrossenWidowXAILeader
 from schemas.calibration import Calibration
-from schemas.robot import NetworkIpRobotConfig, Robot, RobotType
+from schemas.robot import Robot, RobotType, SO101Robot, TrossenBimanualRobot
 from services.robot_calibration_service import RobotCalibrationService, find_robot_port
 from utils.serial_robot_tools import RobotConnectionManager
 
@@ -26,19 +27,31 @@ class RobotClientFactory:
     async def build(self, robot: Robot) -> RobotClient:
         match robot.type:
             case RobotType.TROSSEN_WIDOWXAI_FOLLOWER:
-                config = NetworkIpRobotConfig(
-                    type="follower",
+                robot_driver = WidowXAI(ip=robot.payload.connection_string, role="follower")
+                return PhysicalAIRobotAdapter(
+                    robot=robot_driver,
                     robot_type=RobotType.TROSSEN_WIDOWXAI_FOLLOWER,
-                    connection_string=robot.connection_string,
+                    config=PhysicalAIRobotAdapterConfig(
+                        include_velocities=True,
+                        goal_time_scale=1.0,
+                        external_effort_gain=0.1,
+                    ),
                 )
-                return TrossenWidowXAIFollower(config=config)
             case RobotType.TROSSEN_WIDOWXAI_LEADER:
-                config = NetworkIpRobotConfig(
-                    type="leader",
+                robot_driver = WidowXAI(ip=robot.payload.connection_string, role="leader")
+                return PhysicalAIRobotAdapter(
+                    robot=robot_driver,
                     robot_type=RobotType.TROSSEN_WIDOWXAI_LEADER,
-                    connection_string=robot.connection_string,
+                    config=PhysicalAIRobotAdapterConfig(
+                        include_velocities=True,
+                        goal_time_scale=1.0,
+                        external_effort_gain=0.1,
+                    ),
                 )
-                return TrossenWidowXAILeader(config=config)
+            case RobotType.TROSSEN_BIMANUAL_WIDOWXAI_FOLLOWER:
+                return self._build_bimanual_widowxai(robot, mode="follower")
+            case RobotType.TROSSEN_BIMANUAL_WIDOWXAI_LEADER:
+                return self._build_bimanual_widowxai(robot, mode="leader")
             case RobotType.SO101_FOLLOWER:
                 return await self._build_so101(robot)
             case RobotType.SO101_LEADER:
@@ -46,17 +59,38 @@ class RobotClientFactory:
             case _:
                 raise ValueError(f"Unsupported robot type: {robot.type}")
 
-    async def _build_so101(self, robot: Robot) -> SO101Adapter:
+    @staticmethod
+    def _build_bimanual_widowxai(
+        robot: TrossenBimanualRobot, mode: Literal["follower", "leader"]
+    ) -> PhysicalAIRobotAdapter:
+        left_driver = WidowXAI(ip=robot.payload.connection_string_left, role=mode)
+        right_driver = WidowXAI(ip=robot.payload.connection_string_right, role=mode)
+        bimanual_robot = BimanualWidowXAI(left=left_driver, right=right_driver)
+        robot_type = (
+            RobotType.TROSSEN_BIMANUAL_WIDOWXAI_FOLLOWER
+            if mode == "follower"
+            else RobotType.TROSSEN_BIMANUAL_WIDOWXAI_LEADER
+        )
+        return PhysicalAIRobotAdapter(
+            robot=bimanual_robot,
+            robot_type=robot_type,
+            config=PhysicalAIRobotAdapterConfig(
+                include_velocities=True,
+                goal_time_scale=1.0,
+                external_effort_gain=0.1,
+            ),
+        )
+
+    async def _build_so101(self, robot: SO101Robot) -> PhysicalAIRobotAdapter:
         port = await self._find_robot_port(robot)
         calibration = await self._get_robot_calibration(robot)
 
         if calibration is None:
-            raise ResourceNotFoundError(ResourceType.ROBOT_CALIBRATION, robot.serial_number)
+            raise ResourceNotFoundError(ResourceType.ROBOT_CALIBRATION, robot.payload.serial_number)
         if port is None:
-            raise ResourceNotFoundError(ResourceType.ROBOT, robot.serial_number)
+            raise ResourceNotFoundError(ResourceType.ROBOT, robot.payload.serial_number)
 
-        mode = "follower" if robot.type == RobotType.SO101_FOLLOWER else "teleoperator"
-        role = "follower" if mode == "follower" else "leader"
+        role = "follower" if robot.type == RobotType.SO101_FOLLOWER else "leader"
 
         so101_cal = SO101Calibration.from_dict(
             {
@@ -71,17 +105,25 @@ class RobotClientFactory:
             }
         )
 
-        so101 = SO101(port=port, calibration=so101_cal, role=role)
-        return SO101Adapter(robot=so101, mode=mode, calibration=calibration)
+        so101 = SO101(port=port, calibration=so101_cal, role=role, unit="normalized")
+        return PhysicalAIRobotAdapter(
+            robot=so101,
+            robot_type=robot.type,
+            config=PhysicalAIRobotAdapterConfig(
+                include_velocities=False,
+                goal_time_scale=1.0,
+                external_effort_gain=None,
+            ),
+        )
 
-    async def _find_robot_port(self, robot: Robot) -> str:
+    async def _find_robot_port(self, robot: SO101Robot) -> str:
         port = await find_robot_port(self.robot_manager, robot)
         if port is None:
-            raise ResourceNotFoundError(ResourceType.ROBOT, robot.serial_number)
+            raise ResourceNotFoundError(ResourceType.ROBOT, robot.payload.serial_number)
 
         return port
 
-    async def _get_robot_calibration(self, robot: Robot) -> Calibration | None:
+    async def _get_robot_calibration(self, robot: SO101Robot) -> Calibration | None:
         if robot.active_calibration_id is None:
             return None
 

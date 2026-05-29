@@ -2,20 +2,32 @@ import { createContext, ReactNode, useCallback, useContext, useRef, useState } f
 
 import { useMutation } from '@tanstack/react-query';
 import * as THREE from 'three';
+import { degToRad } from 'three/src/math/MathUtils.js';
 import URDFLoader, { URDFRobot } from 'urdf-loader';
 
-import { SchemaRobotType } from '../../api/openapi-spec';
+import { SchemaRobotType } from './robot-types';
+import { ROBOT_TYPE_TO_URDF_MAP } from './robots-configuration';
 
 // ---------------------------------------------------------------------------
 // Path resolution
 // ---------------------------------------------------------------------------
 
-/** Resolve a `SchemaRobotType` to its URDF asset path. */
-export const urdfPathForType = (robotType: SchemaRobotType): string => {
-    if (robotType !== undefined && robotType.toLowerCase().includes('trossen')) {
-        return '/widowx/urdf/generated/wxai/wxai_follower.urdf';
+export const mapJointToURDFJoint = (
+    joint: { name: string; value: number },
+    model: URDFRobot,
+    robotType: SchemaRobotType
+) => {
+    if (!joint.name.endsWith('.pos')) {
+        return;
     }
-    return '/SO101/so101_new_calib.urdf';
+    const modelJointMap = ROBOT_TYPE_TO_URDF_MAP[robotType];
+    const modelJoints = modelJointMap[joint.name] ?? [];
+
+    modelJoints.forEach((modelJointName) => {
+        const isRevolute = model.joints[modelJointName].jointType === 'revolute';
+
+        model.setJointValue(modelJointName, isRevolute ? degToRad(joint.value) : joint.value); // meters
+    });
 };
 
 /**

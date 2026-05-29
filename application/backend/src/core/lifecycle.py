@@ -7,6 +7,7 @@ from loguru import logger
 from core.logging import setup_logging, setup_uvicorn_logging
 from services.event_processor import EventProcessor
 from settings import get_settings
+from utils.multiprocessing import ensure_spawn_start_method
 from utils.serial_robot_tools import RobotConnectionManager
 from workers.camera_worker_registry import CameraWorkerRegistry
 from workers.model_worker_registry import ModelWorkerRegistry
@@ -25,6 +26,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     settings = get_settings()
     app.state.settings = settings
 
+    # Camera fingerprints locked by an active recording/teleop session.
+    # Mutated by the robot_control WS handler; checked by camera CRUD and
+    # camera-stream WS endpoints. Keyed by fingerprint (not ProjectCamera ID)
+    # so aliased project rows for the same physical device share one lock.
+    app.state.recording_locked_camera_fingerprints = set()
+
     app.state.camera_registry = CameraWorkerRegistry(
         max_workers=10,
         shutdown_timeout_s=10.0,
@@ -35,6 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     )
 
     logger.info("Starting %s application...", settings.app_name)
+    ensure_spawn_start_method()
     app_scheduler = Scheduler()
     app_scheduler.start_workers()
 

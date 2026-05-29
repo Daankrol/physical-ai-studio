@@ -3,16 +3,18 @@ from .calibration import CalibrationConfig
 from .camera import Camera, CameraProfile
 from .dataset import Dataset, Episode, EpisodeInfo, EpisodeVideo, LeRobotDatasetInfo, Snapshot
 from .hardware import DeviceInfo, DeviceType
-from .job import Job, TrainJob
-from .model import Model
+from .job import DatasetImportJob, Job, TrainJob
+from .model import BackendExportDetail, Model, ModelDetailResponse
 from .project import Project
 from .robot import LeRobotConfig, NetworkIpRobotConfig, Robot, SerialPortInfo
 
 __all__ = [
+    "BackendExportDetail",
     "CalibrationConfig",
     "Camera",
     "CameraProfile",
     "Dataset",
+    "DatasetImportJob",
     "DeviceInfo",
     "DeviceType",
     "Episode",
@@ -24,6 +26,7 @@ __all__ = [
     "LeRobotConfig",
     "LeRobotDatasetInfo",
     "Model",
+    "ModelDetailResponse",
     "NetworkIpRobotConfig",
     "Project",
     "Robot",

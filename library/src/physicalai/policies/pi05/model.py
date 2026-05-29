@@ -18,15 +18,8 @@ from torch import Tensor, nn
 from transformers.cache_utils import DynamicCache
 
 from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
-from physicalai.data.observation import ACTION, IMAGES, STATE, TASK
+from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, FeatureType
 from physicalai.export import ExportableModelMixin
-from physicalai.export.backends import (
-    ExportParameters,
-    ONNXExportParameters,
-    OpenVINOExportParameters,
-    TorchExportParameters,
-)
-from physicalai.inference.manifest import ComponentSpec
 from physicalai.policies.base import Model
 
 from .pi_gemma import (
@@ -350,8 +343,10 @@ class PaliGemmaWithExpertModel(nn.Module):
             adarms_cond_dim=action_expert_config.width if use_adarms[1] else None,
         )
 
-        self.paligemma = PaliGemmaForConditionalGenerationWithPiGemma(config=vlm_config_hf)
-        self.gemma_expert = PiGemmaForCausalLM(config=action_expert_config_hf)
+        self.paligemma = PaliGemmaForConditionalGenerationWithPiGemma(
+            config=vlm_config_hf,  # pyrefly: ignore[bad-argument-type]
+        )
+        self.gemma_expert = PiGemmaForCausalLM(config=action_expert_config_hf)  # pyrefly: ignore[bad-argument-type]
         self.gemma_expert.model.embed_tokens = None
 
         self.to_bfloat16_for_selected_params(precision)
@@ -418,7 +413,9 @@ class PaliGemmaWithExpertModel(nn.Module):
         image_outputs = self.paligemma.model.get_image_features(image)
         if not isinstance(image_outputs, torch.Tensor):
             image_outputs = image_outputs.pooler_output
-        features = image_outputs * self.paligemma.config.text_config.hidden_size**0.5
+        features = (
+            image_outputs * self.paligemma.config.text_config.hidden_size**0.5  # pyrefly: ignore[missing-attribute]
+        )
         if features.dtype != out_dtype:
             features = features.to(out_dtype)
         return features
@@ -479,7 +476,7 @@ class PaliGemmaWithExpertModel(nn.Module):
             prefix_past_key_values = None
         else:
             models = [self.paligemma.model.language_model, self.gemma_expert.model]
-            num_layers = self.paligemma.config.text_config.num_hidden_layers
+            num_layers = self.paligemma.config.text_config.num_hidden_layers  # pyrefly: ignore[missing-attribute]
 
             use_gradient_checkpointing = (
                 hasattr(self.gemma_expert.model, "gradient_checkpointing")
@@ -571,7 +568,6 @@ class Pi05Model(ExportableModelMixin, Model):
         gradient_checkpointing: bool = False,
         compile_model: bool = False,
         use_random_input_noise: bool = False,
-        normalization_mode: str = "quantiles",
     ) -> None:
         """Initialize Pi05Model.
 
@@ -599,7 +595,6 @@ class Pi05Model(ExportableModelMixin, Model):
             compile_model: Whether to use torch.compile.
             use_random_input_noise: Whether to use random noise as the initial input for the denoising
                 process during inference. If False, zeros are used instead.
-            normalization_mode: Normalization mode for action/state features (e.g. "quantiles", "mean_std").
 
         Raises:
             ValueError: If image resolution is not square.
@@ -619,13 +614,12 @@ class Pi05Model(ExportableModelMixin, Model):
         self._image_resolution = image_resolution
         self._tokenizer_max_length = tokenizer_max_length
         self._use_random_input_noise = use_random_input_noise
-        self._normalization_mode = normalization_mode
 
         paligemma_config = get_gemma_config(paligemma_variant)
         action_expert_config = get_gemma_config(action_expert_variant)
 
-        if image_resolution[0] != image_resolution[1]:
-            msg = f"PaliGemma expects square image resolution, invalid: {image_resolution}"
+        if self._image_resolution[0] != self._image_resolution[1]:
+            msg = f"PaliGemma expects square image resolution, invalid: {self._image_resolution}"
             raise ValueError(msg)
 
         self.paligemma_with_expert = PaliGemmaWithExpertModel(
@@ -633,7 +627,7 @@ class Pi05Model(ExportableModelMixin, Model):
             action_expert_config,
             use_adarms=[False, True],
             precision=dtype,
-            image_size=image_resolution[0],
+            image_size=self._image_resolution[0],
             freeze_vision_encoder=freeze_vision_encoder,
             train_expert_only=train_expert_only,
         )
@@ -643,6 +637,8 @@ class Pi05Model(ExportableModelMixin, Model):
 
         self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
         self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
+
+        self.enable_rtc = False
 
         self.gradient_checkpointing_enabled = False
         if gradient_checkpointing:
@@ -659,75 +655,6 @@ class Pi05Model(ExportableModelMixin, Model):
     def set_dataset_stats(self, dataset_stats: dict) -> None:
         """Update dataset statistics used for normalization."""
         self._dataset_stats = dataset_stats
-
-    @property
-    def extra_export_args(self) -> dict[str, ExportParameters]:
-        """Additional export arguments for model conversion.
-
-        This property provides extra configuration parameters needed when exporting
-        the model to different formats (ONNX, OpenVINO, and PyTorch).
-
-        Returns:
-            dict[str, ExportParameters]: A dictionary mapping format names to their export parameters.
-            Supported formats: 'onnx', 'openvino', 'torch'.
-
-        Example:
-            >>> model = Pi05(input_features, output_features)
-            >>> export_args = model.extra_export_args
-            >>> onnx_args = export_args['onnx']
-            >>> print(onnx_args.exporter_kwargs)
-            {'output_names': ['action']}
-        """
-        base_preproc_specs = [
-            ComponentSpec(type="pi05", image_resolution=self._image_resolution),
-            ComponentSpec(
-                type="normalize",
-                stats={STATE: self._dataset_stats[f"observation.{STATE}"]},
-                mode="mean_std",
-            ),
-        ]
-        postproc_specs = [
-            ComponentSpec(
-                type="denormalize",
-                stats={ACTION: self._dataset_stats[ACTION]},
-                mode=self._normalization_mode,
-            ),
-        ]
-        extra_args: dict[str, ExportParameters] = {}
-        extra_args["onnx"] = ONNXExportParameters(
-            exporter_kwargs={
-                "output_names": [ACTION],
-            },
-            export_tokenizer=False,
-            preprocessors_specs=[
-                *base_preproc_specs,
-                ComponentSpec(
-                    type="hf_tokenizer",
-                    tokenizer_name="google/paligemma-3b-pt-224",
-                    revision="35e4f46485b4d07967e7e9935bc3786aad50687c",
-                    max_token_len=self._tokenizer_max_length,
-                ),
-            ],
-            postprocessors_specs=postproc_specs,
-        )
-        extra_args["openvino"] = OpenVINOExportParameters(
-            outputs=[ACTION],
-            compress_to_fp16=True,
-            via_onnx=True,
-            export_tokenizer=True,
-            exporter_kwargs={},
-            preprocessors_specs=[
-                *base_preproc_specs,
-                ComponentSpec(
-                    type="ov_tokenizer",
-                    artifact="tokenizer.xml",
-                ),
-            ],
-            postprocessors_specs=postproc_specs,
-        )
-        extra_args["torch"] = TorchExportParameters()
-
-        return extra_args
 
     @property
     def sample_input(self) -> dict[str, torch.Tensor | str]:
@@ -751,13 +678,15 @@ class Pi05Model(ExportableModelMixin, Model):
 
         sample_input = {}
 
-        num_image_features = sum(1 for key in self._dataset_stats if "image" in key)
+        num_image_features = sum(
+            1 for key in self._dataset_stats if str(FeatureType.VISUAL) in self._dataset_stats[key]["type"]
+        )
 
         for feature_id in self._dataset_stats:
             if STATE in feature_id:
                 state_feature = self._dataset_stats[feature_id]
                 sample_input[STATE] = torch.randn(1, *cast("tuple", state_feature["shape"]), device=device)
-            elif "image" in feature_id:
+            elif str(FeatureType.VISUAL) in self._dataset_stats[feature_id]["type"]:
                 image_feature = self._dataset_stats[feature_id]
                 if num_image_features == 1:
                     sample_input[IMAGES] = torch.randn(1, *cast("tuple", image_feature["shape"]), device=device)
@@ -769,6 +698,20 @@ class Pi05Model(ExportableModelMixin, Model):
                     )
 
         sample_input[TASK] = "sample_task"
+
+        if self.enable_rtc:
+            max_action_dim = self._max_action_dim
+            chunk_size = self._chunk_size
+            sample_input["prev_chunk_left_over"] = torch.randn(
+                1,
+                chunk_size,
+                max_action_dim,
+                device=device,
+                dtype=torch.float32,
+            )
+            sample_input["inference_delay"] = torch.tensor(8, device=device, dtype=torch.long)
+            sample_input["max_guidance_weight"] = torch.tensor(10.0, device=device, dtype=torch.float32)
+            sample_input["execution_horizon"] = torch.tensor(10, device=device, dtype=torch.long)
 
         return sample_input
 
@@ -807,6 +750,12 @@ class Pi05Model(ExportableModelMixin, Model):
         self.paligemma_with_expert.paligemma.model.language_model.gradient_checkpointing = True
         self.paligemma_with_expert.paligemma.model.vision_tower.gradient_checkpointing = True
         self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = True
+        # Force eager attention on the vision tower so that SDPA/flash-attention
+        # ops do not appear inside checkpoint regions, which would otherwise
+        # cause a KeyError in the AOT autograd partitioner when torch.compile
+        # traces the backward graph (functionalize_rng_ops cannot map the
+        # _scaled_dot_product_flash_attention op between fwd/bwd graphs).
+        self.paligemma_with_expert.paligemma.model.vision_tower.config._attn_implementation = "eager"  # noqa: SLF001
         msg = "Enabled gradient checkpointing for Pi05Model"
         logger.info(msg)
 
@@ -841,7 +790,9 @@ class Pi05Model(ExportableModelMixin, Model):
         Returns:
             4D attention mask tensor.
         """
-        att_2d_masks_4d = att_2d_masks[:, None, :, :]
+        # .bool() is needed because JIT tracing promotes bool*bool → Long
+        # in _make_att_2d_masks, but torch.where requires a boolean condition.
+        att_2d_masks_4d = att_2d_masks[:, None, :, :].bool()
         return torch.where(att_2d_masks_4d, 0.0, OPENPI_ATTENTION_MASK_VALUE)
 
     def sample_noise(self, shape: tuple, device: torch.device) -> Tensor:
@@ -888,45 +839,66 @@ class Pi05Model(ExportableModelMixin, Model):
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Embed images with SigLIP and language tokens with embedding layer.
 
+        During inference or tracing (ONNX/OV export), batches all camera images
+        into a single encoder call for efficiency. During training, uses per-image
+        calls with gradient checkpointing support.
+
+        Args:
+            images: ``(num_cameras, batch, C, H, W)`` stacked image tensor.
+            img_masks: ``(num_cameras, batch)`` boolean camera masks.
+            tokens: ``(batch, seq_len)`` tokenized prompt.
+            masks: ``(batch, seq_len)`` prompt attention mask.
+
         Returns:
             Tuple of (embeddings, padding masks, attention masks).
         """
+        use_batched = not self.training
+
+        num_cameras = images.shape[0]
+        bsize = images.shape[1]
+
         embs = []
         pad_masks = []
-        att_masks = []
+        att_masks: list[int] = []
 
-        for img, img_mask in zip(images, img_masks, strict=True):
+        if use_batched:
+            # Single batched encoder call: [N*B, C, H, W]
+            imgs_flat = images.reshape(num_cameras * bsize, *images.shape[2:])
+            all_img_embs = self.paligemma_with_expert.embed_image(imgs_flat)
+            num_img_embs = all_img_embs.shape[1]
+            all_img_embs = all_img_embs.reshape(num_cameras, bsize, num_img_embs, -1)
 
-            def image_embed_func(img: Tensor) -> Tensor:
-                return self.paligemma_with_expert.embed_image(img)
+        for cam_idx in range(num_cameras):
+            if use_batched:
+                img_emb = all_img_embs[cam_idx]  # pyrefly: ignore[unbound-name]
+            else:
 
-            img_emb = self._apply_checkpoint(image_embed_func, img)
-            bsize, num_img_embs = img_emb.shape[:2]
+                def image_embed_func(img: Tensor) -> Tensor:
+                    return self.paligemma_with_expert.embed_image(img)
 
+                img_emb = self._apply_checkpoint(image_embed_func, images[cam_idx])
+
+            num_img_embs = img_emb.shape[1]
             embs.append(img_emb)
-            pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
+            pad_masks.append(img_masks[cam_idx][:, None].expand(bsize, num_img_embs))
             att_masks += [0] * num_img_embs
 
         def lang_embed_func(tokens: Tensor) -> Tensor:
             lang_emb = self.paligemma_with_expert.embed_language_tokens(tokens)
-            lang_emb_dim = lang_emb.shape[-1]
-            return lang_emb * math.sqrt(lang_emb_dim)
+            return lang_emb * math.sqrt(lang_emb.shape[-1])
 
-        lang_emb = self._apply_checkpoint(lang_embed_func, tokens)
+        lang_emb = lang_embed_func(tokens) if use_batched else self._apply_checkpoint(lang_embed_func, tokens)
+
         embs.append(lang_emb)
         pad_masks.append(masks)
+        att_masks += [0] * lang_emb.shape[1]
 
-        num_lang_embs = lang_emb.shape[1]
-        att_masks += [0] * num_lang_embs
+        embs_cat = torch.cat(embs, dim=1)
+        pad_masks_cat = torch.cat(pad_masks, dim=1)
+        att_masks_t = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks_cat.device)
+        att_masks_t = att_masks_t[None, :].expand(bsize, len(att_masks))
 
-        embs = torch.cat(embs, dim=1)
-        pad_masks = torch.cat(pad_masks, dim=1)
-        att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
-
-        bsize = pad_masks.shape[0]
-        att_masks = att_masks[None, :].expand(bsize, len(att_masks))
-
-        return embs, pad_masks, att_masks
+        return embs_cat, pad_masks_cat, att_masks_t
 
     def embed_suffix(
         self,
@@ -1132,7 +1104,9 @@ class Pi05Model(ExportableModelMixin, Model):
 
         Args:
             batch: Preprocessed batch dict containing IMAGES, IMAGE_MASKS,
-                TOKENIZED_PROMPT, and TOKENIZED_PROMPT_MASK.
+                TOKENIZED_PROMPT, and TOKENIZED_PROMPT_MASK. When ``self.enable_rtc``
+                is True, also expects RTC keys: ``prev_chunk_left_over``,
+                ``inference_delay``, ``max_guidance_weight``, and ``execution_horizon``.
 
         Returns:
             Denoised action tensor, unpadded and clipped to n_action_steps.
@@ -1141,7 +1115,23 @@ class Pi05Model(ExportableModelMixin, Model):
         img_masks = batch[IMAGE_MASKS]
         tokens = batch[TOKENIZED_PROMPT]
         masks = batch[TOKENIZED_PROMPT_MASK]
-        actions = self.sample_actions(images, img_masks, tokens, masks)
+
+        rtc_kwargs: dict[str, Any] = {}
+        if self.enable_rtc:
+            rtc_kwargs = {
+                "rtc_max_guidance": batch.get("max_guidance_weight", 0.0),
+                "rtc_execution_horizon": batch.get("execution_horizon", 0),
+                "rtc_latency": batch.get("inference_delay", 0.0),
+                "rtc_prev_action_chunk": batch.get("prev_chunk_left_over"),
+            }
+
+        actions = self.sample_actions(
+            images,
+            img_masks,
+            tokens,
+            masks,
+            **rtc_kwargs,
+        )
 
         # Unpad actions to actual action dimension
         original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1])
@@ -1154,6 +1144,78 @@ class Pi05Model(ExportableModelMixin, Model):
 
         return actions
 
+    def _compute_prefix_weights(
+        self,
+        inference_delay: Tensor,
+        execution_horizon: Tensor,
+        prefix_attention_schedule: Literal["linear", "exp"] = "linear",
+    ) -> Tensor:
+        """Compute prefix attention weights inside the graph.
+
+        Args:
+            inference_delay: Scalar tensor — the dynamic latency estimate.
+            execution_horizon: Scalar tensor — number of fresh actions per chunk.
+            prefix_attention_schedule: Schedule type for prefix attention weights ("linear" or "exp").
+
+        Returns:
+            ``(1, chunk_size, 1)`` weight tensor.
+        """
+        chunk_size = self._chunk_size
+        end = execution_horizon.float()
+        start = torch.minimum(inference_delay.float(), end)
+
+        idx = torch.arange(chunk_size, dtype=torch.float32, device=inference_delay.device)
+        denom = end - start + 1.0
+        weights = (end - idx) / denom
+        weights = torch.clamp(weights, min=0.0, max=1.0)
+
+        if prefix_attention_schedule == "exp":
+            weights = weights * (torch.exp(weights) - 1.0) / (math.e - 1.0)
+        # "linear" → no-op
+
+        return weights.unsqueeze(0).unsqueeze(-1)  # (1, chunk_size, 1)
+
+    @staticmethod
+    def _rtc_correct(
+        x_t: Tensor,
+        v_t: Tensor,
+        prev_chunk_left_over: Tensor,
+        prefix_weights: Tensor,
+        time: float,
+        max_guidance_weight: Tensor,
+    ) -> Tensor:
+        """Apply RTC guidance correction to velocity prediction.
+
+        Uses direct error (not autograd.grad) for OV traceability.
+
+        Returns:
+            Corrected velocity tensor.
+        """
+        tau = 1.0 - time
+
+        # Predicted clean actions at t=0
+        x1_t = x_t - time * v_t
+
+        # Weighted error between previous chunk and prediction
+        err = (prev_chunk_left_over - x1_t) * prefix_weights
+        correction = err
+
+        # Adaptive guidance weight
+        max_gw = max_guidance_weight.float()
+        tau_t = torch.as_tensor(tau)
+        squared_one_minus_tau = (1.0 - tau_t) ** 2
+        inv_r2 = (squared_one_minus_tau + tau_t**2) / squared_one_minus_tau
+
+        # Manual nan_to_num — torch.nan_to_num not supported by OV
+        c_raw = (1.0 - tau_t) / tau_t
+        c = torch.where(torch.isinf(c_raw), max_gw, c_raw)
+
+        guidance_weight_raw = c * inv_r2
+        guidance_weight = torch.where(torch.isinf(guidance_weight_raw), max_gw, guidance_weight_raw)
+        guidance_weight = torch.minimum(guidance_weight, max_gw)
+
+        return v_t - guidance_weight * correction
+
     @torch.no_grad()
     def sample_actions(  # noqa: PLR0914
         self,
@@ -1163,6 +1225,10 @@ class Pi05Model(ExportableModelMixin, Model):
         masks: Tensor,
         noise: Tensor | None = None,
         num_steps: int | None = None,
+        rtc_max_guidance: float = 0.0,
+        rtc_execution_horizon: int = 0,
+        rtc_latency: float = 0.0,
+        rtc_prev_action_chunk: Tensor | None = None,
     ) -> Tensor:
         """Inference forward pass: sample actions via iterative denoising.
 
@@ -1207,6 +1273,20 @@ class Pi05Model(ExportableModelMixin, Model):
                 x_t=x_t,
                 timestep=time_tensor,
             )
+
+            if rtc_prev_action_chunk is not None:
+                prefix_weights = self._compute_prefix_weights(
+                    inference_delay=torch.tensor(rtc_latency, device=device),
+                    execution_horizon=torch.tensor(rtc_execution_horizon, device=device),
+                )
+                v_t = self._rtc_correct(
+                    x_t,
+                    v_t,
+                    prev_chunk_left_over=rtc_prev_action_chunk,
+                    prefix_weights=prefix_weights,
+                    time=time,
+                    max_guidance_weight=torch.tensor(rtc_max_guidance, device=device),
+                )
 
             x_t += dt * v_t
 

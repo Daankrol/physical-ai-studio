@@ -6,7 +6,7 @@ ARG PYTHON_VERSION=3.12
 # ===========================================================================
 # Stage 1: Clone Geti UI packages and URDF robot models
 # ===========================================================================
-FROM node:24-alpine3.22@sha256:b689d4005875ae167178471a7a622ec2909459a3bbb32277260be1971af7a99f AS ui-packages
+FROM node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a AS ui-packages
 
 WORKDIR /home/app/web_ui/
 RUN apk add --no-cache git
@@ -19,7 +19,7 @@ RUN npm run clone-widowx
 # ===========================================================================
 # Stage 2: Build Web UI
 # ===========================================================================
-FROM node:24-alpine3.22@sha256:b689d4005875ae167178471a7a622ec2909459a3bbb32277260be1971af7a99f AS web-ui
+FROM node:24-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a AS web-ui
 
 WORKDIR /home/app/web_ui/
 
@@ -53,10 +53,6 @@ COPY --link application/backend/pyproject.toml application/backend/uv.lock \
     /app/application/backend/
 COPY --link application/backend/run.sh /app/application/backend/run.sh
 
-# physicalai hardware package (local path dependency)
-# TODO(#450): Remove once physicalai is published from its own repo.
-COPY --link --from=pai . /app/physicalai/
-
 # Built UI assets
 COPY --link --from=web-ui /home/app/web_ui/dist /app/application/ui/
 
@@ -68,7 +64,7 @@ COPY --link --from=web-ui /home/app/web_ui/dist /app/application/ui/
 # This separation ensures that source-only changes do not invalidate
 # the expensive uv sync layers in the device-specific builders below.
 # ===========================================================================
-FROM python:${PYTHON_VERSION}-slim@sha256:804ddf3251a60bbf9c92e73b7566c40428d54d0e79d3428194edf40da6521286 AS builder-base
+FROM python:${PYTHON_VERSION}-slim@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203 AS builder-base
 
 COPY --from=docker.io/astral/uv:0.10.4@sha256:4cac394b6b72846f8a85a7a0e577c6d61d4e17fe2ccee65d9451a8b3c9efb4ac /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0
@@ -100,8 +96,6 @@ WORKDIR /app
 # The real library source is overlaid via app-source in the final image.
 COPY --link pyproject.toml uv.lock ./
 COPY --link --from=libs ./pyproject.toml /app/library/pyproject.toml
-# TODO(#450): Remove once physicalai is published from its own repo.
-COPY --link --from=pai ./pyproject.toml /app/physicalai/pyproject.toml
 
 # Backend manifests only (not src/ or run.sh) — sufficient for dep resolution.
 COPY --link application/backend/pyproject.toml application/backend/uv.lock \
@@ -125,7 +119,6 @@ FROM builder-base AS builder-cpu
 
 RUN --mount=type=cache,id=uv-cpu,target=/root/.cache/uv \
     --mount=type=bind,from=libs,target=/app/library \
-    --mount=type=bind,from=pai,target=/app/physicalai \
     uv sync --frozen --no-dev --no-editable --extra cpu
 
 # ===========================================================================
@@ -135,7 +128,6 @@ FROM builder-base AS builder-xpu
 
 RUN --mount=type=cache,id=uv-xpu,target=/root/.cache/uv \
     --mount=type=bind,from=libs,target=/app/library \
-    --mount=type=bind,from=pai,target=/app/physicalai \
     uv sync --frozen --no-dev --no-editable --extra xpu
 
 # ===========================================================================
@@ -145,7 +137,6 @@ FROM builder-base AS builder-cuda
 
 RUN --mount=type=cache,id=uv-cuda,target=/root/.cache/uv \
     --mount=type=bind,from=libs,target=/app/library \
-    --mount=type=bind,from=pai,target=/app/physicalai \
     uv sync --frozen --no-dev --no-editable --extra cuda
 
 # ===========================================================================
@@ -155,7 +146,7 @@ RUN --mount=type=cache,id=uv-cuda,target=/root/.cache/uv \
 # variables, and directory structure. Healthcheck is defined in
 # docker-compose.yaml (not here) so it can reference runtime PORT.
 # ===========================================================================
-FROM python:${PYTHON_VERSION}-slim@sha256:804ddf3251a60bbf9c92e73b7566c40428d54d0e79d3428194edf40da6521286 AS runtime-base
+FROM python:${PYTHON_VERSION}-slim@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203 AS runtime-base
 
 # uv is needed at runtime for `uv run` in run.sh
 COPY --from=docker.io/astral/uv:0.10.4@sha256:4cac394b6b72846f8a85a7a0e577c6d61d4e17fe2ccee65d9451a8b3c9efb4ac /uv /uvx /bin/
@@ -169,7 +160,9 @@ RUN groupadd --gid "${APP_GID}" appuser \
     && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home appuser
 
 # Common runtime system dependencies (OpenCV, USB access, video decoding)
+# Includes runtime toolchain/linker deps required by torch.compile (Inductor/Triton)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
         ffmpeg \
         libgl1 \
         libglib2.0-0 \
@@ -190,6 +183,8 @@ ENV PATH="/app/application/backend/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONFAULTHANDLER=1 \
+    CC=/usr/bin/gcc \
+    CXX=/usr/bin/g++ \
     UV_NO_SYNC=1 \
     STATIC_FILES_DIR="/app/application/ui/" \
     DATA_DIR="/app/data" \
@@ -310,7 +305,9 @@ RUN set -eux; \
     find /usr/local/cuda* /usr/lib/x86_64-linux-gnu/ \
         \( -path '*/include' -o -path '*/headers' \) -type d \
         -exec rm -rf {} + 2>/dev/null || true; \
-    find /usr/local/cuda* /usr/lib/x86_64-linux-gnu/ \
+    # Keep system static archives (e.g. libc_nonshared.a) required by
+    # torch.compile/Triton runtime linking; remove only CUDA static libs.
+    find /usr/local/cuda* \
         -name '*.a' -delete 2>/dev/null || true; \
     # Remove documentation and samples
     rm -rf /usr/local/cuda*/doc /usr/local/cuda*/samples \

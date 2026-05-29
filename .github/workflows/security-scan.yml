@@ -49,6 +49,20 @@ jobs:
       contents: read
       security-events: write # Needed to upload the results to code-scanning dashboard
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          disable-sudo: true
+          disable-telemetry: true
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            files.pythonhosted.org:443
+            github.com:443
+            pypi.org:443
+            raw.githubusercontent.com:443
+            releases.astral.sh:443
+
       - &checkout
         name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -56,7 +70,7 @@ jobs:
           persist-credentials: false
 
       - name: Run Zizmor scan
-        uses: open-edge-platform/geti-ci/actions/zizmor@7e686c1248b3939f8ee8e04e2612da727e379d91
+        uses: open-edge-platform/geti-ci/actions/zizmor@0bed754fc7db24b5f9f15e7ead2eb4acdb0c7263 # zizmor/v0.1.2
         with:
           scan-scope: ${{ github.event_name == 'pull_request' && 'changed' || 'all' }}
           severity-level: ${{ github.event_name == 'pull_request' && 'MEDIUM' || 'LOW' }}
@@ -69,6 +83,18 @@ jobs:
       contents: read
       security-events: write # Needed to upload the results to code-scanning dashboard
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          disable-sudo: true
+          disable-telemetry: true
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            files.pythonhosted.org:443
+            github.com:443
+            pypi.org:443
+
       - *checkout
 
       - name: Run Bandit scan
@@ -87,6 +113,23 @@ jobs:
       contents: read
       security-events: write # Needed to upload the results to code-scanning dashboard
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          disable-sudo: true
+          disable-telemetry: true
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            check.trivy.dev:443
+            files.pythonhosted.org:443
+            get.trivy.dev:443
+            github.com:443
+            mirror.gcr.io:443
+            pypi.org:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -109,6 +152,19 @@ jobs:
       contents: read
       security-events: write # Needed to upload the results to code-scanning dashboard
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          disable-sudo: true
+          disable-telemetry: true
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            files.pythonhosted.org:443
+            github.com:443
+            pypi.org:443
+            semgrep.dev:443
+
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -131,6 +187,36 @@ jobs:
       matrix:
         ai-device: [cpu, cuda, xpu]
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        with:
+          disable-sudo: true
+          disable-telemetry: true
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            auth.docker.io:443
+            check.trivy.dev:443
+            deb.debian.org:80
+            developer.download.nvidia.com:443
+            dl-cdn.alpinelinux.org:443
+            download-r2.pytorch.org:443
+            files.pythonhosted.org:443
+            get.trivy.dev:443
+            ghcr.io:443
+            ghcr1production.blob.core.windows.net:443
+            github.com:443
+            mirror.gcr.io:443
+            pkg-containers.githubusercontent.com:443
+            ppa.launchpadcontent.net:443
+            production.cloudflare.docker.com:443
+            raw.githubusercontent.com:443
+            registry.npmjs.org:443
+            registry-1.docker.io:443
+            release-assets.githubusercontent.com:443
+            releases.astral.sh:443
+            storage.geti.intel.com:443
+
       - name: Run container image scan (${{ matrix.ai-device }})
         uses: open-edge-platform/geti-ci/actions/trivy@7e686c1248b3939f8ee8e04e2612da727e379d91
         with:
@@ -153,6 +239,24 @@ jobs:
       matrix:
         ai-device: [cpu]
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          disable-sudo: false
+          disable-telemetry: true
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            ghcr.io:443
+            ghcr1production.blob.core.windows.net:443
+            mirror.gcr.io:443
+            pkg-containers.githubusercontent.com:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            releases.astral.sh:443
+
       - name: Runner cleanup
         uses: open-edge-platform/geti-ci/actions/cleanup-runner@7e686c1248b3939f8ee8e04e2612da727e379d91
         with:
@@ -215,15 +319,6 @@ jobs:
           allow_issue_writing: false
           fail_action: false
           artifact_name: zapapi
-
-      - name: Run ZAP Full Scan
-        uses: zaproxy/action-full-scan@3c58388149901b9a03b7718852c5ba889646c27c # v0.13.0
-        with:
-          target: "http://localhost:7860"
-          cmd_options: "-a -j"
-          allow_issue_writing: false
-          fail_action: false
-          artifact_name: zapfull
 
       - name: Run Schemathesis Scan
         uses: schemathesis/action@806cace2053cbbac93188e1281ff7da415643160 # v3
