@@ -71,6 +71,7 @@ class SmolVLAConfig(Config):
             Example: (("top", "camera1"), ("wrist", "camera2")) renames images.top → images.camera1.
             Use this when your dataset camera names differ from the pretrained model's expected names.
             Defaults to None (no renaming).
+        empty_cameras: The number of empty camera inputs to add (for placeholder cameras). Default: 0.
         use_random_input_noise: Whether to use random noise as the initial input for the denoising process
             during inference. If False, zeros are used instead. Defaults to True.
     """

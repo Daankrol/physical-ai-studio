@@ -87,6 +87,9 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         scheduler_warmup_steps: Number of warmup steps for scheduler. Default: 1_000.
         scheduler_decay_steps: Number of steps between learning rate decays. Default: 30_000.
         scheduler_decay_lr: Learning rate decay factor. Default: 2.5e-6.
+        rename_map: Optional tuple of (original_name, new_name) pairs to
+            rename cameras in dataset stats and preprocessor. Default: None.
+        empty_cameras: The number of empty camera inputs to add (for placeholder cameras). Default: 0.
         dataset_stats: Dataset normalization statistics for eager initialization. Default: None.
 
     Example:
@@ -259,7 +262,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             dataset_stats: Dataset normalization statistics.
             weights_file: Optional pretrained weights file.
         """
-        from .preprocessor import make_smolvla_preprocessors, reorder_stats  # noqa: PLC0415
+        from .preprocessor import reorder_stats  # noqa: PLC0415
 
         rename_map = dict(self.config.rename_map) if self.config.rename_map else None
         if rename_map and dataset_stats is not None:
@@ -428,7 +431,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             image_resolution=self.config.resize_imgs_with_padding,
             max_token_len=self.config.tokenizer_max_length,
             token_pad_type=self.config.pad_language_to,
-            rename_map=rename_map,
+            rename_map=dict(self.config.rename_map) if self.config.rename_map else None,
             empty_cameras=self.config.empty_cameras,
             tokenizer_name=self.config.vlm_model_name,
         )
