@@ -535,6 +535,53 @@ def reorder_stats(
     return reordered
 
 
+def _parse_stats(
+    stats: dict[str, dict[str, list[float] | str | tuple]] | None,
+) -> tuple[dict[str, Feature], set[str]]:
+    """Parse dataset statistics into features and image camera names.
+
+    Args:
+        stats: Dataset statistics as nested dicts, or None if unavailable.
+
+    Returns:
+        A tuple of:
+            - Mapping of feature name to Feature for all action and state stats.
+            - Set of base camera names derived from visual stats.
+    """
+    features: dict[str, Feature] = {}
+    image_stat_names: set[str] = set()
+
+    if stats is None:
+        return features, image_stat_names
+
+    for key, stat in stats.items():
+        if ACTION in key:
+            _add_feature(features, stat, FeatureType.ACTION)
+        elif STATE in key:
+            _add_feature(features, stat, FeatureType.STATE)
+        elif str(stat.get("type", "")).upper() == FeatureType.VISUAL.value:
+            image_stat_names.add(_base_name(str(stat.get("name", key))))
+
+    return features, image_stat_names
+
+
+def _base_name(stat_name: str) -> str:
+    return stat_name.rsplit(".", maxsplit=1)[-1] if "." in stat_name else stat_name
+
+
+def _add_feature(features: dict[str, Feature], stat: dict, feature_type: FeatureType) -> None:
+    name = str(stat["name"])
+    features[name] = Feature(
+        name=name,
+        ftype=feature_type,
+        shape=cast("tuple[int, ...]", stat["shape"]),
+        normalization_data=NormalizationParameters(
+            mean=cast("list[float]", stat["mean"]),
+            std=cast("list[float]", stat["std"]),
+        ),
+    )
+
+
 def make_smolvla_preprocessors(
     max_state_dim: int = 32,
     max_action_dim: int = 32,
@@ -552,7 +599,6 @@ def make_smolvla_preprocessors(
     Args:
         max_state_dim: Maximum state dimension.
         max_action_dim: Maximum action dimension.
-        env_action_dim: Actual environment action dimension.
         stats: Dataset statistics as nested dicts.
         image_resolution: Target image resolution.
         max_token_len: Maximum token length.
@@ -567,33 +613,8 @@ def make_smolvla_preprocessors(
     if rename_map and stats is not None:
         stats = reorder_stats(stats, rename_map)
 
-    expected_camera_names: set[str] | None = SMOLVLA_EXPECTED_CAMERA_NAMES
-    features: dict[str, Feature] = {}
-    if stats is not None:
-        image_stat_names: set[str] = set()
-        for key, stat in stats.items():
-            if ACTION in key:
-                feature_type = FeatureType.ACTION
-            elif STATE in key:
-                feature_type = FeatureType.STATE
-            else:
-                stat_name = str(stat.get("name", key))
-                base = stat_name.rsplit(".", maxsplit=1)[-1] if "." in stat_name else stat_name
-                if str(stat.get("type", "")).upper() == FeatureType.VISUAL.value:
-                    image_stat_names.add(base)
-                continue
-            features[str(stat["name"])] = Feature(
-                name=str(stat["name"]),
-                ftype=feature_type,
-                shape=cast("tuple[int, ...]", stat["shape"]),
-                normalization_data=NormalizationParameters(
-                    mean=cast("list[float]", stat["mean"]),
-                    std=cast("list[float]", stat["std"]),
-                ),
-            )
-
-        if image_stat_names:
-            expected_camera_names = image_stat_names
+    features, image_stat_names = _parse_stats(stats)
+    expected_camera_names = image_stat_names or SMOLVLA_EXPECTED_CAMERA_NAMES
 
     preprocessor = SmolVLAPreprocessor(
         max_state_dim=max_state_dim,
@@ -607,9 +628,6 @@ def make_smolvla_preprocessors(
         empty_cameras=empty_cameras,
         tokenizer_name=tokenizer_name,
     )
-
-    postprocessor = SmolVLAPostprocessor(
-        features=features,
-    )
+    postprocessor = SmolVLAPostprocessor(features=features)
 
     return preprocessor, postprocessor
