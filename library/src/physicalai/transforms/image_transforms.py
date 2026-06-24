@@ -16,7 +16,7 @@ from torchvision.transforms.v2 import functional as F  # noqa: N812
 _EXPECTED_SHARPNESS_LEN = 2
 
 
-class RandomChoiceApply(Transform):
+class RandomChoice(Transform):
     """Apply a random subset of N transforms from a list of transforms.
 
     Similar to :class:`torchvision.transforms.v2.RandomChoice`, but samples
@@ -42,7 +42,7 @@ class RandomChoiceApply(Transform):
         ...     v2.ColorJitter(contrast=(0.8, 1.2)),
         ...     v2.RandomAffine(degrees=5),
         ... ]
-        >>> augment = RandomChoiceApply(tfs, n_subset=2)
+        >>> augment = RandomChoice(tfs, n_subset=2)
     """
 
     def __init__(

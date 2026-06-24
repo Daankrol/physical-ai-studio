@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 """Transform utilities for physicalai.
@@ -8,7 +8,7 @@ replacements for standard transforms.
 """
 
 from physicalai.transforms.image_transforms import (
-    RandomChoiceApply,
+    RandomChoice,
     RandomSharpness,
 )
 from physicalai.transforms.onnx_transforms import (
@@ -19,7 +19,7 @@ from physicalai.transforms.onnx_transforms import (
 
 __all__ = [
     "CenterCrop",
-    "RandomChoiceApply",
+    "RandomChoice",
     "RandomSharpness",
     "center_crop_image",
     "replace_center_crop_with_onnx_compatible",

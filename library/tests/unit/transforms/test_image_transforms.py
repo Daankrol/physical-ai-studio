@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Intel Corporation
+# Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 """Smoke tests for image augmentation transforms."""
@@ -9,11 +9,11 @@ import pytest
 import torch
 from torchvision.transforms.v2 import ColorJitter, RandomAffine
 
-from physicalai.transforms import RandomChoiceApply, RandomSharpness
+from physicalai.transforms import RandomChoice, RandomSharpness
 
 
-class TestRandomChoiceApply:
-    """Smoke tests for RandomChoiceApply."""
+class TestRandomChoice:
+    """Smoke tests for RandomChoice."""
 
     @pytest.fixture()
     def transforms(self) -> list:
@@ -25,28 +25,28 @@ class TestRandomChoiceApply:
 
     def test_output_shape_preserved(self, transforms: list) -> None:
         """Output image should have the same shape as input."""
-        transform = RandomChoiceApply(transforms, n_subset=2)
+        transform = RandomChoice(transforms, n_subset=2)
         image = torch.rand(3, 64, 64)
         output = transform(image)
         assert output.shape == image.shape
 
     def test_output_shape_batch(self, transforms: list) -> None:
         """Batched images should preserve shape."""
-        transform = RandomChoiceApply(transforms, n_subset=2)
+        transform = RandomChoice(transforms, n_subset=2)
         image = torch.rand(2, 3, 64, 64)
         output = transform(image)
         assert output.shape == image.shape
 
     def test_all_transforms_applied(self, transforms: list) -> None:
         """When n_subset=None, all transforms are applied."""
-        transform = RandomChoiceApply(transforms)
+        transform = RandomChoice(transforms)
         image = torch.rand(3, 64, 64)
         output = transform(image)
         assert output.shape == image.shape
 
     def test_random_order(self, transforms: list) -> None:
         """random_order=True should not change output shape."""
-        transform = RandomChoiceApply(transforms, n_subset=2, random_order=True)
+        transform = RandomChoice(transforms, n_subset=2, random_order=True)
         image = torch.rand(3, 64, 64)
         output = transform(image)
         assert output.shape == image.shape
@@ -54,17 +54,17 @@ class TestRandomChoiceApply:
     def test_invalid_transforms_type(self) -> None:
         """Non-sequence transforms should raise TypeError."""
         with pytest.raises(TypeError, match="sequence of callables"):
-            RandomChoiceApply(42)
+            RandomChoice(42)
 
     def test_invalid_n_subset(self, transforms: list) -> None:
         """n_subset out of range should raise ValueError."""
         with pytest.raises(ValueError, match="n_subset"):
-            RandomChoiceApply(transforms, n_subset=0)
+            RandomChoice(transforms, n_subset=0)
 
     def test_mismatched_p_length(self, transforms: list) -> None:
         """p with wrong length should raise ValueError."""
         with pytest.raises(ValueError, match="Length of p"):
-            RandomChoiceApply(transforms, p=[1.0, 1.0])
+            RandomChoice(transforms, p=[1.0, 1.0])
 
 
 class TestRandomSharpness:
