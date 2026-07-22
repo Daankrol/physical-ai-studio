@@ -582,7 +582,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         processed_batch = self._preprocessor(batch.to_dict())
         return self.model.compute_val_loss(processed_batch)
 
-    def configure_optimizers(self) -> Any:  # noqa: ANN401
+    def configure_optimizers(self) -> dict[str, Any]:
         """Configure optimizer and scheduler.
 
         Returns:
@@ -615,23 +615,6 @@ class SmolVLA(ExportablePolicyMixin, Policy):
                 "interval": "step",
             },
         }
-
-    def to_onnx(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
-        """Export model to ONNX format.
-
-        Raises:
-            ValueError: If output_path is not provided.
-        """
-        output_path = kwargs.pop("output_path", None)
-        input_sample = kwargs.pop("input_sample", None)
-        if output_path is None and args:
-            output_path = args[0]
-        if input_sample is None and len(args) > 1:
-            input_sample = args[1]
-        if output_path is None:
-            msg = "output_path must be provided"
-            raise ValueError(msg)
-        ExportablePolicyMixin.to_onnx(self, output_path=output_path, input_sample=input_sample, **kwargs)
 
     def configure_gradient_clipping(
         self,
