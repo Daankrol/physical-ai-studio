@@ -892,7 +892,7 @@ class Pi05Model(Model):
             return F.silu(x)
 
         time_emb = self._apply_checkpoint(time_mlp_func, time_emb)
-        if target_time is not None:
+        if target_time is not None and self._snapflow_enabled:
             target_time_emb = _create_sinusoidal_pos_embedding(
                 target_time,
                 self.action_in_proj.out_features,
