@@ -157,7 +157,7 @@ class Pi05Config(Config):
         if not 0.0 <= self.snapflow_alpha <= 1.0:
             msg = f"snapflow_alpha must be in [0, 1], got {self.snapflow_alpha}"
             raise ValueError(msg)
-        
+
         if self.snapflow_num_inference_steps < 1:
             msg = f"snapflow_num_inference_steps must be >= 1, got {self.snapflow_num_inference_steps}"
             raise ValueError(msg)
