@@ -1,6 +1,6 @@
 import abc
 from collections.abc import Callable
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio.session import AsyncSession
@@ -92,12 +92,12 @@ class BaseRepository(Generic[ModelType, SchemaType], metaclass=abc.ABCMeta):
         await self.db.merge(schema_item)
         await self.db.commit()
 
-        if not isinstance(item, BaseIDModel):
-            raise TypeError(f"{item.__class__} does not provide an `id` for update refresh")
-
-        updated = await self.get_by_id(item.id)
+        item_id = getattr(item, "id", None)
+        if item_id is None:
+            raise TypeError(f"{item.__class__.__name__} does not provide a usable `id` for update refresh")
+        updated = await self.get_by_id(item_id)
         if updated is None:
-            raise ValueError(f"{item.__class__} with ID `{item.id}` doesn't exist")
+            raise ValueError(f"{item.__class__} with ID `{item_id}` doesn't exist")
         return updated
 
     async def delete_by_id(self, obj_id: str | UUID) -> None:
@@ -120,7 +120,7 @@ class BaseRepository(Generic[ModelType, SchemaType], metaclass=abc.ABCMeta):
         return obj_id
 
 
-class ProjectBaseRepository(BaseRepository, metaclass=abc.ABCMeta):
+class ProjectBaseRepository(BaseRepository[ModelType, SchemaType], metaclass=abc.ABCMeta):
     def __init__(self, db: AsyncSession, project_id: str | UUID, schema: type[SchemaType]):
         super().__init__(db, schema)
         self.project_id = self._id_to_str(project_id)
@@ -141,7 +141,7 @@ class ProjectBaseRepository(BaseRepository, metaclass=abc.ABCMeta):
 
         to_update = item.model_copy(update=partial_update, deep=True)
         # Re-validate to convert dicts back to their proper model types
-        to_update = item.__class__.model_validate(to_update.model_dump())
+        to_update = cast("ModelType", item.__class__.model_validate(to_update.model_dump()))
         schema_item = self.to_schema(to_update)
 
         if hasattr(schema_item, "project_id"):
@@ -150,12 +150,12 @@ class ProjectBaseRepository(BaseRepository, metaclass=abc.ABCMeta):
         await self.db.merge(schema_item)
         await self.db.commit()
 
-        if not isinstance(item, BaseIDModel):
-            raise TypeError(f"{item.__class__} does not provide an `id` for update refresh")
-
-        updated = await self.get_by_id(item.id)
+        item_id = getattr(item, "id", None)
+        if item_id is None:
+            raise TypeError(f"{item.__class__.__name__} does not provide a usable `id` for update refresh")
+        updated = await self.get_by_id(item_id)
         if updated is None:
-            raise ValueError(f"{item.__class__} with ID `{item.id}` doesn't exist")
+            raise ValueError(f"{item.__class__} with ID `{item_id}` doesn't exist")
         return updated
 
     @property

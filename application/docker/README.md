@@ -6,12 +6,24 @@ Docker container with support for CPU, Intel XPU, and NVIDIA CUDA hardware.
 
 ## Prerequisites
 
-- **Docker Engine** 24+ with **Docker Compose** v2
+- [**Docker Engine**](https://docs.docker.com/engine/install/ubuntu/) 24.0+ with **Docker Compose** v2.24.0+
 - A supported hardware backend:
   - **CPU** — any x86_64 system (default)
   - **Intel XPU** — Intel discrete/integrated GPU with Level Zero drivers on the host
   - **NVIDIA CUDA** — NVIDIA GPU with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed
 - Robot hardware (optional): USB serial ports (`/dev/ttyACM*`), USB cameras (`/dev/video*`), or Intel RealSense cameras
+
+Check your installed versions with:
+
+```bash
+docker version
+docker compose version
+```
+
+Docker Compose v2.24.0+ is required because `docker-compose.yaml` uses long-form
+`env_file` entries with `required: false`. Older Compose versions may not pass
+`.env` values into the running container, which can break proxy-dependent model
+training even when `.env` looks correct on the host.
 
 ## Quick Start
 
@@ -21,13 +33,10 @@ All commands should be run from the `application/docker/` directory.
 # 1. Create your local environment file
 cp .env.example .env
 
-# 2. (Optional) Set your hardware profile in .env
-#    Edit COMPOSE_PROFILES to: cpu (default), xpu, or cuda
+# 2. Auto-detect host device GIDs for non-Debian systems and setup training hardware
+./setup-devices.sh --xpu # or use --cuda, --cpu
 
-# 3. (Optional) Auto-detect host device GIDs for non-Debian systems
-./setup-devices.sh
-
-# 4. Start Physical AI Studio
+# 3. Start Physical AI Studio
 docker compose up
 ```
 
@@ -68,9 +77,15 @@ All configuration is done through the `.env` file. Copy `.env.example` to get st
 | `DIALOUT_GID`      | `dialout` (group name)        | Host GID for the `dialout` group (serial ports)          |
 | `PLUGDEV_GID`      | `plugdev` (group name)        | Host GID for the `plugdev` group (USB devices)           |
 | `RENDER_GID`       | `render` (group name)         | Host GID for the `render` group (Intel GPU, XPU only)    |
+| `HF_TOKEN`         | *(empty)*                     | Hugging Face access token for Hub-backed model downloads     |
 | `HTTP_PROXY`       | *(empty)*                     | HTTP proxy for builds and runtime                        |
 | `HTTPS_PROXY`      | *(empty)*                     | HTTPS proxy for builds and runtime                       |
 | `NO_PROXY`         | *(empty)*                     | Proxy exclusion list                                     |
+
+If you plan to train Hugging Face Hub-backed policies (for example, SmolVLA, Pi0,
+and others), set `HF_TOKEN` in `.env` to avoid unauthenticated Hub access warnings.
+See [Hugging Face Integration](../backend/docs/huggingface_integration.md) for token
+creation and setup details.
 
 ## Hardware Targets
 
@@ -168,11 +183,16 @@ sudo usermod -aG render $USER   # Intel XPU only
 
 The compose file defines two named volumes and one bind mount:
 
-| Volume                       | Container path                                         | Purpose                                       |
-|------------------------------|--------------------------------------------------------|-----------------------------------------------|
-| `physical-ai-studio-data`    | `/app/data`                                            | Application database and runtime data         |
-| `physical-ai-studio-storage` | `/app/storage`                                         | Trained models, datasets, and other artifacts |
-| *(bind mount)*               | `~/.cache/huggingface/lerobot/calibration` (read-only) | Shared robot calibration data from the host   |
+| Volume                       | Container path                                         | Purpose                                              |
+|------------------------------|--------------------------------------------------------|------------------------------------------------------|
+| `physical-ai-studio-data`    | `/app/data`                                            | Legacy data-dir mount kept for one-time migration    |
+| `physical-ai-studio-storage` | `/app/storage`                                         | Persistent storage, including app data and artifacts |
+| *(bind mount)*               | `~/.cache/huggingface/lerobot/calibration` (read-only) | Shared robot calibration data from the host          |
+
+Runtime defaults use `STORAGE_DIR=/app/storage`; the application database is stored under `$STORAGE_DIR/data`.
+`/app/data` stays mounted as a legacy database source so existing users can be migrated
+automatically. The container enables non-interactive migration with
+`AUTO_MIGRATE_STORAGE_DIR=true`.
 
 To inspect volume contents:
 
@@ -266,3 +286,33 @@ NO_PROXY=localhost,127.0.0.1
 ```
 
 These are passed to both the Docker build process and the running container.
+
+If training fails with a network error such as `urlopen error [Errno 99] Cannot assign requested address`, first verify that the proxy settings are visible to Docker Compose and to the running container:
+
+```bash
+# Run from application/docker/
+grep -i proxy .env
+docker compose --profile cuda config | grep -i proxy
+docker exec physical-ai-studio-cuda env | grep -i proxy
+```
+
+Use the matching service name for your profile: `physical-ai-studio-cpu`, `physical-ai-studio-xpu`, or `physical-ai-studio-cuda`.
+
+If the values appear in `.env` but not in `docker compose ... config`, check your Docker Compose version and upgrade to v2.24.0+.
+
+If the values appear in `docker compose ... config` but not inside the running container, recreate the container after upgrading Docker Compose:
+
+```bash
+docker compose --profile cuda up -d --force-recreate
+```
+
+For corporate proxies, configure both uppercase and lowercase variables when required by your environment:
+
+```bash
+HTTP_PROXY=http://proxy.example.com:8080
+HTTPS_PROXY=http://proxy.example.com:8080
+NO_PROXY=localhost,127.0.0.1,::1
+http_proxy=http://proxy.example.com:8080
+https_proxy=http://proxy.example.com:8080
+no_proxy=localhost,127.0.0.1,::1
+```

@@ -6,27 +6,41 @@ from serial.tools import list_ports
 from serial.tools.list_ports_common import ListPortInfo
 
 from schemas import Robot, SerialPortInfo
-from schemas.robot import RobotType
-
-available_ports = list_ports.comports()
+from schemas.robot import SO101Robot
 
 
-def from_port(port: ListPortInfo, robot_type: str) -> SerialPortInfo | None:
+def serial_port_from_so101(robot: SO101Robot) -> SerialPortInfo:
+    """Build a serial identity from an SO101 robot configuration."""
+    connection_string = robot.payload.connection_string or None
+    serial_number = robot.payload.serial_number or None
+    return SerialPortInfo(connection_string=connection_string, serial_number=serial_number)
+
+
+def from_port(port: ListPortInfo) -> SerialPortInfo | None:
     """Detect if the device is a SO-100 robot."""
+    serial_number = getattr(port, "serial_number", None)
+
+    # Ignore internal hardware (e.g. /dev/ttyS0..ttyS31)
+    ttys_suffix = port.device.removeprefix("/dev/ttyS")
+    if ttys_suffix[:1].isdigit():
+        return None
+
     # The Feetech UART board CH340 has PID 29987
-    if port.pid in {21971, 29987}:
-        # The serial number is not always available
-        serial_number = port.serial_number or "no_serial"
-        return SerialPortInfo(connection_string=port.device, serial_number=serial_number, robot_type=robot_type)
-    return None
+    # Also accept virtual/PTY ports (pid is None) like socat-created devices
+    if port.pid is not None and port.pid not in {21971, 29987}:
+        logger.debug("Found usb port with unexpected PID, {device}: {pid}", device=port.device, pid=port.pid)
+        return None
+
+    return SerialPortInfo(connection_string=port.device, serial_number=serial_number or None)
 
 
 class RobotConnectionManager:
-    _all_robots: list[SerialPortInfo] = []
+    _all_robots: list[SerialPortInfo]
     available_ports: list[ListPortInfo]
 
     def __init__(self):
         self.available_ports = list(list_ports.comports())
+        self._all_robots = []
 
     @property
     def robots(self) -> list[SerialPortInfo]:
@@ -38,6 +52,7 @@ class RobotConnectionManager:
 
         Use self.scan_ports() before to update self.available_ports and self.available_can_ports
         """
+        self.available_ports = list(list_ports.comports())
         self._all_robots = []
 
         # If we are only simulating, we can just use the SO100Hardware class
@@ -53,62 +68,66 @@ class RobotConnectionManager:
                 logger.debug(f"Skipping {port.device}: already connected (or alias).")
                 continue
 
-            for name in [
-                "so-100",
-            ]:
-                # logger.debug(f"Trying to connect to {name} on {port.device}.")
-                robot = from_port(port, robot_type=name)
-                if robot is None:
-                    # logger.debug(f"Failed to create robot from {name} on {port.device}.")
-                    continue
-                logger.debug(f"Robot created: {robot}")
-                # await robot.connect()
+            robot = from_port(port)
+            if robot is None:
+                continue
 
-                if robot is not None:
-                    logger.debug(f"Connected to {name} on {port.device}.")
-                    self._all_robots.append(robot)
-                    # Mark both device and serial as connected
-                    connected_devices.add(port.device)
-                    if serial_num:
-                        connected_serials.add(serial_num)
-                    break  # stop trying other classes on this port
+            logger.debug(f"Robot created: {robot}")
+            self._all_robots.append(robot)
+            connected_devices.add(port.device)
+            if serial_num:
+                connected_serials.add(serial_num)
 
         if not self._all_robots:
             logger.debug("No robot connected.")
 
 
-async def find_robots() -> list[SerialPortInfo]:
-    """Find all robots connected via serial"""
-    manager = RobotConnectionManager()
+def _resolve_serial_port(discovered: list[SerialPortInfo], target: SerialPortInfo) -> str | None:
+    if target.serial_number is not None:
+        for serial_port in discovered:
+            if serial_port.serial_number == target.serial_number:
+                return serial_port.connection_string
+        return None
+
+    for serial_port in discovered:
+        if serial_port.connection_string == target.connection_string:
+            return serial_port.connection_string
+    return None
+
+
+async def find_so101_port(
+    manager: RobotConnectionManager,
+    serial_port: SerialPortInfo,
+) -> str | None:
+    """Find the current port for an SO101 robot by serial number or configured port."""
+    port = _resolve_serial_port(manager.robots, serial_port)
+    if port is not None:
+        return port
+
     await manager.find_robots()
-    return manager.robots
+    return _resolve_serial_port(manager.robots, serial_port)
 
 
-def find_port_for_serial(serial_number: str) -> str:
-    """Find the serial port path given the serial number of the device"""
-    ports = list_ports.comports()
-    for port in ports:
-        serial_num = getattr(port, "serial_number", None)
-        if serial_num == serial_number:
-            return port.device
-    return ""
-
-
-async def identify_so101_robot_visually(robot: Robot, joint: str | None = None) -> None:
+async def identify_so101_robot_visually(
+    manager: RobotConnectionManager,
+    robot: Robot,
+    joint: str | None = None,
+) -> None:
     """Identify the robot by moving the joint from current to min to max to initial position"""
-    if robot.type not in {RobotType.SO101_LEADER, RobotType.SO101_FOLLOWER}:
+    if not isinstance(robot, SO101Robot):
         raise ValueError(f"Trying to identify unsupported robot: {robot.type}")
 
     if joint is None:
         joint = "gripper"
 
-    if robot.connection_string == "" and robot.serial_number != "":
-        robot.connection_string = find_port_for_serial(robot.serial_number)
+    connection_string = await find_so101_port(manager, serial_port_from_so101(robot))
 
-    if robot.connection_string == "":
-        raise ValueError(f"Could not find the serial port for serial number {robot.serial_number}")
+    if connection_string is None:
+        if robot.payload.serial_number:
+            raise ValueError(f"Could not find the serial port for serial number {robot.payload.serial_number}")
+        raise ValueError("Could not resolve a serial port from connection_string")
     # Assume follower since leader shares same FeetechMotorBus layout
-    connection = SOFollower(SOFollowerRobotConfig(port=robot.connection_string))
+    connection = SOFollower(SOFollowerRobotConfig(port=connection_string))
     connection.bus.connect()
 
     PRESENT_POSITION_KEY = "Present_Position"

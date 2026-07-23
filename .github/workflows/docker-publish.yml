@@ -26,8 +26,44 @@ jobs:
         device: [cpu, xpu, cuda]
 
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          disable-sudo: false
+          disable-telemetry: true
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            auth.docker.io:443
+            centralus.data.mcr.microsoft.com:443
+            deb.debian.org:80
+            developer.download.nvidia.com:443
+            download.pytorch.org:443
+            download-r2.pytorch.org:443
+            files.pythonhosted.org:443
+            fulcio.sigstore.dev:443
+            ghcr.io:443
+            ghcr1production.blob.core.windows.net:443
+            github.com:443
+            index.crates.io:443
+            pkg-containers.githubusercontent.com:443
+            ppa.launchpadcontent.net:443
+            production.cloudflare.docker.com:443
+            production.cloudfront.docker.com:443
+            pypi.org:443
+            registry.npmjs.org:443
+            registry-1.docker.io:443
+            rekor.sigstore.dev:443
+            release-assets.githubusercontent.com:443
+            static.crates.io:443
+            static.rust-lang.org:443
+            timestamp.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
+            www.google-analytics.com:443
+            dl-cdn.alpinelinux.org:443
+
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
@@ -40,7 +76,7 @@ jobs:
           echo "short-sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Container Registry
-        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -48,7 +84,7 @@ jobs:
 
       - name: Extract metadata (tags, labels)
         id: meta
-        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/open-edge-platform/physical-ai-studio-${{ matrix.device }}
           tags: |
@@ -62,6 +98,7 @@ jobs:
           push: "true"
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          use-cache: "false" # To ensure that the application container images remain buildable
 
       - name: Resolve primary image tag for signing
         id: primary-tag
@@ -74,6 +111,6 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Sign Docker image
-        uses: open-edge-platform/geti-ci/actions/sign-image@e80098b3d180db37914f11ff6021f9fa34d0bb9f
+        uses: open-edge-platform/geti-ci/actions/sign-image@7e686c1248b3939f8ee8e04e2612da727e379d91
         with:
           image-uri: ${{ steps.primary-tag.outputs.tag }}

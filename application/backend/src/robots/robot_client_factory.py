@@ -1,69 +1,53 @@
 from exceptions import ResourceNotFoundError, ResourceType
+from robots.catalog.registry import RobotCatalogRegistry
+from robots.physicalai_adapter import PhysicalAIRobotAdapter, PhysicalAIRobotAdapterConfig
 from robots.robot_client import RobotClient
-from robots.so101.so101 import So101
-from robots.widowxai.trossen_widowx_ai_follower import TrossenWidowXAIFollower
-from robots.widowxai.trossen_widowx_ai_leader import TrossenWidowXAILeader
-from schemas.calibration import Calibration
-from schemas.robot import NetworkIpRobotConfig, Robot, RobotType
-from services.robot_calibration_service import RobotCalibrationService, find_robot_port
-from utils.serial_robot_tools import RobotConnectionManager
+from schemas.robot import Robot, SO101Robot
+from utils.serial_robot_tools import RobotConnectionManager, find_so101_port, serial_port_from_so101
 
 
 class RobotClientFactory:
-    calibration_service: RobotCalibrationService
     robot_manager: RobotConnectionManager
+    catalog_registry: RobotCatalogRegistry
 
     def __init__(
         self,
         robot_manager: RobotConnectionManager,
-        calibration_service: RobotCalibrationService,
+        catalog_registry: RobotCatalogRegistry | None = None,
     ) -> None:
         self.robot_manager = robot_manager
-        self.calibration_service = calibration_service
+        self.catalog_registry = catalog_registry or RobotCatalogRegistry()
 
     async def build(self, robot: Robot) -> RobotClient:
-        match robot.type:
-            case RobotType.TROSSEN_WIDOWXAI_FOLLOWER:
-                config = NetworkIpRobotConfig(
-                    type="follower",
-                    robot_type=RobotType.TROSSEN_WIDOWXAI_FOLLOWER,
-                    connection_string=robot.connection_string,
-                )
-                return TrossenWidowXAIFollower(config=config)
-            case RobotType.TROSSEN_WIDOWXAI_LEADER:
-                config = NetworkIpRobotConfig(
-                    type="leader",
-                    robot_type=RobotType.TROSSEN_WIDOWXAI_LEADER,
-                    connection_string=robot.connection_string,
-                )
-                return TrossenWidowXAILeader(config=config)
-            case RobotType.SO101_FOLLOWER:
-                return await self._build_so101(robot)
-            case RobotType.SO101_LEADER:
-                return await self._build_so101(robot)
-            case _:
-                raise ValueError(f"Unsupported robot type: {robot.type}")
+        definition = self.catalog_registry.get_definition(robot.type)
 
-    async def _build_so101(self, robot: Robot) -> So101:
-        port = await self._find_robot_port(robot)
-        calibration = await self._get_robot_calibration(robot)
+        if definition is None:
+            raise ValueError(f"Robot type is not part of the catalog: {robot.type}")
 
-        if calibration is None:
-            raise ResourceNotFoundError(ResourceType.ROBOT_CALIBRATION, robot.serial_number)
+        builder = definition.robot_builder
+
+        robot_driver = await builder(robot, self)
+        adapter_options = definition.adapter_options
+        return PhysicalAIRobotAdapter(
+            robot=robot_driver,
+            robot_type=robot.type,
+            robot_role=definition.role,
+            config=PhysicalAIRobotAdapterConfig(
+                include_velocities=adapter_options.include_velocities,
+                goal_time_scale=adapter_options.goal_time_scale,
+                external_effort_gain=adapter_options.external_effort_gain,
+            ),
+        )
+
+    async def find_so101_port(self, robot: SO101Robot) -> str:
+        port = await find_so101_port(self.robot_manager, serial_port_from_so101(robot))
         if port is None:
-            raise ResourceNotFoundError(ResourceType.ROBOT, robot.serial_number)
-        mode = "follower" if robot.type == RobotType.SO101_FOLLOWER else "teleoperator"
-        return So101(port=port, id=robot.name.lower(), mode=mode, calibration=calibration)
-
-    async def _find_robot_port(self, robot: Robot) -> str:
-        port = await find_robot_port(self.robot_manager, robot)
-        if port is None:
-            raise ResourceNotFoundError(ResourceType.ROBOT, robot.serial_number)
-
+            resource_key = robot.payload.serial_number or robot.payload.connection_string
+            raise ResourceNotFoundError(ResourceType.ROBOT, resource_key)
         return port
 
-    async def _get_robot_calibration(self, robot: Robot) -> Calibration | None:
-        if robot.active_calibration_id is None:
-            return None
-
-        return await self.calibration_service.get_calibration(robot.active_calibration_id)
+    async def find_port_by_serial(self, serial_number: str) -> str | None:
+        for managed_robot in self.robot_manager.robots:
+            if managed_robot.serial_number == serial_number:
+                return managed_robot.connection_string
+        return None

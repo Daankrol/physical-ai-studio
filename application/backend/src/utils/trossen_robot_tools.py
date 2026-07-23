@@ -2,11 +2,12 @@ import trossen_arm
 from loguru import logger
 
 from schemas import Robot
+from schemas.robot import TrossenSingleArmRobot
 
 
 async def identify_trossen_robot_visually(robot: Robot) -> None:
     """Identify the robot by moving the joint from current to min to max to initial position"""
-    if not robot.type.lower().startswith("trossen"):
+    if not isinstance(robot, TrossenSingleArmRobot):
         raise ValueError(f"Trying to identify unsupported robot: {robot.type}")
 
     driver = trossen_arm.TrossenArmDriver()
@@ -15,7 +16,7 @@ async def identify_trossen_robot_visually(robot: Robot) -> None:
     driver.configure(
         trossen_arm.Model.wxai_v0,
         trossen_arm.StandardEndEffector.wxai_v0_leader,
-        robot.connection_string,
+        robot.payload.connection_string,
         True,
         timeout=5,
     )

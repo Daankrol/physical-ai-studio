@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import psutil
 from loguru import logger
 
+from workers.dataset_import_worker import DatasetImportWorker
 from workers.training_worker import TrainingWorker
 
 if TYPE_CHECKING:
@@ -26,6 +27,7 @@ class Scheduler:
         logger.info("Scheduler initialized")
 
     def start_workers(self) -> None:
+        # mp.set_start_method("spawn", force=True)
         training_proc = TrainingWorker(
             stop_event=self.mp_stop_event,
             interrupt_event=self.training_interrupt_event,
@@ -33,7 +35,15 @@ class Scheduler:
         )
         training_proc.daemon = False
         training_proc.start()
-        self.processes.extend([training_proc])
+
+        dataset_import_proc = DatasetImportWorker(
+            stop_event=self.mp_stop_event,
+            event_queue=self.event_queue,
+        )
+        dataset_import_proc.daemon = False
+        dataset_import_proc.start()
+
+        self.processes.extend([training_proc, dataset_import_proc])
 
     def shutdown(self) -> None:
         """Shutdown all processes gracefully"""
@@ -62,11 +72,11 @@ class Scheduler:
                 logger.debug(f"Joining process: {process.name}")
                 process.join(timeout=10)
                 if process.is_alive():
-                    logger.warning("Force terminating process: %s", process.name)
+                    logger.warning(f"Force terminating process: {process.name}")
                     process.terminate()
                     process.join(timeout=2)
                     if process.is_alive():
-                        logger.error("Force killing process %s", process.name)
+                        logger.error(f"Force killing process {process.name}")
                         process.kill()
 
         logger.info("All workers shut down gracefully")

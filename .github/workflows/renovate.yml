@@ -55,21 +55,51 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          disable-sudo: true
+          disable-telemetry: true
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            auth.docker.io:443
+            *.data.mcr.microsoft.com:443
+            endoflife.date:443
+            ghcr.io:443
+            github.com:443
+            hub.docker.com:443
+            index.crates.io:443
+            index.docker.io:443
+            mcr.microsoft.com:443
+            pkg-containers.githubusercontent.com:443
+            production.cloudflare.docker.com:443
+            production.cloudfront.docker.com:443
+            static.rust-lang.org:443
+            download-r2.pytorch.org:443
+            download.pytorch.org:443
+            files.pythonhosted.org:443
+            pypi.org:443
+            registry.npmjs.org:443
+            release-assets.githubusercontent.com:443
+            www.python.org:443
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
       - name: Get token
         id: get-github-app-token
-        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.RENOVATE_APP_ID }}
+          client-id: ${{ secrets.RENOVATE_APP_ID }}
           private-key: ${{ secrets.RENOVATE_APP_PEM }}
 
       - name: Self-hosted Renovate
-        uses: renovatebot/github-action@3633cede7d4d4598438e654eac4a695e46004420 # v46.1.7
+        uses: renovatebot/github-action@b50d2ba2bd928235abdcc14d06dfafc217f1c565 # v46.1.18
         with:
+          # renovate: datasource=github-releases depName=renovatebot/renovate
+          renovate-version: 43.255.2
           configurationFile: .github/renovate.json5
           token: "${{ steps.get-github-app-token.outputs.token }}"
         env:

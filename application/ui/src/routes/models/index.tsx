@@ -5,19 +5,18 @@ import {
     Content,
     DialogContainer,
     DialogTrigger,
-    Divider,
     Flex,
     Heading,
     IllustratedMessage,
     Text,
     View,
-    Well,
 } from '@geti-ui/ui';
 import { useQueryClient } from '@tanstack/react-query';
 import useWebSocket from 'react-use-websocket';
 
 import { $api, fetchClient } from '../../api/client';
-import { SchemaJob, SchemaModel } from '../../api/openapi-spec';
+import { SchemaTrainJob as SchemaJob, SchemaModel } from '../../api/openapi-spec';
+import { notify } from '../../components/notification/notification.component';
 import { LogsDialog } from '../../features/logs/logs-dialog';
 import { useProjectId } from '../../features/projects/use-project';
 import { ReactComponent as EmptyIllustration } from './../../assets/illustration.svg';
@@ -42,14 +41,29 @@ const ModelList = ({
 
     const jobsById = new Map(jobs.map((j) => [j.id, j]));
 
-    const deleteModelMutation = $api.useMutation('delete', '/api/models/{model_id}');
+    const { project_id } = useProjectId();
+    const deleteModelMutation = $api.useMutation('delete', '/api/models/{model_id}', {
+        meta: {
+            invalidates: [['get', '/api/projects/{project_id}/models', { params: { path: { project_id } } }]],
+        },
+    });
 
     const deleteModel = (model: SchemaModel) => {
         deleteModelMutation.mutate({ params: { path: { model_id: model.id! } } });
     };
 
     return (
-        <View marginBottom={'size-600'}>
+        <View
+            marginBottom={'size-600'}
+            borderWidth='thin'
+            borderColor={'gray-200'}
+            borderBottomWidth='thin'
+            borderBottomColor={'gray-200'}
+            borderStartWidth='thin'
+            borderStartColor={'gray-200'}
+            borderEndWidth='thin'
+            borderEndColor={'gray-200'}
+        >
             <ModelHeader />
             {sortedModels.map((model) => (
                 <ModelRow
@@ -70,7 +84,11 @@ const JobList = ({ jobs, onViewLogs }: { jobs: SchemaTrainJob[]; onViewLogs: (jo
         .filter((m) => m.status !== 'completed')
         .toSorted((a, b) => new Date(b.created_at!).getTime() - new Date(a.created_at!).getTime());
 
-    const interruptMutation = $api.useMutation('post', '/api/jobs/{job_id}:interrupt');
+    const interruptMutation = $api.useMutation('post', '/api/jobs/{job_id}:interrupt', {
+        meta: {
+            invalidates: [['get', '/api/jobs']],
+        },
+    });
     const onInterrupt = (job: SchemaTrainJob) => {
         if (job.id !== undefined) {
             interruptMutation.mutate({
@@ -106,10 +124,12 @@ const JobList = ({ jobs, onViewLogs }: { jobs: SchemaTrainJob[]; onViewLogs: (jo
     );
 };
 
-const useProjectJobs = (project_id: string): SchemaJob[] => {
-    const { data: allJobs } = $api.useQuery('get', '/api/jobs');
+const useProjectTrainingJobs = (project_id: string): SchemaTrainJob[] => {
+    const { data: allJobs = [] } = $api.useQuery('get', '/api/jobs');
 
-    return allJobs?.filter((j) => j.project_id === project_id) ?? [];
+    return allJobs
+        .filter((job) => job.project_id === project_id)
+        .filter((job): job is SchemaTrainJob => job.type === 'training');
 };
 
 export const Index = () => {
@@ -118,7 +138,7 @@ export const Index = () => {
         params: { path: { project_id } },
     });
 
-    const jobs = useProjectJobs(project_id);
+    const jobs = useProjectTrainingJobs(project_id);
     const [retrainModel, setRetrainModel] = useState<SchemaModel | null>(null);
     const [logsSourceId, setLogsSourceId] = useState<string | undefined>();
 
@@ -157,6 +177,11 @@ export const Index = () => {
             }
 
             updateJob(message.data as SchemaTrainJob);
+
+            if (message.data.message && message.data.status === 'running') {
+                notify('info', message.data.message);
+            }
+
             if (message.data.status === 'completed') {
                 client.invalidateQueries({ queryKey: ['get', '/api/projects/{project_id}/models'] });
             }
@@ -168,12 +193,10 @@ export const Index = () => {
     const showIllustratedMessage = !hasModels && !hasJobs;
 
     return (
-        <Flex height='100%'>
-            <Flex margin={'size-200'} direction={'column'} flex>
-                <Heading level={4}>Models</Heading>
-                <Divider size='S' marginTop='size-100' marginBottom={'size-100'} />
+        <View height='100%' padding={'size-200'} UNSAFE_style={{ overflowY: 'scroll' }}>
+            <Flex direction={'column'} flex>
                 {showIllustratedMessage ? (
-                    <Well flex UNSAFE_style={{ backgroundColor: 'rgb(60,62,66)' }}>
+                    <Flex margin={'size-200'} direction={'column'} flex height='100%'>
                         <IllustratedMessage>
                             <EmptyIllustration />
                             <Content> Currently there are no trained models available. </Content>
@@ -186,7 +209,7 @@ export const Index = () => {
                                 </DialogTrigger>
                             </View>
                         </IllustratedMessage>
-                    </Well>
+                    </Flex>
                 ) : (
                     <View margin={'size-300'}>
                         <Flex justifyContent={'end'} marginBottom='size-300'>
@@ -203,7 +226,7 @@ export const Index = () => {
                             </DialogTrigger>
                         </Flex>
                         <JobList
-                            jobs={jobs.filter((m) => m.type === 'training') as SchemaTrainJob[]}
+                            jobs={jobs}
                             onViewLogs={(job) => {
                                 setLogsSourceId(job.id);
                             }}
@@ -235,6 +258,6 @@ export const Index = () => {
                     <LogsDialog close={() => setLogsSourceId(undefined)} initialSourceId={`job-${logsSourceId}`} />
                 )}
             </DialogContainer>
-        </Flex>
+        </View>
     );
 };

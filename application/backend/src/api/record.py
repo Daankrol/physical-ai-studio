@@ -7,10 +7,10 @@ from fastapi import APIRouter, Depends, WebSocket
 from fastapi.responses import Response
 from loguru import logger
 
-from api.dependencies import RobotCalibrationServiceDep, RobotConnectionManagerDep, get_scheduler_ws
+from api.dependencies import ModelRegistryDep, RecordingLockedCamerasDep, RobotConnectionManagerDep, get_scheduler_ws
 from core.scheduler import Scheduler
 from robots.robot_client_factory import RobotClientFactory
-from schemas import Dataset, Model
+from schemas import Dataset, InferenceDevice, Model
 from schemas.environment import EnvironmentWithRelations
 from workers.robot_control_worker import RobotControlWorker
 
@@ -23,7 +23,11 @@ async def robot_control_websocket_openapi() -> Response:
     return Response(status_code=426)
 
 
-async def handle_incoming(websocket: WebSocket, process: RobotControlWorker) -> None:
+async def handle_incoming(
+    websocket: WebSocket,
+    process: RobotControlWorker,
+    locked_camera_fingerprints: set[str],
+) -> None:
     """Handle incoming messages for robot control."""
     try:
         while True:
@@ -31,9 +35,15 @@ async def handle_incoming(websocket: WebSocket, process: RobotControlWorker) -> 
             payload = data.get("data", {})
             match data["event"]:
                 case "load_environment":
-                    process.load_environment(EnvironmentWithRelations.model_validate(payload["environment"]))
+                    environment = EnvironmentWithRelations.model_validate(payload["environment"])
+                    locked_camera_fingerprints.clear()
+                    locked_camera_fingerprints.update(camera.fingerprint for camera in environment.cameras)
+                    process.load_environment(environment)
                 case "load_model":
-                    process.load_model(Model.model_validate(payload["model"]), payload["backend"])
+                    process.load_model(
+                        Model.model_validate(payload["model"]),
+                        InferenceDevice.model_validate(payload["inference_device"]),
+                    )
                 case "load_dataset":
                     process.load_dataset(Dataset.model_validate(payload["dataset"]))
                 case "set_follower_source":
@@ -75,36 +85,40 @@ async def handle_outgoing(websocket: WebSocket, queue: mp.Queue) -> None:
 async def robot_control_websocket(
     websocket: WebSocket,
     robot_manager: RobotConnectionManagerDep,
-    calibration_service: RobotCalibrationServiceDep,
     scheduler: Annotated[Scheduler, Depends(get_scheduler_ws)],
+    model_registry: ModelRegistryDep,
+    locked_camera_fingerprints: RecordingLockedCamerasDep,
 ) -> None:
     """Robot control websocket."""
     await websocket.accept()
     queue: mp.Queue = mp.Queue()
     process = RobotControlWorker(
         stop_event=scheduler.mp_stop_event,
-        robot_client_factory=RobotClientFactory(
-            robot_manager=robot_manager,
-            calibration_service=calibration_service,
-        ),
+        robot_client_factory=RobotClientFactory(robot_manager=robot_manager),
         queue=queue,
+        model_worker_registry=model_registry,
     )
     process.start()
 
-    incoming_task = asyncio.create_task(handle_incoming(websocket, process))
+    incoming_task = asyncio.create_task(handle_incoming(websocket, process, locked_camera_fingerprints))
     outgoing_task = asyncio.create_task(handle_outgoing(websocket, queue))
 
-    _, pending = await asyncio.wait(
-        {incoming_task, outgoing_task},
-        return_when=asyncio.FIRST_COMPLETED,
-    )
+    try:
+        _, pending = await asyncio.wait(
+            {incoming_task, outgoing_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
 
-    for task in pending:
-        task.cancel()
+        for task in pending:
+            task.cancel()
 
-    if process is not None:
-        process.disconnect()
-        process.join(10)
-
-    queue.close()
+        if process is not None:
+            process.disconnect()
+            process.join(10)
+    finally:
+        queue.close()
+        # NOTE: this clears ALL locks, not just this session's. Safe today
+        # because only one recording websocket runs at a time. If concurrent
+        # sessions are added, scope locks per session instead.
+        locked_camera_fingerprints.clear()
     logger.info("websocket handling done...")

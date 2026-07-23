@@ -101,6 +101,8 @@ export interface StateWasUpdatedEvent {
 export interface ErrorEvent {
     event: 'error';
     message: string;
+    error_code?: string;
+    port?: string | null;
 }
 
 export type SetupEvent =
@@ -122,7 +124,8 @@ export type SetupEvent =
 interface UseSetupWebSocketOptions {
     projectId: string;
     robotType: string;
-    serialNumber: string;
+    serialNumber?: string;
+    connectionString?: string;
     enabled?: boolean;
 }
 
@@ -147,11 +150,21 @@ export interface SetupWebSocketState {
     jointState: Record<string, number> | null;
     /** Latest error */
     error: string | null;
+    /** Error code from the backend for contextual error UI */
+    errorCode: string | null;
+    /** Device port path from the backend (e.g. /dev/ttyACM0) for use in error remediation */
+    port: string | null;
     /** Whether the websocket is connected */
     isConnected: boolean;
 }
 
-export function useSetupWebSocket({ projectId, robotType, serialNumber, enabled = true }: UseSetupWebSocketOptions) {
+export function useSetupWebSocket({
+    projectId,
+    robotType,
+    serialNumber,
+    connectionString,
+    enabled = true,
+}: UseSetupWebSocketOptions) {
     const [state, setState] = useState<SetupWebSocketState>({
         phase: null,
         statusMessage: null,
@@ -163,6 +176,8 @@ export function useSetupWebSocket({ projectId, robotType, serialNumber, enabled 
         calibrationResult: null,
         jointState: null,
         error: null,
+        errorCode: null,
+        port: null,
         isConnected: false,
     });
 
@@ -180,7 +195,6 @@ export function useSetupWebSocket({ projectId, robotType, serialNumber, enabled 
                             ...prev,
                             phase: data.phase,
                             statusMessage: data.message,
-                            error: null,
                         };
 
                     case 'voltage_result':
@@ -211,7 +225,12 @@ export function useSetupWebSocket({ projectId, robotType, serialNumber, enabled 
                         return { ...prev, jointState: data.state };
 
                     case 'error':
-                        return { ...prev, error: data.message };
+                        return {
+                            ...prev,
+                            error: data.message,
+                            errorCode: data.error_code ?? null,
+                            port: data.port ?? prev.port,
+                        };
 
                     case 'pong':
                         return prev;
@@ -225,18 +244,37 @@ export function useSetupWebSocket({ projectId, robotType, serialNumber, enabled 
         }
     }, []);
 
-    const url =
-        enabled && robotType && serialNumber
-            ? `/api/projects/${projectId}/robots/setup/ws` +
-              `?robot_type=${encodeURIComponent(robotType)}` +
-              `&serial_number=${encodeURIComponent(serialNumber)}`
-            : null;
+    const searchParams = new URLSearchParams({
+        robot_type: robotType,
+    });
+
+    if (serialNumber) {
+        searchParams.set('serial_number', serialNumber);
+    }
+
+    if (connectionString) {
+        searchParams.set('connection_string', connectionString);
+    }
+
+    const query = `?${searchParams.toString()}`;
+
+    const url = enabled && robotType ? `/api/projects/${projectId}/robots/setup/ws${query}` : null;
 
     const { sendJsonMessage, readyState } = useWebSocket(url, {
         onMessage: handleMessage,
-        onOpen: () => setState((prev) => ({ ...prev, isConnected: true, error: null })),
-        onClose: () => setState((prev) => ({ ...prev, isConnected: false })),
-        onError: () => setState((prev) => ({ ...prev, error: 'WebSocket connection error' })),
+        onOpen: () => setState((prev) => ({ ...prev, isConnected: true, error: null, errorCode: null })),
+        onClose: (event: WebSocketEventMap['close']) =>
+            setState((prev) => ({
+                ...prev,
+                isConnected: false,
+                // Preserve errors already set by an 'error' event; otherwise use the
+                // close code to provide a fallback message.
+                error:
+                    prev.error ?? (event.code !== 1000 ? `Connection closed unexpectedly (code ${event.code})` : null),
+                errorCode: prev.errorCode ?? (event.code !== 1000 ? 'connection_closed' : null),
+            })),
+        onError: () =>
+            setState((prev) => ({ ...prev, error: 'WebSocket connection error', errorCode: 'connection_failed' })),
         shouldReconnect: () => false, // Don't auto-reconnect — user should retry explicitly
     });
 
@@ -273,7 +311,7 @@ export function useSetupWebSocket({ projectId, robotType, serialNumber, enabled 
 
     const reProbe = useCallback(() => {
         // Clear previous results so the UI shows a loading state while rechecking
-        setState((prev) => ({ ...prev, voltageResult: null, probeResult: null, error: null }));
+        setState((prev) => ({ ...prev, voltageResult: null, probeResult: null, error: null, errorCode: null }));
         sendJsonMessage({ command: 're_probe' });
     }, [sendJsonMessage]);
 

@@ -1,24 +1,18 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import useWebSocket from 'react-use-websocket';
-import { degToRad } from 'three/src/math/MathUtils.js';
 
 import { fetchClient } from '../../api/client';
-import { useRobotModels } from './robot-models-context';
+import { useRobotCatalogDefinitionQuery } from './robot-catalog.hooks';
+import { mapJointToURDFJoint, useLoadModelQuery } from './robot-models-context';
+import { SchemaRobotType } from './robot-types';
 
 type JointsState = Array<{
     name: string;
     value: number;
 }>;
 
-type StateWasUpdatedEvent = {
-    name: 'state_was_updated';
-    is_controlled: boolean;
-    // [joint_name]: robot state in degrees
-    state: Record<string, number>;
-};
-
-const getNewJointState = (newJoints: StateWasUpdatedEvent['state']) => {
+const getNewJointState = (newJoints: Record<string, number>) => {
     return Object.keys(newJoints).map((joint_name) => {
         return {
             name: joint_name,
@@ -27,42 +21,48 @@ const getNewJointState = (newJoints: StateWasUpdatedEvent['state']) => {
     });
 };
 
-export const useSynchronizeModelJoints = (joints: JointsState, urdfPath: string) => {
-    const { getModel } = useRobotModels();
-    const model = getModel(urdfPath);
+export const useSynchronizeModelJoints = (joints: JointsState, robotType: SchemaRobotType) => {
+    const { data: definition } = useRobotCatalogDefinitionQuery(robotType);
+    const jointMap = definition.joint_map;
 
-    function removeSuffix(str: string, suffix: string): string {
-        return str.endsWith(suffix) ? str.slice(0, -suffix.length) : str;
-    }
+    const { data: model } = useLoadModelQuery(robotType);
 
     useEffect(() => {
         if (!model) return;
 
         joints.forEach((joint) => {
-            const name = removeSuffix(joint.name, '.pos');
-
-            if (name === 'gripper' && model.robotName == 'wxai') {
-                model.setJointValue('left_carriage_joint', joint.value); // meters
-                return;
-            }
-
-            if (model.joints[name]) {
-                model.setJointValue(name, degToRad(joint.value));
-            }
+            mapJointToURDFJoint(joint, model, jointMap);
         });
-    }, [model, joints]);
+    }, [model, joints, jointMap]);
 };
 
-export const useJointState = (project_id: string, robot_id: string) => {
+export enum RobotActionReadState {
+    None = 0,
+    Teleoperation = 1,
+    FromActions = 2,
+}
+
+interface RobotControlState {
+    connected: boolean;
+    follower_source: RobotActionReadState;
+}
+
+export const useJointState = (project_id: string, follower_id: string, leader_id?: string) => {
     const [joints, setJoints] = useState<JointsState>([]);
+    const [state, setState] = useState<RobotControlState>({
+        connected: false,
+        follower_source: RobotActionReadState.None,
+    });
 
     const handleMessage = useCallback((event: WebSocketEventMap['message']) => {
         try {
             const payload = JSON.parse(event.data);
 
-            if (payload['event'] === 'state_was_updated') {
-                const newJoints = getNewJointState(payload['state']);
+            if (payload['event'] === 'observation') {
+                const newJoints = getNewJointState(payload['data']);
                 setJoints(newJoints);
+            } else if (payload['event'] === 'state') {
+                setState(payload['data']);
             }
         } catch (error) {
             console.error('Failed to parse WebSocket message:', error);
@@ -70,8 +70,8 @@ export const useJointState = (project_id: string, robot_id: string) => {
     }, []);
 
     const socket = useWebSocket(
-        fetchClient.PATH('/api/projects/{project_id}/robots/{robot_id}/ws', {
-            params: { path: { project_id, robot_id } },
+        fetchClient.PATH('/api/projects/{project_id}/robots/ws', {
+            params: { path: { project_id } },
         }),
         {
             queryParams: {
@@ -81,11 +81,24 @@ export const useJointState = (project_id: string, robot_id: string) => {
             shouldReconnect: () => true,
             reconnectAttempts: 5,
             reconnectInterval: 3000,
+            onOpen: () => {
+                socket.sendJsonMessage({
+                    follower_id,
+                    leader_id,
+                });
+            },
             onMessage: handleMessage,
             onError: (error) => console.error('WebSocket error:', error),
             onClose: () => console.info('WebSocket closed'),
         }
     );
 
-    return { joints, socket };
+    const setFollowerSourceRequest = (value: RobotActionReadState) => {
+        socket.sendJsonMessage({
+            event: 'set_follower_source',
+            data: value,
+        });
+    };
+
+    return { joints, socket, state, setFollowerSource: setFollowerSourceRequest };
 };

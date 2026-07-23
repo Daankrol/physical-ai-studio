@@ -28,14 +28,6 @@ from torchvision.ops.misc import FrozenBatchNorm2d
 
 from physicalai.data import Feature, FeatureType
 from physicalai.data.observation import ACTION, EXTRA, IMAGES, STATE, Observation
-from physicalai.export import ExportableModelMixin
-from physicalai.export.backends import (
-    ExecuTorchExportParameters,
-    ExportParameters,
-    ONNXExportParameters,
-    OpenVINOExportParameters,
-    TorchExportParameters,
-)
 from physicalai.policies.base import Model
 from physicalai.policies.utils.normalization import FeatureNormalizeTransform, NormalizationType
 
@@ -47,7 +39,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class ACT(ExportableModelMixin, Model):
+class ACT(Model):
     """Action Chunking Transformer (ACT) model.
 
     Supports training and inference modes.
@@ -77,6 +69,7 @@ class ACT(ExportableModelMixin, Model):
         dropout: float = 0.1,
         kl_weight: float = 10.0,
         n_obs_steps: int = 1,
+        compile_model: bool = False,
     ) -> None:
         """Initialize the ACT model.
 
@@ -107,6 +100,7 @@ class ACT(ExportableModelMixin, Model):
             dropout (float, optional): Dropout rate. Defaults to 0.1.
             kl_weight (float, optional): Weight for KL divergence loss in VAE. Defaults to 10.0.
             n_obs_steps (int, optional): Number of observation steps. Defaults to 1.
+            compile_model (bool, optional): Whether to apply torch.compile to the model. Defaults to False.
 
         Raises:
             ValueError: If the number of state observation features is not exactly one.
@@ -186,6 +180,10 @@ class ACT(ExportableModelMixin, Model):
         )
         self._model = _ACT(self._config)
 
+        if compile_model:
+            torch.set_float32_matmul_precision("high")
+            self.forward = torch.compile(self.forward, mode="default")  # type: ignore[method-assign]
+
     @property
     def config(self) -> ACTConfig:
         """Get the ACT model configuration.
@@ -198,83 +196,6 @@ class ACT(ExportableModelMixin, Model):
         filtered_config_dict = {k: v for k, v in config_dict.items() if k in {f.name for f in target_fields}}
 
         return ACTConfig(**filtered_config_dict)
-
-    @property
-    def sample_input(self) -> dict[str, torch.Tensor]:
-        """Generate a sample input dictionary for the model with random tensors.
-
-        This method creates a dictionary containing sample input tensors that match the expected
-        input format of the model. The tensors are randomly initialized and have shapes derived
-        from the model's configuration.
-
-        Returns:
-            dict[str, torch.Tensor | dict[str, torch.Tensor]]: A dictionary with two keys
-                - 'state': A tensor representing the robot state with shape (1, *state_feature.shape).
-                - 'images': Either a single tensor or a dictionary of tensors representing visual inputs,
-                    depending on the number of image features configured.
-
-        Note:
-            The batch dimension (first dimension) is set to 1 for all tensors.
-            The tensors are created on the same device as the model's parameters.
-
-        Raises:
-            RuntimeError: If input features are not configured.
-        """
-        state_feature = self._config.robot_state_feature
-
-        if state_feature is None:
-            msg = "Robot state feature is not defined in the model configuration."
-            raise RuntimeError(msg)
-
-        device = next(self._model.parameters()).device
-
-        sample_input = {STATE: torch.randn(1, *state_feature.shape, device=device)}
-
-        if len(self._config.image_features) == 1:
-            visual_feature = next(iter(self._config.image_features.values()))
-            sample_input[IMAGES] = torch.randn(1, *visual_feature.shape, device=device)
-        else:
-            for key, visual_feature in self._config.image_features.items():
-                sample_input[IMAGES + "." + key] = torch.randn(1, *visual_feature.shape, device=device)
-
-        return sample_input
-
-    @property
-    def extra_export_args(self) -> dict[str, ExportParameters]:
-        """Additional export arguments for model conversion.
-
-        This property provides extra configuration parameters needed when exporting
-        the model to different formats (ONNX, OpenVINO, and PyTorch).
-
-        Returns:
-            dict[str, ExportParameters]: A dictionary mapping format names to their export parameters.
-            Supported formats: 'onnx', 'openvino', 'executorch', 'torch'.
-
-        Example:
-            >>> model = ACT(input_features, output_features)
-            >>> export_args = model.extra_export_args
-            >>> onnx_args = export_args['onnx']
-            >>> print(onnx_args.exporter_kwargs)
-            {'output_names': ['action']}
-        """
-        extra_args: dict[str, ExportParameters] = {}
-        extra_args["onnx"] = ONNXExportParameters(
-            exporter_kwargs={
-                "output_names": ["action"],
-            },
-            preprocessing_type="image_resize",
-        )
-        extra_args["openvino"] = OpenVINOExportParameters(
-            outputs=["action"],
-            export_tokenizer=False,
-            compress_to_fp16=False,
-            exporter_kwargs={},
-            preprocessing_type="image_resize",
-        )
-        extra_args["executorch"] = ExecuTorchExportParameters()
-        extra_args["torch"] = TorchExportParameters()
-
-        return extra_args
 
     def forward(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, float]] | torch.Tensor:
         """Forward pass through the ACT model.
@@ -298,28 +219,79 @@ class ACT(ExportableModelMixin, Model):
             - KL divergence loss is computed when config.use_vae is True
         """
         if self._model.training:
-            batch = self._input_normalizer(batch)
-
-            actions_hat, (mu_hat, log_sigma_x2_hat) = self._model(batch)
-
-            l1_loss = (
-                F.l1_loss(batch[ACTION], actions_hat, reduction="none") * ~batch[EXTRA + ".action_is_pad"].unsqueeze(-1)
-            ).mean()
-
-            loss_dict = {"l1_loss": l1_loss.item()}
-            if self._config.use_vae:
-                # Calculate Dₖₗ(latent_pdf || standard_normal). Note: After computing the KL-divergence for
-                # each dimension independently, we sum over the latent dimension to get the total
-                # KL-divergence per batch element, then take the mean over the batch.
-                # (See App. B of https://huggingface.co/papers/1312.6114 for more details).
-                mean_kld = (-0.5 * (1 + log_sigma_x2_hat - mu_hat.pow(2) - (log_sigma_x2_hat).exp())).sum(-1).mean()
-                loss_dict["kld_loss"] = mean_kld.item()
-                loss = l1_loss + mean_kld * self._config.kl_weight
-            else:
-                loss = l1_loss
-
-            return loss, loss_dict
+            return self.compute_loss(batch)
         return self.predict_action_chunk(batch)
+
+    def compute_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute training loss (L1 + optional KL divergence).
+
+        Args:
+            batch: Preprocessed batch dict.
+
+        Returns:
+            Tuple of (loss tensor, loss dict with ``"l1_loss"`` and optionally ``"kld_loss"``).
+        """
+        batch = self._input_normalizer(batch)
+
+        actions_hat, (mu_hat, log_sigma_x2_hat) = self._model(batch)
+
+        l1_loss = (
+            F.l1_loss(batch[ACTION], actions_hat, reduction="none") * ~batch[EXTRA + ".action_is_pad"].unsqueeze(-1)
+        ).mean()
+
+        loss_dict: dict[str, float] = {"l1_loss": l1_loss.item()}
+        if self._config.use_vae:
+            # Calculate Dₖₗ(latent_pdf || standard_normal). Note: After computing the KL-divergence for
+            # each dimension independently, we sum over the latent dimension to get the total
+            # KL-divergence per batch element, then take the mean over the batch.
+            # (See App. B of https://huggingface.co/papers/1312.6114 for more details).
+            mean_kld = (-0.5 * (1 + log_sigma_x2_hat - mu_hat.pow(2) - (log_sigma_x2_hat).exp())).sum(-1).mean()
+            loss_dict["kld_loss"] = mean_kld.item()
+            loss = l1_loss + mean_kld * self._config.kl_weight
+        else:
+            loss = l1_loss
+
+        loss_dict["loss"] = loss.item()
+        return loss, loss_dict
+
+    @torch.no_grad()
+    def compute_val_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute validation loss (L1 + optional KL divergence).
+
+        Temporarily sets the inner model to training mode so the VAE encoder
+        runs and produces latent distribution parameters (mu, log_sigma_x2).
+        The model is restored to eval mode afterwards.  Dropout and batch-norm
+        behaviour during this call will follow training-mode semantics, but
+        gradients are still disabled by the ``@torch.no_grad()`` decorator.
+
+        Args:
+            batch: Preprocessed batch dict.
+
+        Returns:
+            Tuple of (loss tensor, loss dict with ``"l1_loss"`` and optionally ``"kld_loss"``).
+        """
+        batch = self._input_normalizer(batch)
+
+        self._model.train()
+        try:
+            actions_hat, (mu_hat, log_sigma_x2_hat) = self._model(batch)
+        finally:
+            self._model.eval()
+
+        l1_loss = (
+            F.l1_loss(batch[ACTION], actions_hat, reduction="none") * ~batch[EXTRA + ".action_is_pad"].unsqueeze(-1)
+        ).mean()
+
+        loss_dict: dict[str, float] = {"l1_loss": l1_loss.item()}
+        if self._config.use_vae:
+            mean_kld = (-0.5 * (1 + log_sigma_x2_hat - mu_hat.pow(2) - (log_sigma_x2_hat).exp())).sum(-1).mean()
+            loss_dict["kld_loss"] = mean_kld.item()
+            loss = l1_loss + mean_kld * self._config.kl_weight
+        else:
+            loss = l1_loss
+
+        loss_dict["loss"] = loss.item()
+        return loss, loss_dict
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:

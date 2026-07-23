@@ -4,15 +4,25 @@
 """Unit tests for mixin_export module."""
 
 from dataclasses import dataclass
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import onnx
 import pytest
 import torch
 
-from physicalai.export.backends import ExportParameters, ONNXExportParameters, OpenVINOExportParameters
+from physicalai.export.backends import (
+    ExportParameters,
+    ONNXExportParameters,
+    OpenVINOExportParameters,
+    TorchExportParameters,
+)
 from physicalai.export.mixin_policy import ExportablePolicyMixin, ExportBackend
+from physicalai.inference.data import (
+    InferenceFeature,
+    InferenceFeatureDtype,
+    InferenceFeatureType,
+)
+from physicalai.inference.manifest import ComponentSpec, Manifest
 
 
 # Test configurations
@@ -139,23 +149,24 @@ class ExportWrapper(ExportablePolicyMixin):
     def __init__(self, model: torch.nn.Module):
         self.model = model
         self._preprocessor = IdentityPreprocessor()
-        if not hasattr(model, "extra_export_args"):
-            model.extra_export_args = {
-                ExportBackend.ONNX: ONNXExportParameters(),
-                ExportBackend.OPENVINO: OpenVINOExportParameters(),
-            }
-
-    def _get_default_export_input_sample(self) -> dict[str, torch.Tensor] | None:
-        if not hasattr(self.model, "sample_input"):
-            return None
-        return super()._get_default_export_input_sample()
+        self.device = torch.device("cpu")
+        self._extra_export_args = {
+            ExportBackend.ONNX: ONNXExportParameters(),
+            ExportBackend.OPENVINO: OpenVINOExportParameters(),
+        }
 
     @property
-    def metadata_extra(self) -> dict[str, Any]:
-        return {"chunk_size": 10, "use_action_queue": True}
+    def sample_input(self) -> dict[str, torch.Tensor] | None:
+        # Delegate to the test model's ``sample_input`` if it exposes one.
+        model_sample = getattr(self.model, "sample_input", None)
+        return model_sample if isinstance(model_sample, dict) else None
 
     @property
-    def supported_export_backends(self) -> list[str | ExportBackend]:
+    def extra_export_args(self):
+        return self._extra_export_args
+
+    @staticmethod
+    def get_supported_export_backends() -> list[str | ExportBackend]:
         return [ExportBackend.ONNX, ExportBackend.OPENVINO, ExportBackend.EXECUTORCH]
 
 
@@ -171,7 +182,7 @@ class TestToOnnx:
         wrapper.to_onnx(output_path)
 
         assert output_path.exists()
-        assert ExportBackend.ONNX in wrapper.supported_export_backends
+        assert ExportBackend.ONNX in wrapper.get_supported_export_backends()
 
         # Verify the ONNX model can be loaded
         onnx_model = onnx.load(str(output_path))
@@ -199,7 +210,7 @@ class TestToOnnx:
         wrapper.to_onnx(output_path, input_sample=input_sample)
 
         assert output_path.exists()
-        assert ExportBackend.ONNX in wrapper.supported_export_backends
+        assert ExportBackend.ONNX in wrapper.get_supported_export_backends()
 
         # Verify the ONNX model
         onnx_model = onnx.load(str(output_path))
@@ -215,7 +226,7 @@ class TestToOnnx:
         wrapper.to_onnx(output_path, output_names=["custom_output"])
 
         assert output_path.exists()
-        assert ExportBackend.ONNX in wrapper.supported_export_backends
+        assert ExportBackend.ONNX in wrapper.get_supported_export_backends()
 
         # Verify the ONNX model
         onnx_model = onnx.load(str(output_path))
@@ -234,7 +245,7 @@ class TestToOnnx:
         wrapper.to_onnx(output_path)
 
         assert output_path.exists()
-        assert ExportBackend.ONNX in wrapper.supported_export_backends
+        assert ExportBackend.ONNX in wrapper.get_supported_export_backends()
 
         # Verify the ONNX model
         onnx_model = onnx.load(str(output_path))
@@ -254,7 +265,7 @@ class TestToOnnx:
         wrapper.to_onnx(output_path)
 
         assert output_path.exists()
-        assert ExportBackend.ONNX in wrapper.supported_export_backends
+        assert ExportBackend.ONNX in wrapper.get_supported_export_backends()
 
         # Verify the ONNX model
         onnx_model = onnx.load(str(output_path))
@@ -267,7 +278,7 @@ class TestToOnnx:
         wrapper = ExportWrapper(model)
 
         output_path = tmp_path / "model.onnx"
-        assert ExportBackend.ONNX in wrapper.supported_export_backends
+        assert ExportBackend.ONNX in wrapper.get_supported_export_backends()
 
         with pytest.raises(RuntimeError, match="input sample must be provided"):
             wrapper.to_onnx(output_path)
@@ -281,7 +292,7 @@ class TestToOnnx:
         wrapper.export(backend="onnx", output_path=output_path)
 
         assert output_path.exists()
-        assert ExportBackend.ONNX in wrapper.supported_export_backends
+        assert ExportBackend.ONNX in wrapper.get_supported_export_backends()
 
         # Verify the ONNX model can be loaded
         onnx_model = onnx.load(str(output_path))
@@ -299,7 +310,7 @@ class TestToOpenVINO:
         output_path = tmp_path / "model.xml"
         wrapper.to_openvino(output_path)
 
-        assert ExportBackend.OPENVINO in wrapper.supported_export_backends
+        assert ExportBackend.OPENVINO in wrapper.get_supported_export_backends()
         assert output_path.exists()
         assert (tmp_path / "model.bin").exists()
 
@@ -307,13 +318,13 @@ class TestToOpenVINO:
         """Test that provided kwargs override model's extra_export_args."""
         model = ModelWithSampleInput(input_dim=10, output_dim=5)
 
-        model.extra_export_args = {}
         wrapper = ExportWrapper(model)
+        wrapper._extra_export_args = {}
         output_path = tmp_path / "model.xml"
         wrapper.to_openvino(output_path)
 
         assert output_path.exists()
-        assert ExportBackend.OPENVINO in wrapper.supported_export_backends
+        assert ExportBackend.OPENVINO in wrapper.get_supported_export_backends()
 
     def test_to_openvino_with_provided_input_sample(self, tmp_path):
         """Test OpenVINO export with explicitly provided input sample."""
@@ -336,7 +347,7 @@ class TestToOpenVINO:
 
         wrapper.to_openvino(output_path, input_sample=input_sample)
 
-        assert ExportBackend.OPENVINO in wrapper.supported_export_backends
+        assert ExportBackend.OPENVINO in wrapper.get_supported_export_backends()
         assert output_path.exists()
         assert (tmp_path / "model.bin").exists()
 
@@ -348,7 +359,7 @@ class TestToOpenVINO:
         output_path = tmp_path / "model.xml"
         wrapper.to_openvino(output_path)
 
-        assert ExportBackend.OPENVINO in wrapper.supported_export_backends
+        assert ExportBackend.OPENVINO in wrapper.get_supported_export_backends()
         assert output_path.exists()
         assert (tmp_path / "model.bin").exists()
 
@@ -360,7 +371,7 @@ class TestToOpenVINO:
         output_path = tmp_path / "model.xml"
         wrapper.to_openvino(output_path)
 
-        assert ExportBackend.OPENVINO in wrapper.supported_export_backends
+        assert ExportBackend.OPENVINO in wrapper.get_supported_export_backends()
         assert output_path.exists()
         assert (tmp_path / "model.bin").exists()
 
@@ -379,12 +390,12 @@ class TestToOpenVINO:
     def test_to_openvino_via_export_method(self, tmp_path, fp16):
         """Test OpenVINO export using the generic export method."""
         model = ModelWithSampleInput(input_dim=10, output_dim=5)
-        model.extra_export_args = {
+        wrapper = ExportWrapper(model)
+        wrapper._extra_export_args = {
             "openvino": OpenVINOExportParameters(
                 compress_to_fp16=fp16,
             ),
         }
-        wrapper = ExportWrapper(model)
 
         output_path = tmp_path / "model.xml"
         wrapper.export(backend="openvino", output_path=output_path)
@@ -395,12 +406,12 @@ class TestToOpenVINO:
     def test_to_openvino_via_onnx(self, tmp_path):
         """Test OpenVINO export via ONNX intermediate model."""
         model = ModelWithSampleInput(input_dim=10, output_dim=5)
-        model.extra_export_args = {
+        wrapper = ExportWrapper(model)
+        wrapper._extra_export_args = {
             ExportBackend.OPENVINO: OpenVINOExportParameters(
                 via_onnx=True,
             ),
         }
-        wrapper = ExportWrapper(model)
 
         output_path = tmp_path / "model.xml"
         wrapper.to_openvino(output_path)
@@ -464,18 +475,11 @@ class TestToExecutorch:
             # Assert write_to_file was called (writes .pte content)
             mocks["mock_exec_program"].write_to_file.assert_called_once()
 
-            # Assert metadata.yaml was created
-            assert (tmp_path / "metadata.yaml").exists()
+            # Assert manifest.json was created
+            assert (tmp_path / "manifest.json").exists()
 
             # Assert .pte file was created (open() creates it even with mocked write)
             assert (tmp_path / "model.pte").exists()
-
-            # Verify metadata contains input_names
-            import yaml
-
-            with open(tmp_path / "metadata.yaml") as f:
-                metadata = yaml.safe_load(f)
-            assert "input_names" in metadata
 
             assert result == tmp_path / "model.pte"
 
@@ -550,3 +554,159 @@ class TestToExecutorch:
         with patch.object(wrapper, "to_executorch") as mock_to_executorch:
             wrapper.export(backend=ExportBackend.EXECUTORCH, output_path=tmp_path / "model.pte")
             mock_to_executorch.assert_called_once()
+
+
+class TorchExportWrapper(ExportablePolicyMixin):
+    """Policy-like wrapper that emulates chunk-aware torch export.
+
+    Mirrors how real policies build :class:`TorchExportParameters` based on
+    ``chunk_size`` vs ``n_action_steps``, appending an ``action_chunk_trimmer``
+    postprocessor when the two differ.
+    """
+
+    def __init__(self, model: torch.nn.Module, chunk_size: int, n_action_steps: int):
+        self.model = model
+        self._preprocessor = IdentityPreprocessor()
+        self.device = torch.device("cpu")
+        self.chunk_size = chunk_size
+        self.n_action_steps = n_action_steps
+
+    @property
+    def extra_export_args(self) -> dict[str, ExportParameters]:
+        postproc_specs: list[ComponentSpec] = []
+        if self.chunk_size != self.n_action_steps:
+            postproc_specs.append(
+                ComponentSpec(
+                    type="action_chunk_trimmer",
+                    n_action_steps=self.n_action_steps,
+                ),
+            )
+        return {
+            ExportBackend.TORCH: TorchExportParameters(
+                preprocessors_specs=[ComponentSpec(type="to_float_tensor")],
+                postprocessors_specs=postproc_specs,
+            )
+        }
+
+    @staticmethod
+    def get_supported_export_backends() -> list[str | ExportBackend]:
+        return [ExportBackend.TORCH]
+
+
+class TestToTorch:
+    """Tests for to_torch method."""
+
+    def test_to_torch_adds_action_chunk_trimmer_when_chunk_differs(self, tmp_path):
+        """Trimmer postprocessor is recorded when chunk_size != n_action_steps."""
+        model = ModelWithSampleInput(input_dim=10, output_dim=5)
+        wrapper = TorchExportWrapper(model, chunk_size=10, n_action_steps=5)
+
+        wrapper.to_torch(tmp_path)
+
+        manifest = Manifest.load(tmp_path / "manifest.json")
+        postproc_types = [spec.type for spec in manifest.model.postprocessors]
+        assert "action_chunk_trimmer" in postproc_types
+
+        trimmer = next(spec for spec in manifest.model.postprocessors if spec.type == "action_chunk_trimmer")
+        assert trimmer.model_dump()["n_action_steps"] == 5
+
+    def test_to_torch_no_trimmer_when_chunk_matches(self, tmp_path):
+        """No trimmer is added when chunk_size equals n_action_steps."""
+        model = ModelWithSampleInput(input_dim=10, output_dim=5)
+        wrapper = TorchExportWrapper(model, chunk_size=5, n_action_steps=5)
+
+        wrapper.to_torch(tmp_path)
+
+        manifest = Manifest.load(tmp_path / "manifest.json")
+        postproc_types = [spec.type for spec in manifest.model.postprocessors]
+        assert "action_chunk_trimmer" not in postproc_types
+
+    def test_to_torch_records_to_float_tensor_preprocessor(self, tmp_path):
+        """The ``to_float_tensor`` preprocessor spec is recorded in the manifest."""
+        model = ModelWithSampleInput(input_dim=10, output_dim=5)
+        wrapper = TorchExportWrapper(model, chunk_size=5, n_action_steps=5)
+
+        wrapper.to_torch(tmp_path)
+
+        manifest = Manifest.load(tmp_path / "manifest.json")
+        preproc_types = [spec.type for spec in manifest.model.preprocessors]
+        assert "to_float_tensor" in preproc_types
+
+
+class TestSampleInputFromSchema:
+    """Tests for the default ``sample_input`` property derived from ``inputs_schema``."""
+
+    def test_sample_input_built_from_inputs_schema(self):
+        """``sample_input`` materializes a tensor/string per schema feature."""
+        schema = [
+            InferenceFeature(
+                ftype=InferenceFeatureType.VISUAL,
+                shape=(3, 4, 4),
+                name="image",
+                dtype=InferenceFeatureDtype.FLOAT32,
+            ),
+            InferenceFeature(
+                ftype=InferenceFeatureType.STATE,
+                shape=(7,),
+                name="state",
+                dtype=InferenceFeatureDtype.FLOAT32,
+            ),
+            InferenceFeature(
+                ftype=InferenceFeatureType.COMMON,
+                shape=(),
+                name="step",
+                dtype=InferenceFeatureDtype.INT64,
+            ),
+            InferenceFeature(
+                ftype=InferenceFeatureType.LANGUAGE,
+                shape=(),
+                name="task",
+                dtype=InferenceFeatureDtype.STRING,
+            ),
+        ]
+
+        policy = ExportablePolicyMixin()
+        with patch.object(
+            ExportablePolicyMixin, "inputs_schema", new_callable=lambda: property(lambda _self: schema)
+        ):
+            sample = policy.sample_input
+
+        assert sample is not None
+        assert set(sample.keys()) == {"image", "state", "step", "task"}
+
+        assert isinstance(sample["image"], torch.Tensor)
+        assert sample["image"].shape == (1, 3, 4, 4)
+        assert sample["image"].dtype == torch.float32
+
+        assert isinstance(sample["state"], torch.Tensor)
+        assert sample["state"].shape == (1, 7)
+        assert sample["state"].dtype == torch.float32
+
+        assert isinstance(sample["step"], torch.Tensor)
+        assert sample["step"].shape == ()
+        assert sample["step"].dtype == torch.int64
+
+        assert sample["task"] == "Example prompt string"
+
+
+class TestDefaultExportInputSample:
+    """Tests for ``_get_default_export_input_sample``."""
+
+    def test_tensors_moved_to_policy_device(self):
+        """Processed sample tensors are moved to the policy's ``device``."""
+        model = ModelWithSampleInput(input_dim=10, output_dim=5)
+        wrapper = ExportWrapper(model)
+        # ``meta`` device works without GPU hardware and is easy to assert on.
+        wrapper.device = torch.device("meta")
+
+        sample = wrapper._get_default_export_input_sample()
+
+        assert sample is not None
+        assert all(tensor.device.type == "meta" for tensor in sample.values())
+
+    def test_returns_none_without_sample_input(self):
+        """``None`` is returned when the policy provides no ``sample_input``."""
+        model = SimpleModel(SimpleConfig())
+        wrapper = ExportWrapper(model)
+
+        assert wrapper._get_default_export_input_sample() is None

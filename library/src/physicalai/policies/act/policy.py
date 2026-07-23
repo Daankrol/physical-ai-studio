@@ -6,8 +6,18 @@
 from typing import Any, cast
 
 import torch
+from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
+from physicalai.inference.manifest import ComponentSpec
 
 from physicalai.data import Dataset, Feature, FeatureType, NormalizationParameters, Observation
+from physicalai.data.observation import ACTION, IMAGES, STATE
+from physicalai.export.backends import (
+    ExecuTorchExportParameters,
+    ExportParameters,
+    ONNXExportParameters,
+    OpenVINOExportParameters,
+    TorchExportParameters,
+)
 from physicalai.export.mixin_policy import ExportablePolicyMixin, ExportBackend
 from physicalai.gyms import Gym
 from physicalai.policies.act.config import ACTConfig
@@ -88,7 +98,7 @@ class ACT(ExportablePolicyMixin, Policy):
         vision_backbone: str = "resnet18",
         pretrained_backbone_weights: str | None = "ResNet18_Weights.IMAGENET1K_V1",
         replace_final_stride_with_dilation: bool = False,
-        max_image_size: int = 768,
+        image_size: tuple[int, int] = (384, 384),
         pre_norm: bool = False,
         dim_model: int = 512,
         n_heads: int = 8,
@@ -102,9 +112,10 @@ class ACT(ExportablePolicyMixin, Policy):
         temporal_ensemble_coeff: float | None = None,
         dropout: float = 0.1,
         kl_weight: float = 10.0,
-        optimizer_lr: float = 1e-5,
+        optimizer_lr: float = 1e-4,
         optimizer_weight_decay: float = 1e-4,
-        optimizer_grad_clip_norm: float = 10.0,
+        optimizer_grad_clip_norm: float = 10000.0,
+        compile_model: bool = False,
         # Eager initialization (for checkpoint loading)
         dataset_stats: dict[str, Any] | None = None,
     ) -> None:
@@ -124,7 +135,7 @@ class ACT(ExportablePolicyMixin, Policy):
             vision_backbone=vision_backbone,
             pretrained_backbone_weights=pretrained_backbone_weights,
             replace_final_stride_with_dilation=replace_final_stride_with_dilation,
-            max_image_size=max_image_size,
+            image_size=image_size,
             pre_norm=pre_norm,
             dim_model=dim_model,
             n_heads=n_heads,
@@ -141,17 +152,18 @@ class ACT(ExportablePolicyMixin, Policy):
             optimizer_lr=optimizer_lr,
             optimizer_weight_decay=optimizer_weight_decay,
             optimizer_grad_clip_norm=optimizer_grad_clip_norm,
+            compile_model=compile_model,
         )
 
         # Save config as hyperparameters for checkpoint restoration
-        self.save_hyperparameters(ignore=["config"])  # Save individual args, not config object
+        self.save_hyperparameters(ignore=["config", "compile_model"])
         # Also save config dict for compatibility
         self.hparams["config"] = self.config.to_dict()
 
         # Model will be built in setup() or immediately if env_action_dim provided
         self.model: ACTModel | None = None
 
-        self._preprocessor = ACTPreprocessor(image_resolution=(self.config.max_image_size, self.config.max_image_size))
+        self._preprocessor = ACTPreprocessor(image_resolution=self.config.image_size)
         self._postprocessor = None
 
         # Eager initialization if dataset_stats is provided
@@ -212,6 +224,7 @@ class ACT(ExportablePolicyMixin, Policy):
             temporal_ensemble_coeff=self.config.temporal_ensemble_coeff,
             dropout=self.config.dropout,
             kl_weight=self.config.kl_weight,
+            compile_model=self.config.compile_model,
         )
 
     def setup(self, stage: str) -> None:
@@ -301,6 +314,27 @@ class ACT(ExportablePolicyMixin, Policy):
         # During evaluation, return action chunk predictions
         return self.predict_action_chunk(batch)
 
+    def compute_val_loss(self, batch: Observation) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute validation loss on a batch.
+
+        Delegates to the model's ``compute_val_loss`` without toggling
+        train mode (avoiding dropout noise in the validation metric).
+
+        Args:
+            batch: Observation batch (must contain ground-truth actions).
+
+        Returns:
+            Tuple of (loss tensor, loss dict).
+
+        Raises:
+            RuntimeError: If the model is not initialized.
+        """
+        if self.model is None:
+            msg = "ACT model is not initialized."
+            raise RuntimeError(msg)
+        processed_batch = self._preprocessor(batch.to_dict())
+        return self.model.compute_val_loss(processed_batch)
+
     def training_step(self, batch: Observation, batch_idx: int) -> dict[str, torch.Tensor]:
         """Training step for the policy.
 
@@ -377,30 +411,6 @@ class ACT(ExportablePolicyMixin, Policy):
                 gradient_clip_algorithm=gradient_clip_algorithm or "norm",
             )
 
-    def evaluation_step(self, batch: Observation, stage: str) -> None:  # noqa: PLR6301
-        """Evaluation step (no-op by default).
-
-        Args:
-            batch (Observation): Input batch.
-            stage (str): Evaluation stage, e.g., "val" or "test".
-        """
-        del batch, stage
-
-    def validation_step(self, batch: Gym, batch_idx: int) -> dict[str, float]:
-        """Validation step.
-
-        Runs gym-based validation via rollout evaluation. The DataModule's val_dataloader
-        returns Gym environment instances directly.
-
-        Args:
-            batch: Gym environment to evaluate.
-            batch_idx: Index of the batch.
-
-        Returns:
-            Metrics dict from gym rollout.
-        """
-        return self.evaluate_gym(batch, batch_idx, stage="val")
-
     def test_step(self, batch: Gym, batch_idx: int) -> dict[str, float]:
         """Test step.
 
@@ -428,8 +438,8 @@ class ACT(ExportablePolicyMixin, Policy):
         if hasattr(self.model, "reset") and callable(self.model.reset):
             self.model.reset()
 
-    @property
-    def supported_export_backends(self) -> list[str | ExportBackend]:
+    @staticmethod
+    def get_supported_export_backends() -> list[str | ExportBackend]:
         """Get a list of export backends supported by policy.
 
         This method returns a list of supported export backends as strings.
@@ -443,3 +453,143 @@ class ACT(ExportablePolicyMixin, Policy):
             ExportBackend.ONNX,
             ExportBackend.EXECUTORCH,
         ]
+
+    @property
+    def inputs_schema(self) -> list[InferenceFeature] | None:
+        """Describe the policy's expected model inputs for export tracing.
+
+        Returns:
+            A list with a ``state`` feature and one or more image features keyed by
+            ``images`` (single camera) or ``images.<name>`` (multi-camera). Returns
+            ``None`` if the underlying model has not been initialized yet.
+
+        Raises:
+            RuntimeError: If the robot state or image feature shape is not defined.
+        """
+        if self.model is None:
+            return None
+
+        state_feature = self.model._config.robot_state_feature  # noqa: SLF001
+        if state_feature is None or state_feature.shape is None:
+            msg = "Robot state feature is not defined in the model configuration."
+            raise RuntimeError(msg)
+
+        schema: list[InferenceFeature] = [
+            InferenceFeature(
+                ftype=InferenceFeatureType.STATE,
+                shape=tuple(state_feature.shape),
+                name=STATE,
+                dtype=InferenceFeatureDtype.FLOAT32,
+            ),
+        ]
+
+        image_features = self.model._config.image_features  # noqa: SLF001
+        if len(image_features) == 1:
+            visual_feature = next(iter(image_features.values()))
+            if visual_feature.shape is None:
+                msg = "Image feature shape is not defined in the model configuration."
+                raise RuntimeError(msg)
+            schema.append(
+                InferenceFeature(
+                    ftype=InferenceFeatureType.VISUAL,
+                    shape=tuple(visual_feature.shape),
+                    name=IMAGES,
+                    dtype=InferenceFeatureDtype.FLOAT32,
+                ),
+            )
+        else:
+            for key, visual_feature in image_features.items():
+                if visual_feature.shape is None:
+                    msg = f"Image feature shape for '{key}' is not defined in the model configuration."
+                    raise RuntimeError(msg)
+                schema.append(
+                    InferenceFeature(
+                        ftype=InferenceFeatureType.VISUAL,
+                        shape=tuple(visual_feature.shape),
+                        name=f"{IMAGES}.{key}",
+                        dtype=InferenceFeatureDtype.FLOAT32,
+                    ),
+                )
+
+        return schema
+
+    @property
+    def outputs_schema(self) -> list[InferenceFeature] | None:
+        """Describe the policy's model output for export.
+
+        Returns:
+            A list with a single ``action`` feature of shape
+            ``(chunk_size, *action_feature.shape)``. Returns ``None`` if the
+            underlying model has not been initialized yet.
+
+        Raises:
+            RuntimeError: If the action feature shape is not defined.
+        """
+        if self.model is None:
+            return None
+
+        action_feature = self.model._config.action_feature  # noqa: SLF001
+        if action_feature is None or action_feature.shape is None:
+            msg = "Action feature is not defined in the model configuration."
+            raise RuntimeError(msg)
+
+        return [
+            InferenceFeature(
+                ftype=InferenceFeatureType.ACTION,
+                shape=(self.config.chunk_size, *tuple(action_feature.shape)),
+                name=ACTION,
+                dtype=InferenceFeatureDtype.FLOAT32,
+            ),
+        ]
+
+    @property
+    def extra_export_args(self) -> dict[str, ExportParameters]:
+        """Additional export arguments for model conversion.
+
+        Returns:
+            dict[str, ExportParameters]: A dictionary mapping format names to their export parameters.
+        """
+        postproc_specs = []
+        if self.config.chunk_size != self.config.n_action_steps:
+            postproc_specs.append(
+                ComponentSpec(
+                    type="action_chunk_trimmer",
+                    n_action_steps=self.config.n_action_steps,
+                ),
+            )
+
+        preproc_specs = [
+            ComponentSpec(
+                type="resize",
+                image_resolution=self.config.image_size,
+                mode="letterbox",
+            ),
+        ]
+
+        extra_args: dict[str, ExportParameters] = {}
+        output_names = [feature.name for feature in (self.outputs_schema or [])]
+        extra_args["onnx"] = ONNXExportParameters(
+            exporter_kwargs={
+                "output_names": output_names,
+            },
+            preprocessors_specs=preproc_specs,
+            postprocessors_specs=postproc_specs,
+        )
+        extra_args["openvino"] = OpenVINOExportParameters(
+            outputs=output_names,
+            export_tokenizer=False,
+            compress_to_fp16=True,
+            exporter_kwargs={},
+            preprocessors_specs=preproc_specs,
+            postprocessors_specs=postproc_specs,
+        )
+        extra_args["executorch"] = ExecuTorchExportParameters(
+            preprocessors_specs=preproc_specs,
+            postprocessors_specs=postproc_specs,
+        )
+        extra_args["torch"] = TorchExportParameters(
+            preprocessors_specs=[ComponentSpec(type="to_float_tensor")],
+            postprocessors_specs=postproc_specs,
+        )
+
+        return extra_args

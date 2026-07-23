@@ -8,27 +8,19 @@ import thumbnailUrl from '../../../assets/mocked-project-thumbnail.png';
 import { paths } from '../../../router';
 import { MenuActions } from './menu-actions.component';
 
-import classes from './project-list.module.scss';
+import classes from './project-list.module.css';
 
 type ProjectCardProps = {
     item: SchemaProjectInput;
     isActive: boolean;
 };
 
-//const robotNameFromTypeMap: { [key: string]: string } = {
-//    so100_follower: 'SO-100',
-//    so101_follower: 'SO-101',
-//    koch_follower: 'Koch',
-//    stretch3: 'Stretch 3',
-//    lekiwi: 'LeKiwi',
-//    viperx: 'ViperX',
-//    hope_jr_arm: 'HopeJrArm',
-//    bi_so100_follower: 'Bi SO-100',
-//    reachy2: 'Reachy2 Robot',
-//};
-
 export const ProjectCard = ({ item, isActive }: ProjectCardProps) => {
-    const deleteMutation = $api.useMutation('delete', '/api/projects/{project_id}');
+    const deleteMutation = $api.useMutation('delete', '/api/projects/{project_id}', {
+        meta: {
+            invalidates: [['get', '/api/projects']],
+        },
+    });
 
     const onAction = (key: Key) => {
         switch (key.toString()) {

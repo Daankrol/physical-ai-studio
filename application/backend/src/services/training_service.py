@@ -1,43 +1,26 @@
 import asyncio
 import multiprocessing as mp
-from collections.abc import Mapping
 from multiprocessing.synchronize import Event
 from queue import Empty
-from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-if TYPE_CHECKING:
-    import lightning.pytorch as pl
-from lightning.pytorch.callbacks import Callback, ProgressBar
-from lightning.pytorch.utilities.types import STEP_OUTPUT
 from loguru import logger
 
-from schemas.job import JobStatus, JobType
+from schemas.base_job import JobStatus, JobType
+from schemas.job import TrainJobPayload
 from services.event_processor import EventType
 from services.job_service import JobService
+from settings import get_settings
 from workers.base import BaseThreadWorker
 
 
-class ProgressCallback(ProgressBar):
-    def __init__(self, job_id: UUID):
-        super().__init__()
-        self.job_id = job_id
-
-    def on_fit_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:  # noqa ARG002
-        """Pre-compute total steps once training begins."""
-        self.total_steps = trainer.max_steps
-
-    def on_train_batch_end(
-        self, trainer: "pl.Trainer", pl_module: "pl.LightningModule", outputs: STEP_OUTPUT, batch: Any, batch_idx: int
-    ) -> None:
-        super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
-        progress = round((trainer.global_step) / self.total_steps * 100)
-        if progress < 100:
-            asyncio.run(JobService.update_job_status(job_id=self.job_id, status=JobStatus.RUNNING, progress=progress))
-
-
 class TrainingTrackingDispatcher(BaseThreadWorker):
-    """Dispatch events from the callback to a queue asynchronously."""
+    """Forward progress updates to the job store and event stream off the hot path.
+
+    Backends call :meth:`report` (a `ProgressReporter`) from the training thread
+    or event loop; the dispatcher thread drains the queue and performs the async
+    DB writes so training is never blocked on I/O.
+    """
 
     def __init__(self, job_id: UUID, event_queue: mp.Queue, interrupt_event: Event):
         super().__init__(stop_event=interrupt_event)
@@ -48,105 +31,30 @@ class TrainingTrackingDispatcher(BaseThreadWorker):
 
     async def run_loop(self) -> None:
         while not self.interrupt_event.is_set():
-            try:
-                progress, extra_info = self.queue.get_nowait()
-                job = await JobService.update_job_status(
-                    self.job_id, JobStatus.RUNNING, progress=progress, extra_info=extra_info
-                )
-                self.event_queue.put((EventType.JOB_UPDATE, job))
-            except Empty:
+            if not await self._drain_one():
                 await asyncio.sleep(0.05)
+        while await self._drain_one():
+            pass
 
-    def update_progress(self, progress: int, extra_info: dict) -> None:
-        self.queue.put((progress, extra_info))
-
-
-class TrainingTrackingCallback(Callback):
-    def __init__(
-        self,
-        shutdown_event: Event,
-        interrupt_event: Event,
-        dispatcher: TrainingTrackingDispatcher,
-    ):
-        super().__init__()
-        self.shutdown_event = shutdown_event  # global stop event in case of shutdown
-        self.interrupt_event = interrupt_event  # event for interrupting training gracefully
-        self.dispatcher = dispatcher
-
-    def on_train_batch_end(
-        self,
-        trainer: "pl.Trainer",
-        pl_module: "pl.LightningModule",  # noqa ARG002
-        outputs: STEP_OUTPUT,
-        batch: Any,  # noqa ARG002
-        batch_idx: int,  # noqa ARG002
-    ) -> None:
-        if isinstance(outputs, Mapping):
-            loss_tensor = outputs.get("loss")
-            if loss_tensor is not None:
-                loss_val = loss_tensor.detach().cpu().item()
-            else:
-                loss_val = None  # safety fallback
-        else:
-            loss_val = None  # safety fallback
-
-        progress = round((trainer.global_step) / trainer.max_steps * 100)
-        self.dispatcher.update_progress(progress, extra_info={"train/loss_step": loss_val})
-        if self.shutdown_event.is_set() or self.interrupt_event.is_set():
-            trainer.should_stop = True
-
-
-class TrainingLogCallback(Callback):
-    """Mirror training progress/metrics to loguru as regular log lines."""
-
-    def __init__(self):
-        super().__init__()
-        self.every_n_steps = 1
-
-    def on_fit_start(self, trainer: "pl.Trainer", pl_module: "pl.LightningModule") -> None:  # noqa ARG002
-        """Resolve logging interval once trainer values are available."""
-        self.every_n_steps = self._auto_every_n_steps(trainer.max_steps)
-
-        logger.info(
-            f"Training log cadence configured: every_n_steps={self.every_n_steps}, max_steps={trainer.max_steps}"
+    async def _drain_one(self) -> bool:
+        """Apply one queued progress update. Return False when the queue is empty."""
+        try:
+            progress, message, extra_info = self.queue.get_nowait()
+        except Empty:
+            return False
+        job = await JobService.update_job_status(
+            self.job_id,
+            JobStatus.RUNNING,
+            message=message,
+            progress=progress,
+            extra_info=extra_info,
         )
+        self.event_queue.put((EventType.JOB_UPDATE, job))
+        return True
 
-    @staticmethod
-    def _auto_every_n_steps(total_steps: int) -> int:
-        """Choose an interval that targets >=1000 logs and at least every 100 steps.
-
-        Rules:
-        - Never less frequent than every 100 steps.
-        - Aim for at least 1000 progress log entries when possible.
-        """
-        if total_steps <= 0:
-            return 1
-
-        # Log at least once every 100 steps, otherwise make sure to log 1000 times
-        return min(100, max(1, total_steps // 1000))
-
-    def on_train_batch_end(
-        self,
-        trainer: "pl.Trainer",
-        pl_module: "pl.LightningModule",  # noqa ARG002
-        outputs: STEP_OUTPUT,
-        batch: Any,  # noqa ARG002
-        batch_idx: int,  # noqa ARG002
-    ) -> None:
-        global_step = trainer.global_step
-        is_first_step = global_step <= 1
-        if not is_first_step and global_step % self.every_n_steps != 0:
-            return
-
-        loss_val: float | None = None
-        if isinstance(outputs, Mapping):
-            loss_tensor = outputs.get("loss")
-            if loss_tensor is not None:
-                loss_val = loss_tensor.detach().cpu().item()
-
-        max_steps = max(1, trainer.max_steps)
-        progress = min(100, round(global_step / max_steps * 100))
-        logger.info(f"Training progress: step={global_step}/{max_steps} ({progress}%), train/loss_step={loss_val}")
+    def report(self, progress: int, *, message: str | None = None, extra_info: dict | None = None) -> None:
+        """`ProgressReporter`-compatible entry point used by training backends."""
+        self.queue.put((progress, message, extra_info))
 
 
 class TrainingService:
@@ -164,17 +72,49 @@ class TrainingService:
     @staticmethod
     async def abort_orphan_jobs() -> None:
         """
-        Abort all running orphan training jobs (that do not belong to any worker).
+        Reconcile RUNNING training jobs left behind by a previous process.
 
-        This method can be called during application shutdown/setup to ensure that
-        any orphan in-progress training jobs are marked as failed.
+        Called on training-worker setup and teardown. A remote job keeps running
+        on the trainer independently of the studio, so a RUNNING job that already
+        recorded its ``remote_job_id`` is requeued (back to PENDING) to reattach
+        and mirror progress on the next pickup -- this is what lets a run survive
+        the studio restarting (e.g. the laptop was closed overnight). Any other
+        orphaned RUNNING training job cannot resume and is marked FAILED.
         """
+        remote_mode = get_settings().training_mode == "remote"
         query = {"status": JobStatus.RUNNING, "type": JobType.TRAINING}
         running_jobs = await JobService.get_job_list(extra_filters=query)
         for job in running_jobs:
+            remote_job_id = TrainingService._reattachable_remote_job_id(job) if remote_mode else None
+            if remote_job_id is not None:
+                logger.info(
+                    "Requeuing remote training job {} to reattach to trainer job {}",
+                    job.id,
+                    remote_job_id,
+                )
+                await JobService.update_job_status(
+                    job_id=job.id,
+                    status=JobStatus.PENDING,
+                    message="Reconnecting to remote training job after restart",
+                )
+                continue
             logger.warning(f"Aborting orphan training job with id: {job.id}")
             await JobService.update_job_status(
                 job_id=job.id,
                 status=JobStatus.FAILED,
                 message="Job aborted due to application shutdown",
             )
+
+    @staticmethod
+    def _reattachable_remote_job_id(job: object) -> UUID | None:
+        """Return the persisted remote job id for a training job, if any."""
+        payload = getattr(job, "payload", None)
+        if isinstance(payload, TrainJobPayload):
+            return payload.remote_job_id
+        if isinstance(payload, dict):
+            remote_job_id = payload.get("remote_job_id")
+            try:
+                return UUID(str(remote_job_id))
+            except (TypeError, ValueError, AttributeError):
+                return None
+        return None

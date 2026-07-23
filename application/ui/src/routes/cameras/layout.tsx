@@ -13,6 +13,7 @@ import {
     Menu,
     MenuTrigger,
     minmax,
+    toast,
     View,
 } from '@geti-ui/ui';
 import { Add, MoreMenu } from '@geti-ui/ui/icons';
@@ -20,17 +21,22 @@ import { clsx } from 'clsx';
 import { NavLink, Outlet, useParams } from 'react-router-dom';
 
 import { $api } from '../../api/client';
+import { getApiErrorMessage, isRecordingLockedError, isResourceInUseError } from '../../api/errors';
 import { SchemaProjectCamera } from '../../api/types';
 import { useProjectId } from '../../features/projects/use-project';
 import { ConnectionStatus } from '../../features/robots/robots-list';
 import { paths } from '../../router';
 import { ReactComponent as CameraIcon } from './../../assets/camera.svg';
 
-import classes from './../../features/robots/robots-list.module.scss';
+import classes from './../../features/robots/robots-list.module.css';
 
 const MenuActions = ({ camera_id }: { camera_id: string }) => {
     const { project_id } = useProjectId();
-    const deleteCameraMutation = $api.useMutation('delete', '/api/projects/{project_id}/cameras/{camera_id}');
+    const deleteCameraMutation = $api.useMutation('delete', '/api/projects/{project_id}/cameras/{camera_id}', {
+        meta: {
+            invalidates: [['get', '/api/projects/{project_id}/cameras', { params: { path: { project_id } } }]],
+        },
+    });
 
     return (
         <MenuTrigger>
@@ -41,7 +47,24 @@ const MenuActions = ({ camera_id }: { camera_id: string }) => {
                 selectionMode='single'
                 onAction={(action) => {
                     if (action === 'delete') {
-                        deleteCameraMutation.mutate({ params: { path: { project_id, camera_id } } });
+                        deleteCameraMutation.mutate(
+                            { params: { path: { project_id, camera_id } } },
+                            {
+                                onError: (error) => {
+                                    if (isRecordingLockedError(error)) {
+                                        toast.negative('Cannot delete camera while a recording session is active.');
+                                        return;
+                                    }
+                                    if (isResourceInUseError(error)) {
+                                        toast.info(
+                                            getApiErrorMessage(error) ?? 'This camera is in use and cannot be deleted.'
+                                        );
+                                        return;
+                                    }
+                                    toast.negative(getApiErrorMessage(error) ?? 'Failed to delete camera.');
+                                },
+                            }
+                        );
                     }
                 }}
             >
@@ -118,7 +141,9 @@ const CameraListItem = ({
 
 export const CamerasList = () => {
     const { project_id = '' } = useParams<{ project_id: string }>();
-    const { data: hardwareCameras } = $api.useSuspenseQuery('get', '/api/hardware/cameras');
+    const { data: hardwareCameras } = $api.useSuspenseQuery('get', '/api/hardware/cameras', {
+        params: { query: { all: true } },
+    });
     const { data: projectCameras } = $api.useSuspenseQuery('get', '/api/projects/{project_id}/cameras', {
         params: { path: { project_id } },
     });

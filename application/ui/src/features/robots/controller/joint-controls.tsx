@@ -4,7 +4,7 @@ import { ActionButton, Flex, Grid, Heading, minmax, repeat, Slider, Switch, View
 import { ChevronDownSmallLight } from '@geti-ui/ui/icons';
 import { radToDeg } from 'three/src/math/MathUtils.js';
 
-import { urdfPathForType, useRobotModels } from '../robot-models-context';
+import { useLoadModelQuery } from '../robot-models-context';
 import { useJointState, useSynchronizeModelJoints } from '../use-joint-state';
 import { useRobot, useRobotId } from '../use-robot';
 
@@ -57,10 +57,8 @@ const Joints = ({ joints }: { joints: JointsState }) => {
 
 // Get the default stationary joint setting with min and max range based on the urdf model
 const useModelJoints = (): JointsState => {
-    const { getModel } = useRobotModels();
-
     const robot = useRobot();
-    const model = getModel(urdfPathForType(robot.type));
+    const { data: model } = useLoadModelQuery(robot.type);
 
     const modelJoints = Object.values(model?.joints ?? {});
     const joints: JointsState = modelJoints
@@ -83,7 +81,7 @@ const useRobotJointsState = (): JointsState => {
 
     const { project_id, robot_id } = useRobotId();
     const { joints } = useJointState(project_id, robot_id);
-    useSynchronizeModelJoints(joints, urdfPathForType(robot.type));
+    useSynchronizeModelJoints(joints, robot.type);
 
     return joints.map((joint) => {
         const modelJoint = modelJoints.find(({ name }) => name === joint.name);
@@ -126,8 +124,10 @@ export const JointControls = ({
     return (
         <View
             gridArea='controls'
+            zIndex={1}
             backgroundColor={'gray-100'}
             padding='size-100'
+            margin='size-400'
             UNSAFE_style={{
                 border: '1px solid var(--spectrum-global-color-gray-200)',
                 borderRadius: '8px',

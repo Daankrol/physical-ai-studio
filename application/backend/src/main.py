@@ -1,34 +1,38 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-import multiprocessing as mp
 import os
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import Response
+from starlette.middleware.base import RequestResponseEndpoint
 
 from api.camera import router as camera_router
 from api.dataset import router as dataset_router
-from api.dependencies import CameraRegistryDep, RobotRegistryDep
+from api.dataset_import import router as imports_router
 from api.environments import router as project_environments_router
 from api.hardware import router as hardware_router
 from api.job import router as job_router
 from api.logs import router as logs_router
 from api.models import router as models_router
+from api.policies import router as policies_router
 from api.project import router as project_router
 from api.project_camera import router as project_cameras_router
 from api.record import router as record_router
-from api.robot_calibration import router as robot_calibration_router
+from api.robot_catalog import router as robot_catalog_router
 from api.robot_control import router as robot_control_router
 from api.robot_setup import router as robot_setup_router
 from api.robots import router as project_robots_router
 from api.settings import router as settings_router
+from api.system import system_router
 from api.webui import SPAStaticFiles
-from core import lifespan
+from core.lifecycle import lifespan
 from exception_handlers import register_application_exception_handlers
+from middleware.upload_size_guard import upload_size_guard_middleware
 from settings import get_settings
-from utils.device import get_torch_device
+from utils.multiprocessing import ensure_spawn_start_method
 
 settings = get_settings()
 app = FastAPI(
@@ -41,8 +45,8 @@ app = FastAPI(
 
 app.include_router(project_router)
 app.include_router(project_robots_router)
+app.include_router(robot_catalog_router)
 app.include_router(project_cameras_router)
-app.include_router(robot_calibration_router)
 app.include_router(robot_setup_router)
 app.include_router(robot_control_router)
 app.include_router(project_environments_router)
@@ -52,19 +56,25 @@ app.include_router(dataset_router)
 app.include_router(record_router)
 app.include_router(settings_router)
 app.include_router(models_router)
+app.include_router(policies_router)
 app.include_router(job_router)
+app.include_router(imports_router)
 app.include_router(logs_router)
+app.include_router(system_router)
 
 register_application_exception_handlers(app)
 
 
+@app.middleware("http")
+async def _upload_size_guard(request: Request, call_next: RequestResponseEndpoint) -> Response:
+    return await upload_size_guard_middleware(request, call_next)
+
+
 @app.get("/api/health")
-async def health_check(camera_registry: CameraRegistryDep, robot_registry: RobotRegistryDep) -> dict:
+async def health_check() -> dict:
     """Health check endpoint."""
     return {
         "status": "healthy",
-        "camera_workers": camera_registry.get_status_summary(),
-        "robot_workers": robot_registry.get_status_summary(),
     }
 
 
@@ -79,7 +89,6 @@ if (
     app.mount("/", static_files, name="webui")
 
 if __name__ == "__main__":
-    if get_torch_device() == "xpu" and mp.get_start_method(allow_none=True) != "spawn":
-        mp.set_start_method("spawn", force=True)
+    ensure_spawn_start_method()
     uvicorn_port = int(os.environ.get("HTTP_SERVER_PORT", settings.port))
     uvicorn.run(app, host=settings.host, port=uvicorn_port)

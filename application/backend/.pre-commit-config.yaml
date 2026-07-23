@@ -3,6 +3,11 @@
 
 # Backend-specific pre-commit configuration for prek workspace mode
 # This config applies only to files in application/backend/
+#
+# This is the canonical Python app setup for this repo. Keep
+# application/trainer/.pre-commit-config.yaml in sync with this file
+# (the Alembic migration check below is the one intentional exception,
+# since it is specific to the backend's database schema).
 
 repos:
   # ========================================================================== #
@@ -42,13 +47,34 @@ repos:
           - types-aiofiles
 
   - repo: https://github.com/facebook/pyrefly-pre-commit
-    rev: 0.58.0
+    rev: 1.1.1
     hooks:
       - id: pyrefly-check
         name: Pyrefly (type checking)
-        entry: uv run pyrefly check -c pyproject.toml
+        entry: uv run pyrefly check
         language: system
         pass_filenames: false
+
+  # ========================================================================== #
+  # SECURITY - SECRET DETECTION                                                #
+  # ========================================================================== #
+  # gitleaks detects secrets (API keys, tokens, credentials) in code.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # ========================================================================== #
+  # DEPENDENCY LOCKFILE CHECKS                                                 #
+  # ========================================================================== #
+  - repo: local
+    hooks:
+      - id: check-uv-lock
+        name: Check uv.lock is up to date
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
+        files: ^(pyproject\.toml|uv\.lock)$
 
   # ========================================================================== #
   # ALEMBIC MIGRATION CHECKS                                                   #

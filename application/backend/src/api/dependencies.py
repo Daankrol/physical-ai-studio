@@ -12,20 +12,22 @@ from services import (
     DatasetService,
     EpisodeThumbnailService,
     ModelDownloadService,
+    ModelMetricsService,
     ModelService,
     ProjectCameraService,
     ProjectService,
     RobotService,
 )
+from services.dataset_import.service import DatasetImportService
 from services.environment_service import EnvironmentService
 from services.event_processor import EventProcessor
 from services.job_service import JobService
 from services.log_service import LogService
-from services.robot_calibration_service import RobotCalibrationService
+from services.robot_catalog_service import RobotCatalogService
+from services.system_service import SystemService
 from settings import get_settings
 from utils.serial_robot_tools import RobotConnectionManager
-from workers.camera_worker_registry import CameraWorkerRegistry
-from workers.robot_worker_registry import RobotWorkerRegistry
+from workers.model_worker_registry import ModelWorkerRegistry
 
 
 def is_valid_uuid(identifier: str) -> bool:
@@ -39,6 +41,12 @@ def is_valid_uuid(identifier: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+@lru_cache
+def get_system_service() -> SystemService:
+    """Provide a SystemService instance for querying system hardware."""
+    return SystemService()
 
 
 @lru_cache
@@ -66,12 +74,13 @@ def get_robot_manager_service(request: HTTPConnection) -> RobotConnectionManager
 RobotConnectionManagerDep = Annotated[RobotConnectionManager, Depends(get_robot_manager_service)]
 
 
-def get_robot_calibration_service(robot_manager: RobotConnectionManagerDep) -> RobotCalibrationService:
-    """Provide a RobotCalibrationService instance for managing robot calibrations."""
-    return RobotCalibrationService(robot_manager, settings=get_settings())
+@lru_cache
+def get_robot_catalog_service() -> RobotCatalogService:
+    """Provide a RobotCatalogService instance for the robot catalog."""
+    return RobotCatalogService()
 
 
-RobotCalibrationServiceDep = Annotated[RobotCalibrationService, Depends(get_robot_calibration_service)]
+RobotCatalogServiceDep = Annotated[RobotCatalogService, Depends(get_robot_catalog_service)]
 
 
 @lru_cache
@@ -111,6 +120,16 @@ def get_model_service() -> ModelService:
 
 
 @lru_cache
+def get_model_metrics_service(request: HTTPConnection) -> ModelMetricsService:
+    """Provides a ModelService instance for managing models."""
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None:
+        settings = get_settings()
+
+    return ModelMetricsService(settings=settings)
+
+
+@lru_cache
 def get_model_download_service() -> ModelDownloadService:
     """Provides a ModelDownloadService instance for model exports."""
     return ModelDownloadService()
@@ -120,6 +139,12 @@ def get_model_download_service() -> ModelDownloadService:
 def get_job_service() -> JobService:
     """Provides a JobService instance for managing jobs."""
     return JobService()
+
+
+@lru_cache
+def get_dataset_import_service() -> DatasetImportService:
+    """Provides a DatasetImportService instance for dataset import jobs."""
+    return DatasetImportService()
 
 
 def get_log_service(request: HTTPConnection) -> LogService:
@@ -158,13 +183,6 @@ def get_robot_id(robot_id: str) -> UUID:
     return UUID(robot_id)
 
 
-def get_calibration_id(calibration_id: str) -> UUID:
-    """Initialize and validates a calibration ID."""
-    if not is_valid_uuid(calibration_id):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid calibration ID")
-    return UUID(calibration_id)
-
-
 def get_camera_id(camera_id: str) -> UUID:
     """Initialize and validates a camera ID."""
     if not is_valid_uuid(camera_id):
@@ -186,16 +204,12 @@ def get_environment_id(environment_id: str) -> UUID:
     return UUID(environment_id)
 
 
-def validate_uuid(uuid: str) -> UUID:
-    """Initialize and validates UUID."""
-    if not is_valid_uuid(uuid):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID")
-    return UUID(uuid)
-
-
 def get_scheduler(request: HTTPConnection) -> Scheduler:
     """Provide the global Scheduler instance."""
     return request.app.state.scheduler
+
+
+SchedulerDep = Annotated[Scheduler, Depends(get_scheduler)]
 
 
 def get_scheduler_ws(request: HTTPConnection) -> Scheduler:
@@ -208,21 +222,23 @@ def get_event_processor_ws(request: HTTPConnection) -> EventProcessor:
     return request.app.state.event_processor
 
 
-def get_camera_registry(request: HTTPConnection) -> CameraWorkerRegistry:
-    """Dependency to get camera worker registry."""
-    registry = getattr(request.app.state, "camera_registry", None)
+def get_recording_locked_camera_fingerprints(request: HTTPConnection) -> set[str]:
+    """Set of camera fingerprints locked by an active recording session."""
+    locked = getattr(request.app.state, "recording_locked_camera_fingerprints", None)
+    if locked is None:
+        raise RuntimeError("Recording lock state not initialized")
+    return locked
+
+
+RecordingLockedCamerasDep = Annotated[set[str], Depends(get_recording_locked_camera_fingerprints)]
+
+
+def get_model_registry(request: HTTPConnection) -> ModelWorkerRegistry:
+    """Dependency to get model worker registry."""
+    registry = getattr(request.app.state, "model_registry", None)
     if registry is None:
-        raise RuntimeError("Camera worker registry not initialized")
+        raise RuntimeError("Model worker registry not initialized")
     return registry
 
 
-def get_robot_registry(request: HTTPConnection) -> RobotWorkerRegistry:
-    """Dependency to get robot worker registry."""
-    registry = getattr(request.app.state, "robot_registry", None)
-    if registry is None:
-        raise RuntimeError("Robot worker registry not initialized")
-    return registry
-
-
-CameraRegistryDep = Annotated[CameraWorkerRegistry, Depends(get_camera_registry)]
-RobotRegistryDep = Annotated[RobotWorkerRegistry, Depends(get_robot_registry)]
+ModelRegistryDep = Annotated[ModelWorkerRegistry, Depends(get_model_registry)]

@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 
-@dataclass(frozen=True)
+@dataclass
 class Observation:
     """A single observation or batch of observations from an imitation learning dataset.
 
@@ -165,7 +165,20 @@ class Observation:
         """
         # Filter to only known fields
         field_names = {f.name for f in fields(cls)}
-        filtered_data = {k: v for k, v in data.items() if k in field_names}
+        filtered_data: dict[str, Any] = {}
+        nested: dict[str, dict[str, Any]] = {}
+        for key, value in data.items():
+            if key in field_names:
+                filtered_data[key] = value
+                continue
+            if key.startswith("_") and key.endswith("_keys"):
+                continue
+            if "." in key:
+                head, sub = key.split(".", 1)
+                if head in field_names:
+                    nested.setdefault(head, {})[sub] = value
+        for head, sub_map in nested.items():
+            filtered_data.setdefault(head, sub_map)
         return cls(**filtered_data)
 
     @classmethod
@@ -414,7 +427,9 @@ class Observation:
             >>> sub_batch.action.shape  # torch.Size([4, 2])
         """
 
-        def _index(value: dict | torch.Tensor | np.ndarray | None) -> dict | torch.Tensor | np.ndarray | None:
+        def _index(
+            value: dict | torch.Tensor | np.ndarray | list | None,
+        ) -> dict | torch.Tensor | np.ndarray | list | None:
             """Recursively index into value.
 
             Args:
@@ -427,7 +442,7 @@ class Observation:
                 return None
             if isinstance(value, dict):
                 return {k: _index(v) for k, v in value.items()}
-            if isinstance(value, (torch.Tensor, np.ndarray)):
+            if isinstance(value, (torch.Tensor, np.ndarray, list)):
                 return value[idx]
             # Non-indexable types (bool, scalars, etc.) pass through
             return value
@@ -464,6 +479,8 @@ class NormalizationParameters:
     std: list[float] | float | None = None
     min: list[float] | float | None = None
     max: list[float] | float | None = None
+    q01: list[float] | float | None = None
+    q99: list[float] | float | None = None
 
 
 # Module-level constants for convenient dict access

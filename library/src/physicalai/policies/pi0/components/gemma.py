@@ -157,13 +157,13 @@ class PaliGemmaWithExpert(nn.Module):
 
         action_config = self._action_expert_config
         hf_config = HFGemmaConfig(
-            vocab_size=action_config.vocab_size,
-            hidden_size=action_config.width,
-            intermediate_size=action_config.mlp_dim,
-            num_hidden_layers=action_config.depth,
-            num_attention_heads=action_config.num_heads,
-            num_key_value_heads=action_config.num_kv_heads,
-            head_dim=action_config.head_dim,
+            vocab_size=action_config.vocab_size,  # pyrefly: ignore[unexpected-keyword]
+            hidden_size=action_config.width,  # pyrefly: ignore[unexpected-keyword]
+            intermediate_size=action_config.mlp_dim,  # pyrefly: ignore[unexpected-keyword]
+            num_hidden_layers=action_config.depth,  # pyrefly: ignore[unexpected-keyword]
+            num_attention_heads=action_config.num_heads,  # pyrefly: ignore[unexpected-keyword]
+            num_key_value_heads=action_config.num_kv_heads,  # pyrefly: ignore[unexpected-keyword]
+            head_dim=action_config.head_dim,  # pyrefly: ignore[unexpected-keyword]
         )
 
         self._action_expert = GemmaForCausalLM(hf_config)
@@ -206,14 +206,14 @@ class PaliGemmaWithExpert(nn.Module):
         """Embed images using PaliGemma's vision encoder."""  # noqa: DOC201
         self._ensure_loaded()
         pixel_values = pixel_values.to(dtype=self.dtype)
-        vision_outputs = self.paligemma.vision_tower(pixel_values)
+        vision_outputs = self.paligemma.model.vision_tower(pixel_values)
         image_features = vision_outputs.last_hidden_state
-        return self.paligemma.multi_modal_projector(image_features)
+        return self.paligemma.model.multi_modal_projector(image_features)
 
     def embed_language_tokens(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Embed language tokens using PaliGemma's embedding layer."""  # noqa: DOC201
         self._ensure_loaded()
-        return self.paligemma.language_model.embed_tokens(input_ids)
+        return self.paligemma.model.language_model.embed_tokens(input_ids)
 
     def forward(
         self,
@@ -241,7 +241,7 @@ class PaliGemmaWithExpert(nn.Module):
         if prefix_embeds is not None:
             prefix_position_ids = position_ids[:, :prefix_len]
             prefix_attention_mask = attention_mask[:, :, :prefix_len, :prefix_len]
-            pali_outputs = self.paligemma.language_model(
+            pali_outputs = self.paligemma.model.language_model(
                 inputs_embeds=prefix_embeds,
                 attention_mask=prefix_attention_mask,
                 position_ids=prefix_position_ids,
@@ -258,7 +258,8 @@ class PaliGemmaWithExpert(nn.Module):
         if suffix_embeds is not None:
             suffix_cond = adarms_cond[1] if adarms_cond is not None else None
             suffix_position_ids = position_ids[:, prefix_len : prefix_len + suffix_len]
-            suffix_attention_mask = attention_mask[:, :, prefix_len:, :]
+            kv_offset = 0 if past_key_values is not None else prefix_len
+            suffix_attention_mask = attention_mask[:, :, prefix_len:, kv_offset:]
 
             if self.use_adarms and suffix_cond is not None:
                 suffix_output = self._forward_action_expert_with_adarms(
@@ -322,13 +323,13 @@ class PaliGemmaWithExpert(nn.Module):
         """Set which parameters are trainable."""
         self._ensure_loaded()
 
-        for param in self.paligemma.language_model.parameters():
+        for param in self.paligemma.model.language_model.parameters():
             param.requires_grad = tune_paligemma
 
-        for param in self.paligemma.vision_tower.parameters():
+        for param in self.paligemma.model.vision_tower.parameters():
             param.requires_grad = tune_vision_encoder
 
-        for param in self.paligemma.multi_modal_projector.parameters():
+        for param in self.paligemma.model.multi_modal_projector.parameters():
             param.requires_grad = tune_paligemma
 
         for param in self.action_expert.parameters():

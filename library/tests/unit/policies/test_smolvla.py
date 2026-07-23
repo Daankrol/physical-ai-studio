@@ -109,6 +109,11 @@ class TestSmolVLAPolicy:
         assert "config" in policy.hparams
         assert policy.hparams["config"]["chunk_size"] == 100
 
+    def test_save_hyperparameters_ignores_compile_model(self) -> None:
+        """Test compile_model is excluded from saved hyperparameters."""
+        policy = SmolVLA(compile_model=True)
+        assert "compile_model" not in policy.hparams
+
     def test_config_attribute(self) -> None:
         """Test SmolVLA policy has config attribute."""
         policy = SmolVLA(chunk_size=100, optimizer_lr=2e-4)
@@ -182,7 +187,7 @@ class TestSmolVLAPreprocessor:
         assert preprocessor.image_resolution == (512, 512)
         assert preprocessor.max_token_len == 48
         assert preprocessor.tokenizer_name == "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
-        assert preprocessor.padding == "longest"
+        assert preprocessor.padding == "max_length"
 
     def test_preprocessor_custom_values(self) -> None:
         """Test preprocessor with custom configuration values."""
@@ -388,3 +393,95 @@ class TestAttentionModes:
         """Test custom prefix length."""
         config = SmolVLAConfig(prefix_length=32)
         assert config.prefix_length == 32
+
+
+# ============================================================================ #
+# Sample Input Tests                                                           #
+# ============================================================================ #
+
+
+class TestSampleInput:
+    """Tests for SmolVLA.sample_input visual-feature detection.
+
+    Uses a lightweight stub instead of constructing the full model to keep
+    these tests fast and free of HuggingFace downloads.
+    """
+
+    @staticmethod
+    def _call_sample_input(dataset_stats: dict) -> dict:
+        """Invoke the SmolVLA.sample_input property on a minimal stub."""
+        from physicalai.policies.smolvla import SmolVLA, SmolVLAConfig
+
+        class _InnerStub:
+            def __init__(self) -> None:
+                # sample_input only reads device from this module's parameters.
+                self._model = torch.nn.Linear(1, 1)
+
+        class _ModelStub:
+            def __init__(self) -> None:
+                self._model = _InnerStub()._model
+
+        class _Stub:
+            def __init__(self, stats: dict) -> None:
+                self._dataset_stats = stats
+                self.model = _ModelStub()
+                self.config = SmolVLAConfig()
+
+        stub = _Stub(dataset_stats)
+        # inputs_schema is consumed by the base sample_input property.
+        stub.inputs_schema = SmolVLA.inputs_schema.fget(stub)  # type: ignore[attr-defined]
+        return SmolVLA.sample_input.fget(stub)  # type: ignore[attr-defined]
+
+    def test_sample_input_single_visual_feature_with_image_in_id(self) -> None:
+        """Single visual feature whose id contains 'image' produces IMAGES key."""
+        from physicalai.data.observation import IMAGES, STATE
+
+        stats = {
+            "observation.state": {"name": "state", "shape": (10,), "type": "STATE"},
+            "observation.image": {"name": "image", "shape": (3, 512, 512), "type": "VISUAL"},
+        }
+        sample_input = self._call_sample_input(stats)
+        assert STATE in sample_input
+        assert IMAGES in sample_input
+        assert sample_input[STATE].shape == (1, 10)
+        assert sample_input[IMAGES].shape == (1, 3, 512, 512)
+
+    def test_sample_input_single_visual_feature_without_image_in_id(self) -> None:
+        """Visual feature without 'image' in id is still detected via the 'type' field."""
+        from physicalai.data.observation import IMAGES, STATE
+
+        stats = {
+            "observation.state": {"name": "state", "shape": (10,), "type": "STATE"},
+            "observation.front_cam": {
+                "name": "front_cam",
+                "shape": (3, 512, 512),
+                "type": "VISUAL",
+            },
+        }
+        sample_input = self._call_sample_input(stats)
+        assert STATE in sample_input
+        assert IMAGES in sample_input
+        assert sample_input[IMAGES].shape == (1, 3, 512, 512)
+
+    def test_sample_input_multiple_visual_features_without_image_in_id(self) -> None:
+        """Multiple visual features without 'image' in id produce per-feature IMAGES.<name> keys."""
+        from physicalai.data.observation import IMAGES, STATE
+
+        stats = {
+            "observation.state": {"name": "state", "shape": (10,), "type": "STATE"},
+            "observation.front_cam": {
+                "name": "front_cam",
+                "shape": (3, 512, 512),
+                "type": "VISUAL",
+            },
+            "observation.wrist_cam": {
+                "name": "wrist_cam",
+                "shape": (3, 512, 512),
+                "type": "VISUAL",
+            },
+        }
+        sample_input = self._call_sample_input(stats)
+        assert STATE in sample_input
+        assert f"{IMAGES}.front_cam" in sample_input
+        assert f"{IMAGES}.wrist_cam" in sample_input
+        assert IMAGES not in sample_input

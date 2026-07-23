@@ -1,12 +1,19 @@
 import { createContext, ReactNode, RefObject, useContext, useRef, useState } from 'react';
 
-import { useMutation, UseMutationResult } from '@tanstack/react-query';
+import { useMutation, UseMutationResult, useQueryClient } from '@tanstack/react-query';
 
 import { fetchClient } from '../../api/client';
-import { SchemaDatasetOutput, SchemaEnvironmentWithRelations, SchemaModel } from '../../api/openapi-spec';
+import {
+    SchemaDatasetOutput,
+    SchemaEnvironmentWithRelations,
+    SchemaInferenceDeviceInfo,
+    SchemaModel,
+} from '../../api/openapi-spec';
 import useWebSocketWithResponse from '../../components/websockets/use-websocket-with-response';
 
 type FollowerSource = 'teleoperation' | 'model' | null;
+
+type InferenceDevice = Pick<SchemaInferenceDeviceInfo, 'backend' | 'device'>;
 
 interface RobotControlState {
     model_loaded: boolean;
@@ -48,8 +55,13 @@ interface useRobotControlProps {
     environment: SchemaEnvironmentWithRelations;
     model?: SchemaModel;
     dataset?: SchemaDatasetOutput;
-    backend?: string;
+    inferenceDevice?: InferenceDevice;
     onError: (error: string) => void;
+}
+
+interface LoadModelPayload {
+    model: SchemaModel;
+    inference_device: InferenceDevice;
 }
 
 type MutationResult<TVariables = void> = UseMutationResult<
@@ -62,11 +74,11 @@ type RobotControlContextValue = null | {
     observation: RefObject<Observation | undefined>;
     environment: SchemaEnvironmentWithRelations;
     model: SchemaModel | undefined;
-    backend: string | undefined;
+    inferenceDevice: InferenceDevice | undefined;
     dataset: SchemaDatasetOutput | undefined;
     state: RobotControlState;
     loadEnvironment: MutationResult<SchemaEnvironmentWithRelations>;
-    loadModel: MutationResult<{ model: SchemaModel; backend: string }>;
+    loadModel: MutationResult<LoadModelPayload>;
     loadDataset: MutationResult<SchemaDatasetOutput>;
     startTask: MutationResult<string>;
     stopTask: MutationResult;
@@ -81,19 +93,38 @@ type RobotControlContextValue = null | {
 
 const RobotControlContext = createContext<RobotControlContextValue>(null);
 
+const useRefreshEpisodes = (dataset_id?: string) => {
+    const queryClient = useQueryClient();
+
+    return () => {
+        if (dataset_id === undefined) {
+            return;
+        }
+        queryClient.invalidateQueries({
+            queryKey: [
+                'get',
+                '/api/dataset/{dataset_id}/episodes',
+                {
+                    params: { path: { dataset_id } },
+                },
+            ],
+        });
+    };
+};
+
 export const RobotControlProvider = (props: useRobotControlProps) => {
     const [state, setState] = useState<RobotControlState>(createRobotControlState());
     const observation = useRef<Observation | undefined>(undefined);
 
     const [model, setModel] = useState<SchemaModel | undefined>(props.model);
-    const [backend, setBackend] = useState<string | undefined>(props.backend);
+    const [inferenceDevice, setInferenceDevice] = useState<InferenceDevice | undefined>(props.inferenceDevice);
     const [dataset, setDataset] = useState<SchemaDatasetOutput | undefined>(props.dataset);
     const [environment, setEnvironment] = useState<SchemaEnvironmentWithRelations>(props.environment);
 
     const onOpen = () => {
         loadEnvironment.mutate(props.environment);
-        if (model && backend) {
-            loadModel.mutate({ model, backend });
+        if (model && inferenceDevice) {
+            loadModel.mutate({ model, inference_device: inferenceDevice });
         }
         if (dataset) {
             loadDataset.mutate(dataset);
@@ -101,13 +132,18 @@ export const RobotControlProvider = (props: useRobotControlProps) => {
         }
     };
 
+    const invalidateEpisodesQuery = useRefreshEpisodes(dataset?.id);
     const { sendJsonMessageAndWait, readyState } = useWebSocketWithResponse(
         fetchClient.PATH('/api/record/robot_control/ws'),
         {
             shouldReconnect: () => true,
             onMessage: (event: WebSocketEventMap['message']) => onMessage(event),
             onError: console.error,
-            onClose: () => setState(createRobotControlState()),
+            onClose: () => {
+                invalidateEpisodesQuery();
+
+                setState(createRobotControlState());
+            },
             onOpen,
         }
     );
@@ -152,13 +188,13 @@ export const RobotControlProvider = (props: useRobotControlProps) => {
 
     const loadModel = useMutation({
         meta: { skipInvalidation: true },
-        mutationFn: async (properties: { model: SchemaModel; backend: string }) => {
+        mutationFn: async (properties: LoadModelPayload) => {
             const result = await sendJsonMessageAndWait<RobotControlApiJsonResponse<RobotControlState>>(
                 { event: 'load_model', data: properties },
                 ({ data }) => data['model_loaded']
             );
             setModel(properties.model);
-            setBackend(properties.backend);
+            setInferenceDevice(properties.inference_device);
             return result;
         },
     });
@@ -182,6 +218,7 @@ export const RobotControlProvider = (props: useRobotControlProps) => {
     });
 
     const startEpisode = useMutation({
+        meta: { skipInvalidation: true },
         mutationFn: async (task: string) => {
             const message = await sendJsonMessageAndWait<RobotControlApiJsonResponse<RobotControlState>>(
                 { event: 'start_recording', data: { task } },
@@ -192,6 +229,7 @@ export const RobotControlProvider = (props: useRobotControlProps) => {
     });
 
     const saveEpisode = useMutation({
+        meta: { skipInvalidation: true },
         mutationFn: async () => {
             const message = await sendJsonMessageAndWait<RobotControlApiJsonResponse<RobotControlState>>(
                 { event: 'save_episode', data: {} },
@@ -202,6 +240,7 @@ export const RobotControlProvider = (props: useRobotControlProps) => {
     });
 
     const discardEpisode = useMutation({
+        meta: { skipInvalidation: true },
         mutationFn: async () => {
             const message = await sendJsonMessageAndWait<RobotControlApiJsonResponse<RobotControlState>>(
                 { event: 'discard_episode', data: {} },
@@ -212,6 +251,7 @@ export const RobotControlProvider = (props: useRobotControlProps) => {
     });
 
     const setFollowerSource = useMutation({
+        meta: { skipInvalidation: true },
         mutationFn: async (follower_source: FollowerSource) => {
             const message = await sendJsonMessageAndWait<RobotControlApiJsonResponse<RobotControlState>>(
                 { event: 'set_follower_source', data: { follower_source } },
@@ -232,7 +272,7 @@ export const RobotControlProvider = (props: useRobotControlProps) => {
                 environment,
                 dataset,
                 model,
-                backend,
+                inferenceDevice,
                 state,
                 loadEnvironment,
                 loadModel,

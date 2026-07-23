@@ -50,9 +50,9 @@ def _clone_kv_cache(cache: DynamicCache) -> DynamicCache:
 
     cloned = DynamicCache()
     for layer_idx, layer in enumerate(cache.layers):
-        if layer.keys is None or layer.values is None:
+        if layer.keys is None or layer.values is None:  # pyrefly: ignore[missing-attribute]
             continue
-        cloned.update(layer.keys.clone(), layer.values.clone(), layer_idx)
+        cloned.update(layer.keys.clone(), layer.values.clone(), layer_idx)  # pyrefly: ignore[missing-attribute]
     return cloned
 
 
@@ -113,6 +113,7 @@ class Pi0Model(Model):
         time_max_period: float = 4.0,
         preprocessor: Pi0Preprocessor | None = None,
         postprocessor: Pi0Postprocessor | None = None,
+        compile_model: bool = False,
     ) -> None:
         """Initialize Pi0Model."""
         super().__init__()
@@ -155,6 +156,12 @@ class Pi0Model(Model):
             self.action_time_mlp_out = nn.Linear(action_expert_width, action_expert_width)
 
         self._gradient_checkpointing_enabled = False
+
+        if compile_model:
+            torch.set_float32_matmul_precision("high")
+            compile_mode = "default"
+            self.sample_actions = torch.compile(self.sample_actions, mode=compile_mode)  # type: ignore[method-assign]
+            self.forward = torch.compile(self.forward, mode=compile_mode)  # type: ignore[method-assign]
 
         self.preprocessor = preprocessor
         self.postprocessor = postprocessor
@@ -336,9 +343,23 @@ class Pi0Model(Model):
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, Any]]:
         """Forward pass: compute loss during training or predict actions during inference."""  # noqa: DOC201
         if self.training:
-            processed = self._preprocess_batch(batch, require_actions=True)
-            return self._forward_loss(processed)
+            return self.compute_loss(batch)
         return self.predict_action_chunk(batch)
+
+    def compute_loss(
+        self,
+        batch: Mapping[str, Any] | Observation,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute flow matching training loss.
+
+        Args:
+            batch: Raw or preprocessed batch.
+
+        Returns:
+            Tuple of (loss tensor, loss dict).
+        """
+        processed = self._preprocess_batch(batch, require_actions=True)
+        return self._forward_loss(processed)
 
     def predict_action_chunk(self, batch: Mapping[str, Any] | Observation) -> torch.Tensor:
         """Generate predicted actions for a batch of observations.

@@ -8,9 +8,10 @@ import * as THREE from 'three';
 import { degToRad } from 'three/src/math/MathUtils.js';
 import { URDFRobot } from 'urdf-loader';
 
-import { SchemaRobot, SchemaRobotType } from '../../../api/openapi-spec';
 import { useContainerSize } from '../../../components/zoom/use-container-size';
-import { urdfPathForType, useLoadModelMutation, useRobotModels } from './../robot-models-context';
+import { useRobotCatalogDefinitionQuery } from '../robot-catalog.hooks';
+import { SchemaRobot } from '../robot-types';
+import { mapJointToURDFJoint, useLoadModelQuery } from './../robot-models-context';
 
 /** Material name used by the dark parts in the Trossen URDF. */
 const TROSSEN_DARK_MATERIAL = 'trossen_black';
@@ -23,7 +24,7 @@ const TROSSEN_REPLACEMENT_COLOR = new THREE.Color('#585858');
  * texture with a solid color.
  *
  * The model is guaranteed to have all its STL meshes loaded before it enters
- * React state (see `useLoadModelMutation` which resolves on
+ * React state (see `useLoadModelQuery` which resolves on
  * `LoadingManager.onLoad`), so a plain `useEffect` is sufficient here.
  *
  * Because urdf-loader uses a shared material instance for each named material,
@@ -94,21 +95,6 @@ const ActualURDFModel = ({ model, isTrossen }: { model: URDFRobot; isTrossen: bo
     );
 };
 
-const useLoadURDF = (robotType: SchemaRobotType) => {
-    const loadModelMutation = useLoadModelMutation();
-    const { hasModel } = useRobotModels();
-
-    const PATH = urdfPathForType(robotType);
-
-    useEffect(() => {
-        if (hasModel(PATH)) {
-            return;
-        }
-
-        loadModelMutation.mutate(PATH);
-    }, [PATH, hasModel, loadModelMutation]);
-};
-
 interface RobotViewerProps {
     robot: Pick<SchemaRobot, 'type'>;
     featureValues?: number[];
@@ -118,28 +104,27 @@ export const RobotViewer = ({ robot = { type: 'SO101_Follower' }, featureValues,
     const angle = degToRad(-45);
     const isTrossen = robot.type.toLowerCase().includes('trossen');
 
-    const PATH = urdfPathForType(robot.type);
-    useLoadURDF(robot.type);
+    const { data: definition } = useRobotCatalogDefinitionQuery(robot.type);
+    const jointMap = definition.joint_map;
+
+    const { data: model } = useLoadModelQuery(robot.type);
     const ref = useRef<HTMLDivElement>(null);
     const size = useContainerSize(ref);
-    const { getModel } = useRobotModels();
-    const model = getModel(PATH);
 
     useEffect(() => {
         if (featureValues !== undefined && featureNames !== undefined && model !== undefined) {
-            featureNames.forEach((name, index) => {
-                if (index < featureValues.length && name.endsWith('.pos')) {
-                    const joint_name = name.replace('.pos', '');
-
-                    if (joint_name === 'gripper' && model.robotName == 'wxai') {
-                        model.setJointValue('left_carriage_joint', featureValues[index]); // meters
-                    } else if (model.joints[joint_name] != undefined) {
-                        model.joints[joint_name].setJointValue(degToRad(featureValues[index]));
-                    }
-                }
+            featureNames.forEach((_, index) => {
+                mapJointToURDFJoint(
+                    {
+                        name: featureNames[index],
+                        value: featureValues[index],
+                    },
+                    model,
+                    jointMap
+                );
             });
         }
-    }, [featureValues, featureNames, model]);
+    }, [featureValues, featureNames, model, jointMap]);
 
     return (
         <div ref={ref} style={{ width: '100%', height: '100%' }}>
@@ -157,7 +142,7 @@ export const RobotViewer = ({ robot = { type: 'SO101_Follower' }, featureValues,
                     <directionalLight position={[-5, 5, -5]} intensity={0.3} />
                     <directionalLight position={[0, -3, 5]} intensity={0.2} />
                     <PerspectiveCamera makeDefault position={[2.0, 1, 1]} />
-                    <OrbitControls />
+                    <OrbitControls enableDamping={false} />
                     <Grid infiniteGrid cellSize={0.25} sectionColor={'rgb(0, 199, 253)'} fadeDistance={10} />
                     {model && (
                         <group key={model.uuid} position={[0, 0, 0]} rotation={[0, angle, 0]}>

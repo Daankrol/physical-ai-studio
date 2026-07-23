@@ -3,12 +3,34 @@
 
 """Application configuration management"""
 
+import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AnyHttpUrl, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def get_default_storage_dir() -> Path:
+    """Return the platform-appropriate directory for persistent app data."""
+    if sys.platform == "darwin":
+        return Path("~/Library/Application Support/physicalai").expanduser()
+
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return Path(local_app_data).expanduser() / "physicalai"
+        return Path("~/AppData/Local/physicalai").expanduser()
+
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home:
+        xdg_data_home_path = Path(xdg_data_home).expanduser()
+        if xdg_data_home_path.is_absolute():
+            return xdg_data_home_path / "physicalai"
+
+    return Path("~/.local/share/physicalai").expanduser()
 
 
 class Settings(BaseSettings):
@@ -27,16 +49,47 @@ class Settings(BaseSettings):
     openapi_url: str = "/api/openapi.json"
     debug: bool = Field(default=False, alias="DEBUG")
     environment: Literal["dev", "prod"] = "dev"
-    data_dir: Path = Field(default=Path("data"), alias="DATA_DIR")
-    storage_dir: Path = Field(default=Path("~/.cache/physicalai").expanduser(), alias="STORAGE_DIR")
+    storage_dir: Path = Field(default_factory=get_default_storage_dir, alias="STORAGE_DIR")
     static_files_dir: str | None = Field(default=None, alias="STATIC_FILES_DIR")
 
-    supported_backends: list[str] = ["torch"]
+    @field_validator("storage_dir", mode="before")
+    @classmethod
+    def expand_storage_dir(cls, value: Path | str) -> Path:
+        """Expand user-provided storage directories like ~/.local/share."""
+        return Path(value).expanduser()
+
+    # Data import/upload safety (shared for dataset/model/project imports)
+    data_import_max_uncompressed_bytes: int = Field(
+        default=200 * 1024 * 1024 * 1024,
+        alias="DATA_IMPORT_MAX_UNCOMPRESSED_BYTES",
+    )
+    # Maximum raw upload size (Content-Length) accepted before any processing.
+    # Default: 100 GiB - supports large dataset imports while still guarding abuse.
+    data_import_max_upload_bytes: int = Field(
+        default=100 * 1024 * 1024 * 1024,
+        alias="DATA_IMPORT_MAX_UPLOAD_BYTES",
+    )
+    # Minimum free bytes that must remain on the target filesystem after the
+    # upload / extraction lands.  Default: 1 GiB headroom.
+    data_import_min_free_bytes: int = Field(
+        default=1 * 1024 * 1024 * 1024,
+        alias="DATA_IMPORT_MIN_FREE_BYTES",
+    )
 
     @property
     def datasets_dir(self) -> Path:
         """Storage directory for datasets."""
         return self.storage_dir / "datasets"
+
+    @property
+    def data_dir(self) -> Path:
+        """Storage directory for application data."""
+        return self.storage_dir / "data"
+
+    @property
+    def snapshot_dir(self) -> Path:
+        """Storage directory for snapshots."""
+        return self.storage_dir / "snapshots"
 
     @property
     def cache_dir(self) -> Path:
@@ -58,6 +111,36 @@ class Settings(BaseSettings):
         """Storage directory for logs."""
         return self.storage_dir / "logs"
 
+    # Training mode
+    # "local" runs training in-process (requires the [train] extra with torch).
+    # "remote" offloads training to a trainer service, keeping this install lightweight.
+    training_mode: Literal["local", "remote"] = Field(default="local", alias="TRAINING_MODE")
+    # Base URL of the remote trainer service, e.g. "https://trainer.internal:8001".
+    trainer_url: str | None = Field(default=None, alias="TRAINER_URL")
+    # Seconds to wait for trainer HTTP requests (excludes long-poll/SSE streams).
+    trainer_request_timeout_s: float = Field(default=30.0, alias="TRAINER_REQUEST_TIMEOUT_S")
+    # Seconds to wait between chunks while streaming the model artifact. A stalled
+    # transfer (e.g. a proxy holding the connection open) must fail instead of
+    # hanging the job forever; this is a per-read gap, not a total transfer cap.
+    trainer_download_read_timeout_s: float = Field(default=120.0, alias="TRAINER_DOWNLOAD_READ_TIMEOUT_S")
+    # Stop reconnecting after this continuous trainer outage.
+    trainer_stream_reconnect_max_s: float = Field(default=900.0, alias="TRAINER_STREAM_RECONNECT_MAX_S")
+    # Upper bound on the exponential backoff between event-stream reconnect attempts.
+    trainer_stream_reconnect_backoff_max_s: float = Field(default=30.0, alias="TRAINER_STREAM_RECONNECT_BACKOFF_MAX_S")
+
+    @model_validator(mode="after")
+    def validate_remote_training_config(self) -> "Settings":
+        """Require a valid http(s) trainer URL when training is offloaded."""
+        if self.training_mode != "remote":
+            return self
+        if not self.trainer_url:
+            raise ValueError("TRAINING_MODE=remote requires TRAINER_URL to be set")
+        try:
+            AnyHttpUrl(self.trainer_url)
+        except ValidationError as exc:
+            raise ValueError(f"TRAINER_URL must be a valid http(s) URL with a host, got: {self.trainer_url!r}") from exc
+        return self
+
     # Server
     host: str = Field(default="0.0.0.0", alias="HOST")  # noqa: S104 # nosec B104
     port: int = Field(default=7860, alias="PORT")
@@ -67,8 +150,8 @@ class Settings(BaseSettings):
     db_echo: bool = Field(default=False, alias="DB_ECHO")
 
     # Alembic
-    alembic_config_path: str = "src/alembic.ini"
-    alembic_script_location: str = "src/alembic"
+    alembic_config_path: str = Field(default="src/alembic.ini", alias="ALEMBIC_CONFIG_PATH")
+    alembic_script_location: str = Field(default="src/alembic", alias="ALEMBIC_SCRIPT_LOCATION")
 
     # Proxy settings
     no_proxy: str = Field(default="localhost,127.0.0.1,::1", alias="no_proxy")

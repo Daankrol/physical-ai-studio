@@ -11,9 +11,9 @@ from __future__ import annotations
 import pytest
 import torch
 from physicalai.config import Config
+from physicalai.data.observation import IMAGES, STATE
 from physicalai.policies.pi05 import Pi05, Pi05Config, Pi05Model
 from physicalai.policies.pi05.pretrained_utils import (
-    convert_normalization_stats,
     fix_state_dict_keys,
     parse_config_features,
     resolve_feature_shape,
@@ -33,7 +33,7 @@ class TestPi05Config:
         config = Pi05Config()
         assert config.paligemma_variant == "gemma_2b"
         assert config.action_expert_variant == "gemma_300m"
-        assert config.dtype == "float32"
+        assert config.dtype == "bfloat16"
         assert config.n_obs_steps == 1
         assert config.chunk_size == 50
         assert config.n_action_steps == 50
@@ -65,7 +65,7 @@ class TestPi05Config:
         assert config.optimizer_weight_decay == 0.01
         assert config.optimizer_grad_clip_norm == 1.0
         assert config.scheduler_warmup_steps == 1_000
-        assert config.scheduler_decay_steps is None
+        assert config.scheduler_decay_steps == 30_000
         assert config.scheduler_decay_lr == 2.5e-6
 
     def test_flow_matching_config_values(self) -> None:
@@ -213,12 +213,16 @@ class TestPi05Policy:
                 "shape": (8,),
                 "mean": [0.0] * 8,
                 "std": [1.0] * 8,
+                "q01": [-1.0] * 8,
+                "q99": [1.0] * 8,
             },
             "action": {
                 "name": "action",
                 "shape": (7,),
                 "mean": [0.0] * 7,
                 "std": [1.0] * 7,
+                "q01": [-1.0] * 7,
+                "q99": [1.0] * 7,
             },
         }
         # Use smallest variants to keep memory usage low in CI (~300M params instead of ~2.6B)
@@ -317,6 +321,23 @@ class TestModelUtilities:
         result = _resize_with_pad_torch(img, 224, 224)
         assert result.dtype == torch.uint8
         assert result.shape == (2, 224, 224, 3)
+
+    def test_preprocess_images_pops_source_keys(self) -> None:
+        """Test _preprocess_images removes original image keys from batch."""
+        from physicalai.policies.pi05.preprocessor import Pi05Preprocessor
+
+        prep = Pi05Preprocessor(image_resolution=(64, 64))
+        batch = {
+            STATE: torch.randn(1, 4),
+            f"{IMAGES}.0": torch.rand(1, 3, 48, 48),
+            f"{IMAGES}.1": torch.rand(1, 3, 32, 64),
+        }
+        images, masks = prep._preprocess_images(batch)
+
+        assert f"{IMAGES}.0" not in batch
+        assert f"{IMAGES}.1" not in batch
+        assert len(images) == 2
+        assert len(masks) == 2
 
     def test_resize_with_pad_unsupported_dtype(self) -> None:
         """Test resize_with_pad raises error for unsupported dtype."""
@@ -549,7 +570,6 @@ class TestPi05Preprocessor:
         from physicalai.policies.pi05.preprocessor import make_pi05_preprocessors
 
         preprocessor, postprocessor = make_pi05_preprocessors(
-            max_state_dim=32,
             max_action_dim=32,
             stats=None,
             image_resolution=(224, 224),
@@ -574,7 +594,6 @@ class TestPi05Preprocessor:
 
         preprocessor = Pi05Preprocessor()
 
-        assert preprocessor.max_state_dim == 32
         assert preprocessor.max_action_dim == 32
         assert preprocessor.image_resolution == (224, 224)
         assert preprocessor.max_token_len == 200
@@ -586,14 +605,12 @@ class TestPi05Preprocessor:
         from physicalai.policies.pi05.preprocessor import Pi05Preprocessor
 
         preprocessor = Pi05Preprocessor(
-            max_state_dim=64,
             max_action_dim=16,
             image_resolution=(512, 512),
             max_token_len=300,
             empty_cameras=2,
         )
 
-        assert preprocessor.max_state_dim == 64
         assert preprocessor.max_action_dim == 16
         assert preprocessor.image_resolution == (512, 512)
         assert preprocessor.max_token_len == 300
@@ -630,17 +647,20 @@ class TestPi05Preprocessor:
                 "shape": (8,),
                 "mean": [0.0] * 8,
                 "std": [1.0] * 8,
+                "q01": [-1.0] * 8,
+                "q99": [1.0] * 8,
             },
             "action": {
                 "name": "action",
                 "shape": (7,),
                 "mean": [0.0] * 7,
                 "std": [1.0] * 7,
+                "q01": [-1.0] * 7,
+                "q99": [1.0] * 7,
             },
         }
 
         preprocessor, postprocessor = make_pi05_preprocessors(
-            max_state_dim=32,
             max_action_dim=32,
             stats=stats,
             image_resolution=(224, 224),
@@ -660,6 +680,8 @@ class TestPi05Preprocessor:
                 "shape": (8,),
                 "mean": [0.0] * 8,
                 "std": [1.0] * 8,
+                "q01": [-1.0] * 8,
+                "q99": [1.0] * 8,
             },
         }
 
@@ -689,6 +711,8 @@ class TestFeatureNormalization:
                 normalization_data=NormalizationParameters(
                     mean=[0.0] * 8,
                     std=[1.0] * 8,
+                    q01=[-1.0] * 8,
+                    q99=[1.0] * 8,
                 ),
             ),
         }
@@ -708,11 +732,93 @@ class TestFeatureNormalization:
                 normalization_data=NormalizationParameters(
                     mean=[0.0] * 7,
                     std=[1.0] * 7,
+                    q01=[-1.0] * 7,
+                    q99=[1.0] * 7,
                 ),
             ),
         }
         postprocessor = Pi05Postprocessor(features=features)
         assert postprocessor._action_denormalizer is not None
+
+
+# ============================================================================ #
+# Sample Input Tests                                                           #
+# ============================================================================ #
+
+
+class TestSampleInput:
+    """Tests for Pi05.sample_input visual-feature detection.
+
+    Uses a lightweight stub instead of constructing the full model to keep
+    these tests fast and free of HuggingFace downloads.
+    """
+
+    @staticmethod
+    def _call_sample_input(dataset_stats: dict) -> dict:
+        """Invoke the Pi05.sample_input property on a minimal stub."""
+
+        class _ModelStub:
+            def __init__(self) -> None:
+                self.enable_rtc = False
+                # sample_input only reads device from this module's parameters.
+                self.paligemma_with_expert = torch.nn.Linear(1, 1)
+
+        class _Stub:
+            def __init__(self, stats: dict) -> None:
+                self._dataset_stats = stats
+                self.model = _ModelStub()
+
+        stub = _Stub(dataset_stats)
+        stub.inputs_schema = Pi05.inputs_schema.fget(stub)  # type: ignore[attr-defined]
+        return Pi05.sample_input.fget(stub)  # type: ignore[attr-defined]
+
+    def test_sample_input_single_visual_feature_with_image_in_id(self) -> None:
+        """Single visual feature whose id contains 'image' produces IMAGES key."""
+        stats = {
+            "observation.state": {"name": "state", "shape": (8,), "type": "STATE"},
+            "observation.image": {"name": "image", "shape": (3, 224, 224), "type": "VISUAL"},
+        }
+        sample_input = self._call_sample_input(stats)
+        assert STATE in sample_input
+        assert IMAGES in sample_input
+        assert sample_input[STATE].shape == (1, 8)
+        assert sample_input[IMAGES].shape == (1, 3, 224, 224)
+
+    def test_sample_input_single_visual_feature_without_image_in_id(self) -> None:
+        """Visual feature without 'image' in id is still detected via the 'type' field."""
+        stats = {
+            "observation.state": {"name": "state", "shape": (8,), "type": "STATE"},
+            "observation.front_cam": {
+                "name": "front_cam",
+                "shape": (3, 224, 224),
+                "type": "VISUAL",
+            },
+        }
+        sample_input = self._call_sample_input(stats)
+        assert STATE in sample_input
+        assert IMAGES in sample_input
+        assert sample_input[IMAGES].shape == (1, 3, 224, 224)
+
+    def test_sample_input_multiple_visual_features_without_image_in_id(self) -> None:
+        """Multiple visual features without 'image' in id produce per-feature IMAGES.<name> keys."""
+        stats = {
+            "observation.state": {"name": "state", "shape": (8,), "type": "STATE"},
+            "observation.front_cam": {
+                "name": "front_cam",
+                "shape": (3, 224, 224),
+                "type": "VISUAL",
+            },
+            "observation.wrist_cam": {
+                "name": "wrist_cam",
+                "shape": (3, 224, 224),
+                "type": "VISUAL",
+            },
+        }
+        sample_input = self._call_sample_input(stats)
+        assert STATE in sample_input
+        assert f"{IMAGES}.front_cam" in sample_input
+        assert f"{IMAGES}.wrist_cam" in sample_input
+        assert IMAGES not in sample_input
 
 
 # ============================================================================ #
@@ -722,48 +828,6 @@ class TestFeatureNormalization:
 
 class TestPretrainedUtils:
     """Tests for pretrained_utils helper functions."""
-
-    def test_convert_normalization_stats_mean_std(self) -> None:
-        """Test _convert_normalization_stats with mean/std."""
-        mean, std = convert_normalization_stats({
-            "mean": [0.0, 1.0, 2.0],
-            "std": [0.5, 1.0, 1.5],
-        })
-        assert mean == [0.0, 1.0, 2.0]
-        assert std == [0.5, 1.0, 1.5]
-
-    def test_convert_normalization_stats_quantiles(self) -> None:
-        """Test _convert_normalization_stats with quantiles (q01/q99)."""
-        mean, std = convert_normalization_stats({
-            "q01": [-1.0, -2.0],
-            "q99": [1.0, 2.0],
-        })
-        assert mean == [0.0, 0.0]
-        assert std == [1.0, 2.0]
-
-    def test_convert_normalization_stats_min_max(self) -> None:
-        """Test _convert_normalization_stats with min/max."""
-        mean, std = convert_normalization_stats({
-            "min": [-1.0, -2.0],
-            "max": [1.0, 2.0],
-        })
-        assert mean == [0.0, 0.0]
-        assert std == [1.0, 2.0]
-
-    def test_convert_normalization_stats_empty(self) -> None:
-        """Test _convert_normalization_stats with no recognized stats."""
-        mean, std = convert_normalization_stats({})
-        assert mean is None
-        assert std is None
-
-    def test_convert_normalization_stats_quantiles_zero_range(self) -> None:
-        """Test _convert_normalization_stats clamps std to 1e-8 for zero range."""
-        mean, std = convert_normalization_stats({
-            "q01": [5.0],
-            "q99": [5.0],
-        })
-        assert mean == [5.0]
-        assert std == [1e-8]
 
     def test_fix_state_dict_keys_strips_model_prefix(self) -> None:
         """Test _fix_state_dict_keys strips 'model.' prefix."""
@@ -879,6 +943,11 @@ class TestPi05FineTuning:
         policy = Pi05()
         assert "pretrained_name_or_path" not in policy.hparams
 
+    def test_save_hyperparameters_ignores_compile_model(self) -> None:
+        """Test compile_model is excluded from saved hyperparameters."""
+        policy = Pi05(compile_model=True)
+        assert "compile_model" not in policy.hparams
+
     def test_update_preprocessor_stats(self) -> None:
         """Test _update_preprocessor_stats rebuilds preprocessors with new stats."""
         stats = {
@@ -887,12 +956,16 @@ class TestPi05FineTuning:
                 "shape": (8,),
                 "mean": [0.0] * 8,
                 "std": [1.0] * 8,
+                "q01": [-1.0] * 8,
+                "q99": [1.0] * 8,
             },
             "action": {
                 "name": "action",
                 "shape": (7,),
                 "mean": [0.0] * 7,
                 "std": [1.0] * 7,
+                "q01": [-1.0] * 7,
+                "q99": [1.0] * 7,
             },
         }
         # Use smallest variants to keep memory usage low
@@ -910,12 +983,16 @@ class TestPi05FineTuning:
                 "shape": (4,),
                 "mean": [1.0] * 4,
                 "std": [2.0] * 4,
+                "q01": [-2.0] * 4,
+                "q99": [2.0] * 4,
             },
             "action": {
                 "name": "action",
                 "shape": (3,),
                 "mean": [1.0] * 3,
                 "std": [2.0] * 3,
+                "q01": [-2.0] * 3,
+                "q99": [2.0] * 3,
             },
         }
         old_preprocessor = policy._preprocessor
@@ -934,12 +1011,16 @@ class TestPi05FineTuning:
                 "shape": (8,),
                 "mean": [0.0] * 8,
                 "std": [1.0] * 8,
+                "q01": [-1.0] * 8,
+                "q99": [1.0] * 8,
             },
             "action": {
                 "name": "action",
                 "shape": (7,),
                 "mean": [0.0] * 7,
                 "std": [1.0] * 7,
+                "q01": [-1.0] * 7,
+                "q99": [1.0] * 7,
             },
         }
         policy = Pi05(
@@ -954,12 +1035,16 @@ class TestPi05FineTuning:
                 "shape": (4,),
                 "mean": [2.0] * 4,
                 "std": [3.0] * 4,
+                "q01": [-3.0] * 4,
+                "q99": [3.0] * 4,
             },
             "action": {
                 "name": "action",
                 "shape": (3,),
                 "mean": [2.0] * 3,
                 "std": [3.0] * 3,
+                "q01": [-3.0] * 3,
+                "q99": [3.0] * 3,
             },
         }
         policy._update_preprocessor_stats(new_stats)
@@ -985,3 +1070,259 @@ class TestPi05FineTuning:
         assert policy.config.scheduler_warmup_steps == 500
         assert policy.config.scheduler_decay_steps == 10_000
         assert policy.config.scheduler_decay_lr == 1e-5
+
+
+# ============================================================================ #
+# Export Args Tests                                                            #
+# ============================================================================ #
+
+
+class TestPi05ExtraExportArgs:
+    """Tests for Pi05.extra_export_args preprocessor ordering and contents."""
+
+    @staticmethod
+    def _mock_stats() -> dict[str, dict[str, list[float] | str | tuple]]:
+        return {
+            "observation.state": {
+                "name": "observation.state",
+                "shape": (8,),
+                "mean": [0.0] * 8,
+                "std": [1.0] * 8,
+                "q01": [-1.0] * 8,
+                "q99": [1.0] * 8,
+            },
+            "action": {
+                "name": "action",
+                "shape": (7,),
+                "mean": [0.0] * 7,
+                "std": [1.0] * 7,
+                "q01": [-1.0] * 7,
+                "q99": [1.0] * 7,
+            },
+        }
+
+    def test_raises_without_dataset_stats(self) -> None:
+        """extra_export_args should raise if dataset_stats are unavailable."""
+        policy = Pi05()
+        with pytest.raises(ValueError, match="Dataset stats are required"):
+            _ = policy.extra_export_args
+
+    def test_preprocessor_order_normalize_before_pi05(self) -> None:
+        """Normalize must run before the pi05 image transform for both onnx and openvino."""
+        policy = Pi05()
+        # Inject mock stats directly to avoid building the heavy model.
+        policy._dataset_stats = self._mock_stats()
+
+        args = policy.extra_export_args
+
+        for backend in ("onnx", "openvino"):
+            specs = args[backend].preprocessors_specs
+            types = [s.type for s in specs]
+            assert types[0] == "normalize", f"{backend}: expected normalize first, got {types}"
+            assert types[1] == "pi05", f"{backend}: expected pi05 second, got {types}"
+            assert types.index("normalize") < types.index("pi05"), (
+                f"{backend}: normalize must precede pi05, got {types}"
+            )
+
+
+# ============================================================================ #
+# embed_prefix Tests                                                           #
+# ============================================================================ #
+
+
+class TestEmbedPrefix:
+    """Tests for Pi05Model.embed_prefix batched/per-camera behavior.
+
+    Uses a lightweight stub that replaces the heavy vision encoder and language
+    embedding with simple linear projections to verify control flow and shapes.
+    """
+
+    @staticmethod
+    def _make_stub_model(
+        hidden_dim: int = 32,
+        num_patches: int = 4,
+        training: bool = False,
+        gradient_checkpointing: bool = False,
+    ) -> Pi05Model:
+        """Create a minimal Pi05Model stub with mocked sub-modules."""
+        from unittest.mock import MagicMock, patch
+
+        # Bypass __init__ to avoid loading the full PaliGemma model
+        with patch.object(Pi05Model, "__init__", lambda self: None):
+            model = Pi05Model.__new__(Pi05Model)
+
+        # Set nn.Module internals manually
+        torch.nn.Module.__init__(model)
+
+        model.training = training
+        model.gradient_checkpointing_enabled = gradient_checkpointing
+
+        # Mock paligemma_with_expert with simple deterministic functions
+        mock_paligemma = MagicMock()
+
+        def _embed_image(imgs: torch.Tensor) -> torch.Tensor:
+            """Fake vision encoder: project flattened patches to hidden_dim."""
+            batch = imgs.shape[0]
+            return torch.randn(batch, num_patches, hidden_dim)
+
+        def _embed_language(tokens: torch.Tensor) -> torch.Tensor:
+            """Fake language embedding."""
+            batch, seq_len = tokens.shape
+            return torch.randn(batch, seq_len, hidden_dim)
+
+        mock_paligemma.embed_image = _embed_image
+        mock_paligemma.embed_language_tokens = _embed_language
+        model.paligemma_with_expert = mock_paligemma
+
+        return model
+
+    def test_output_shapes_eval_mode(self) -> None:
+        """Test embed_prefix returns correct shapes in eval mode (batched path)."""
+        model = self._make_stub_model(hidden_dim=32, num_patches=4, training=False)
+        num_cameras, bsize, c, h, w = 2, 3, 3, 224, 224
+        seq_len = 10
+
+        images = torch.randn(num_cameras, bsize, c, h, w)
+        img_masks = torch.ones(num_cameras, bsize, dtype=torch.bool)
+        tokens = torch.randint(0, 100, (bsize, seq_len))
+        masks = torch.ones(bsize, seq_len, dtype=torch.bool)
+
+        embs, pad_masks, att_masks = model.embed_prefix(images, img_masks, tokens, masks)
+
+        expected_seq = num_cameras * 4 + seq_len  # 4 patches per camera + lang tokens
+        assert embs.shape == (bsize, expected_seq, 32)
+        assert pad_masks.shape == (bsize, expected_seq)
+        assert att_masks.shape == (bsize, expected_seq)
+        assert att_masks.dtype == torch.bool
+
+    def test_output_shapes_train_mode(self) -> None:
+        """Test embed_prefix returns correct shapes in train mode (per-camera path)."""
+        model = self._make_stub_model(hidden_dim=32, num_patches=4, training=True)
+        num_cameras, bsize, c, h, w = 2, 3, 3, 224, 224
+        seq_len = 10
+
+        images = torch.randn(num_cameras, bsize, c, h, w)
+        img_masks = torch.ones(num_cameras, bsize, dtype=torch.bool)
+        tokens = torch.randint(0, 100, (bsize, seq_len))
+        masks = torch.ones(bsize, seq_len, dtype=torch.bool)
+
+        embs, pad_masks, att_masks = model.embed_prefix(images, img_masks, tokens, masks)
+
+        expected_seq = num_cameras * 4 + seq_len
+        assert embs.shape == (bsize, expected_seq, 32)
+        assert pad_masks.shape == (bsize, expected_seq)
+        assert att_masks.shape == (bsize, expected_seq)
+
+    def test_batched_path_calls_encoder_once(self) -> None:
+        """In eval mode, embed_image should be called once (batched) not per-camera."""
+        from unittest.mock import patch
+
+        model = self._make_stub_model(hidden_dim=32, num_patches=4, training=False)
+        num_cameras, bsize = 3, 2
+
+        images = torch.randn(num_cameras, bsize, 3, 224, 224)
+        img_masks = torch.ones(num_cameras, bsize, dtype=torch.bool)
+        tokens = torch.randint(0, 100, (bsize, 10))
+        masks = torch.ones(bsize, 10, dtype=torch.bool)
+
+        call_count = [0]
+        orig_embed = model.paligemma_with_expert.embed_image
+
+        def _counting_embed(imgs: torch.Tensor) -> torch.Tensor:
+            call_count[0] += 1
+            return orig_embed(imgs)
+
+        model.paligemma_with_expert.embed_image = _counting_embed
+
+        model.embed_prefix(images, img_masks, tokens, masks)
+
+        assert call_count[0] == 1, f"Expected 1 batched call, got {call_count[0]}"
+
+    def test_training_path_calls_encoder_per_camera(self) -> None:
+        """In train mode, embed_image should be called once per camera."""
+        model = self._make_stub_model(hidden_dim=32, num_patches=4, training=True)
+        num_cameras, bsize = 3, 2
+
+        images = torch.randn(num_cameras, bsize, 3, 224, 224)
+        img_masks = torch.ones(num_cameras, bsize, dtype=torch.bool)
+        tokens = torch.randint(0, 100, (bsize, 10))
+        masks = torch.ones(bsize, 10, dtype=torch.bool)
+
+        call_count = [0]
+        orig_embed = model.paligemma_with_expert.embed_image
+
+        def _counting_embed(imgs: torch.Tensor) -> torch.Tensor:
+            call_count[0] += 1
+            return orig_embed(imgs)
+
+        model.paligemma_with_expert.embed_image = _counting_embed
+
+        model.embed_prefix(images, img_masks, tokens, masks)
+
+        assert call_count[0] == num_cameras, f"Expected {num_cameras} calls, got {call_count[0]}"
+
+    def test_eval_and_train_produce_same_shapes(self) -> None:
+        """Both paths should produce identical output shapes for same input."""
+        num_cameras, bsize, seq_len = 2, 4, 8
+
+        images = torch.randn(num_cameras, bsize, 3, 64, 64)
+        img_masks = torch.ones(num_cameras, bsize, dtype=torch.bool)
+        tokens = torch.randint(0, 100, (bsize, seq_len))
+        masks = torch.ones(bsize, seq_len, dtype=torch.bool)
+
+        model_eval = self._make_stub_model(hidden_dim=16, num_patches=4, training=False)
+        model_train = self._make_stub_model(hidden_dim=16, num_patches=4, training=True)
+
+        embs_e, pm_e, am_e = model_eval.embed_prefix(images, img_masks, tokens, masks)
+        embs_t, pm_t, am_t = model_train.embed_prefix(images, img_masks, tokens, masks)
+
+        assert embs_e.shape == embs_t.shape
+        assert pm_e.shape == pm_t.shape
+        assert am_e.shape == am_t.shape
+
+    def test_single_camera(self) -> None:
+        """Test with a single camera produces correct sequence length."""
+        model = self._make_stub_model(hidden_dim=32, num_patches=4, training=False)
+        bsize, seq_len = 2, 5
+
+        images = torch.randn(1, bsize, 3, 224, 224)
+        img_masks = torch.ones(1, bsize, dtype=torch.bool)
+        tokens = torch.randint(0, 100, (bsize, seq_len))
+        masks = torch.ones(bsize, seq_len, dtype=torch.bool)
+
+        embs, pad_masks, att_masks = model.embed_prefix(images, img_masks, tokens, masks)
+
+        expected_seq = 4 + seq_len  # 1 camera * 4 patches + lang tokens
+        assert embs.shape == (bsize, expected_seq, 32)
+
+    def test_pad_masks_reflect_img_masks(self) -> None:
+        """Padding masks should reflect which cameras are masked out."""
+        model = self._make_stub_model(hidden_dim=16, num_patches=4, training=False)
+        num_cameras, bsize, seq_len = 2, 2, 5
+
+        images = torch.randn(num_cameras, bsize, 3, 64, 64)
+        # First camera active, second camera masked for first sample
+        img_masks = torch.ones(num_cameras, bsize, dtype=torch.bool)
+        img_masks[1, 0] = False
+        tokens = torch.randint(0, 100, (bsize, seq_len))
+        masks = torch.ones(bsize, seq_len, dtype=torch.bool)
+
+        _, pad_masks, _ = model.embed_prefix(images, img_masks, tokens, masks)
+
+        # Second camera's patches (indices 4:8) should be False for sample 0
+        assert pad_masks[0, 4:8].sum() == 0
+        # But True for sample 1
+        assert pad_masks[1, 4:8].sum() == 4
+
+    def test_att_masks_all_false(self) -> None:
+        """All attention mask values should be False (non-autoregressive prefix)."""
+        model = self._make_stub_model(hidden_dim=16, num_patches=4, training=False)
+
+        images = torch.randn(2, 3, 3, 64, 64)
+        img_masks = torch.ones(2, 3, dtype=torch.bool)
+        tokens = torch.randint(0, 100, (3, 5))
+        masks = torch.ones(3, 5, dtype=torch.bool)
+
+        _, _, att_masks = model.embed_prefix(images, img_masks, tokens, masks)
+
+        assert not att_masks.any(), "All prefix attention masks should be False"

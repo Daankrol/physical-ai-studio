@@ -1,13 +1,30 @@
-import { ActionButton, Button, Flex, Grid, Item, Key, Menu, MenuTrigger, ProgressBar, Text, View } from '@geti-ui/ui';
+import {
+    ActionButton,
+    AlertDialog,
+    Button,
+    DialogTrigger,
+    Flex,
+    Grid,
+    Item,
+    Key,
+    Menu,
+    MenuTrigger,
+    ProgressBar,
+    Text,
+    View,
+} from '@geti-ui/ui';
 import { MoreMenu } from '@geti-ui/ui/icons';
 
 import { $api } from '../../api/client';
+import { ElapsedDuration } from '../../components/elapsed-duration.component';
+import { CollapsableRow } from './collapsable-row.component';
 import { GRID_COLUMNS } from './constants';
+import { JobRowContent } from './job-row-content.component';
 import { SingleBadge, SplitBadge } from './split-badge.component';
 import { SchemaTrainJob } from './train-model-dialog';
-import { durationBetween, elapsedSince } from './utils';
+import { durationBetween } from './utils';
 
-import classes from './model-table.module.scss';
+import classes from './model-table.module.css';
 
 export const TrainingHeader = () => {
     return (
@@ -28,11 +45,12 @@ const TrainJobStatus = ({ job }: { job: SchemaTrainJob }) => {
             <View>
                 <Flex gap={'size-100'}>
                     <Text UNSAFE_style={{ fontWeight: 500 }}>{job.payload.model_name}</Text>
-                    <SplitBadge first={job.status} second={'Fine-tuning the model - epoch n/n'} />
+                    <SplitBadge first={job.status} second={job.message} />
                 </Flex>
                 {job.start_time ? (
                     <Text UNSAFE_className={classes.modelInfo}>
-                        Started: {new Date(job.start_time).toLocaleString()} | Elapsed: {elapsedSince(job.start_time)}
+                        Started: {new Date(job.start_time).toLocaleString()} | Elapsed:{' '}
+                        <ElapsedDuration date={job.start_time} />
                     </Text>
                 ) : (
                     <></>
@@ -58,7 +76,11 @@ const TrainJobStatus = ({ job }: { job: SchemaTrainJob }) => {
 };
 
 const JobMenu = ({ trainJob, onViewLogs }: { trainJob: SchemaTrainJob; onViewLogs: () => void }) => {
-    const deleteJobMutation = $api.useMutation('delete', '/api/jobs/{job_id}');
+    const deleteJobMutation = $api.useMutation('delete', '/api/jobs/{job_id}', {
+        meta: {
+            invalidates: [['get', '/api/jobs']],
+        },
+    });
     const onAction = (key: Key) => {
         const action = key.toString();
         if (action === 'logs') {
@@ -104,23 +126,46 @@ export const TrainingRow = ({
 
     return (
         <View>
-            <Grid columns={GRID_COLUMNS} alignItems={'center'} width={'100%'} UNSAFE_className={classes.modelRow}>
-                <TrainJobStatus job={trainJob} />
-                <Text>{loss ? loss.toFixed(2) : '...'}</Text>
-                <div />
-                <Text>{trainJob.payload.policy.toUpperCase()}</Text>
-                <View>
-                    {trainJob.status === 'running' && (
-                        <Button variant='secondary' onPress={onInterrupt}>
-                            Interrupt
-                        </Button>
-                    )}
-                </View>
-                <View justifySelf={'end'}>
-                    <JobMenu trainJob={trainJob} onViewLogs={onViewLogs} />
-                </View>
-            </Grid>
-
+            <CollapsableRow
+                header={
+                    <Grid
+                        columns={GRID_COLUMNS}
+                        alignItems={'center'}
+                        width={'100%'}
+                        UNSAFE_className={classes.modelRow}
+                    >
+                        <TrainJobStatus job={trainJob} />
+                        <Text>{loss ? loss.toFixed(2) : '...'}</Text>
+                        <div />
+                        <Text>{trainJob.payload.policy.toUpperCase()}</Text>
+                        <View>
+                            {trainJob.status === 'running' && (
+                                <DialogTrigger>
+                                    <Button variant='secondary'>Stop</Button>
+                                    <AlertDialog
+                                        onPrimaryAction={onInterrupt}
+                                        title='Stop training?'
+                                        variant='destructive'
+                                        primaryActionLabel='Stop'
+                                        cancelLabel='Cancel'
+                                    >
+                                        Stop training for {trainJob.payload.model_name}?
+                                        <br />
+                                        <br />
+                                        Your model checkpoint will be saved at the current step. You cannot resume this
+                                        run.
+                                    </AlertDialog>
+                                </DialogTrigger>
+                            )}
+                        </View>
+                        <View justifySelf={'end'}>
+                            <JobMenu trainJob={trainJob} onViewLogs={onViewLogs} />
+                        </View>
+                    </Grid>
+                }
+            >
+                <JobRowContent job={trainJob} />
+            </CollapsableRow>
             {trainJob.status === 'running' && (
                 <ProgressBar size='S' UNSAFE_className={classes.progressBar} width={'100%'} value={trainJob.progress} />
             )}

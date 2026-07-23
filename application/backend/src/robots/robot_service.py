@@ -1,10 +1,13 @@
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
+
 from db import get_async_db_session_ctx
-from exceptions import ResourceNotFoundError, ResourceType
+from exceptions import ResourceInUseError, ResourceNotFoundError, ResourceType
+from repositories.project_environment_repo import ProjectEnvironmentRepository
 from repositories.project_robot_repo import ProjectRobotRepository
 from robots.discovery.manager import DiscoveryManager
-from schemas.robot import Robot, RobotType, RobotWithConnectionState
+from schemas.robot import Robot, RobotWithConnectionState, RobotWithConnectionStateAdapter
 
 
 class RobotService:
@@ -26,9 +29,11 @@ class RobotService:
             is_online = await discovery.is_robot_online(robot)
 
             results.append(
-                RobotWithConnectionState(
-                    **robot.model_dump(),
-                    connection_status="online" if is_online else "offline",
+                RobotWithConnectionStateAdapter.validate_python(
+                    {
+                        **robot.model_dump(),
+                        "connection_status": "online" if is_online else "offline",
+                    }
                 )
             )
 
@@ -41,7 +46,7 @@ class RobotService:
             robot = await repo.get_by_id(robot_id)
 
             if robot is None:
-                raise ResourceNotFoundError(ResourceType.ROBOT, project_id)
+                raise ResourceNotFoundError(ResourceType.ROBOT, robot_id)
 
             return robot
 
@@ -49,20 +54,12 @@ class RobotService:
     async def create_robot(project_id: UUID, robot: Robot) -> Robot:
         async with get_async_db_session_ctx() as session:
             repo = ProjectRobotRepository(session, project_id)
-
-            if robot.type in {RobotType.SO101_LEADER, RobotType.SO101_FOLLOWER}:
-                robot.connection_string = ""
-
             return await repo.save(robot)
 
     @staticmethod
     async def update_robot(project_id: UUID, robot: Robot) -> Robot:
         async with get_async_db_session_ctx() as session:
             repo = ProjectRobotRepository(session, project_id)
-
-            if robot.type in {RobotType.SO101_LEADER, RobotType.SO101_FOLLOWER}:
-                robot.connection_string = ""
-
             return await repo.update(robot, partial_update=robot.model_dump(exclude={"id"}))
 
     @staticmethod
@@ -74,4 +71,19 @@ class RobotService:
             if robot is None:
                 raise ResourceNotFoundError(ResourceType.ROBOT, str(robot_id))
 
-            await repo.delete_by_id(robot_id)
+            try:
+                await repo.delete_by_id(robot_id)
+            except IntegrityError as e:
+                await session.rollback()  # just in case the session is in a bad state after the IntegrityError
+                env_repo = ProjectEnvironmentRepository(session, project_id)
+                environment_names = await env_repo.find_environment_names_using_robot(robot_id)
+                if environment_names:
+                    raise ResourceInUseError(
+                        ResourceType.ROBOT,
+                        str(robot_id),
+                        message=(
+                            f"Robot '{robot.name}' cannot be deleted because it is used in environment(s): "
+                            f"{', '.join(environment_names)}. Remove it from those environments first."
+                        ),
+                    )
+                raise e

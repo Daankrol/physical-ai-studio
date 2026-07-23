@@ -1,26 +1,35 @@
-from .calibration import CalibrationConfig
+from .base_job import JobStatus, JobType
 from .camera import Camera, CameraProfile
 from .dataset import Dataset, Episode, EpisodeInfo, EpisodeVideo, LeRobotDatasetInfo, Snapshot
-from .job import Job
-from .model import Model
+from .hardware import DeviceInfo, DeviceType, InferenceBackend, InferenceDevice, InferenceDeviceInfo
+from .job import DatasetImportJob, Job, TrainJob
+from .model import BackendExportDetail, Model, ModelDetailResponse
 from .project import Project
-from .robot import LeRobotConfig, NetworkIpRobotConfig, Robot, SerialPortInfo
+from .robot import Robot, SerialPortInfo
 
 __all__ = [
-    "CalibrationConfig",
+    "BackendExportDetail",
     "Camera",
     "CameraProfile",
     "Dataset",
+    "DatasetImportJob",
+    "DeviceInfo",
+    "DeviceType",
     "Episode",
     "EpisodeInfo",
     "EpisodeVideo",
+    "InferenceBackend",
+    "InferenceDevice",
+    "InferenceDeviceInfo",
     "Job",
-    "LeRobotConfig",
+    "JobStatus",
+    "JobType",
     "LeRobotDatasetInfo",
     "Model",
-    "NetworkIpRobotConfig",
+    "ModelDetailResponse",
     "Project",
     "Robot",
     "SerialPortInfo",
     "Snapshot",
+    "TrainJob",
 ]

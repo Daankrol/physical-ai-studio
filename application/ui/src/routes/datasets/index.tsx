@@ -1,30 +1,16 @@
-import { useState } from 'react';
+import { Suspense } from 'react';
 
-import {
-    Content,
-    Flex,
-    Heading,
-    Icon,
-    IllustratedMessage,
-    Item,
-    Key,
-    TabList,
-    TabPanels,
-    Tabs,
-    Text,
-    View,
-} from '@geti-ui/ui';
-import { Add } from '@geti-ui/ui/icons';
-import { useNavigate, useParams } from 'react-router';
+import { Content, Flex, Heading, IllustratedMessage, Item, Loading, TabPanels, Tabs, Text } from '@geti-ui/ui';
+import { useParams } from 'react-router';
 
 import { SchemaDatasetOutput } from '../../api/openapi-spec';
+import { DatasetTabs } from '../../features/datasets/dataset-tabs';
 import { useProject, useProjectId } from '../../features/projects/use-project';
-import { paths } from '../../router';
 import { ReactComponent as EmptyIllustration } from './../../assets/illustration.svg';
-import { DatasetDownloadButton } from './dataset-download-button';
 import { DatasetProvider } from './dataset-provider';
 import { DatasetViewer } from './dataset-viewer';
-import { NewDatasetDialogContainer, NewDatasetLink } from './new-dataset.component';
+import { DatasetImportButton } from './import/dataset-import-button';
+import { NewDatasetLink } from './new-dataset.component';
 
 interface DatasetsProps {
     datasets: SchemaDatasetOutput[];
@@ -35,33 +21,18 @@ const Datasets = ({ datasets }: DatasetsProps) => {
     const params = useParams();
     const dataset_id = params.dataset_id ?? datasets[0]?.id;
 
-    const [showDialog, setShowDialog] = useState<boolean>(false);
-    const navigate = useNavigate();
-
-    const onSelectionChange = (key: Key) => {
-        if (key.toString() === '#new-dataset') {
-            setShowDialog(true);
-        }
-    };
-
-    const onDatasetDialogClose = (dataset: SchemaDatasetOutput | undefined) => {
-        setShowDialog(false);
-        if (dataset?.id) {
-            navigate(paths.project.datasets.show({ project_id, dataset_id: dataset.id }));
-        }
-    };
-
     if (datasets.length === 0) {
         return (
-            <Flex margin={'size-200'} direction={'column'} flex>
+            <Flex margin={'size-200'} direction={'column'} flex height='100%'>
                 <IllustratedMessage>
                     <EmptyIllustration />
-                    <Content> Currently there are datasets available. </Content>
+                    <Content> Currently there are no datasets available. </Content>
                     <Text>It&apos;s time to begin recording a dataset. </Text>
                     <Heading>No datasets yet</Heading>
-                    <View margin={'size-100'}>
+                    <Flex gap='size-100' marginTop={'size-200'}>
                         <NewDatasetLink project_id={project_id} />
-                    </View>
+                        <DatasetImportButton />
+                    </Flex>
                 </IllustratedMessage>
             </Flex>
         );
@@ -69,54 +40,32 @@ const Datasets = ({ datasets }: DatasetsProps) => {
 
     return (
         <Flex height='100%'>
-            <Tabs onSelectionChange={onSelectionChange} selectedKey={dataset_id} flex='1' margin={'size-200'}>
-                <Flex>
-                    <TabList flex='1 1 auto' minWidth='0px'>
-                        {[
-                            ...datasets.map((data) => (
-                                <Item
-                                    key={data.id}
-                                    href={paths.project.datasets.show({ project_id, dataset_id: data.id! })}
-                                >
-                                    <Text UNSAFE_style={{ fontSize: '16px' }}>{data.name}</Text>
-                                </Item>
-                            )),
-                            <Item key='#new-dataset'>
-                                <Icon>
-                                    <Add />
-                                </Icon>
-                            </Item>,
-                        ]}
-                    </TabList>
-
-                    {dataset_id && (
-                        <View
-                            borderBottomColor={'gray-300'}
-                            borderBottomWidth={'thick'}
-                            UNSAFE_style={{
-                                display: 'flex',
-                                flex: '0 0 auto',
-                            }}
-                        >
-                            <DatasetDownloadButton datasetId={dataset_id} />
-                        </View>
-                    )}
-                </Flex>
+            <Tabs
+                aria-label='Datasets'
+                selectedKey={dataset_id}
+                flex='1'
+                margin={'size-200'}
+                UNSAFE_style={{
+                    '--spectrum-tabs-item-gap': 'var(--spectrum-global-dimension-size-100)',
+                }}
+            >
+                <DatasetTabs datasets={datasets} selectedDatasetId={dataset_id} />
                 <TabPanels UNSAFE_style={{ border: 'none' }} marginTop={'size-200'} minHeight={0}>
                     <Item key={dataset_id}>
                         <Flex height='100%' flex>
                             {dataset_id === undefined ? (
                                 <Text>No datasets yet...</Text>
                             ) : (
-                                <DatasetProvider dataset_id={dataset_id}>
-                                    <DatasetViewer />
-                                </DatasetProvider>
+                                <Suspense fallback={<Loading />}>
+                                    <DatasetProvider dataset_id={dataset_id}>
+                                        <DatasetViewer />
+                                    </DatasetProvider>
+                                </Suspense>
                             )}
                         </Flex>
                     </Item>
                 </TabPanels>
             </Tabs>
-            <NewDatasetDialogContainer project_id={project_id} show={showDialog} onDismiss={onDatasetDialogClose} />
         </Flex>
     );
 };

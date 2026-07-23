@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import torch.nn.functional as F  # noqa: N812
@@ -18,14 +18,7 @@ from torch import Tensor, nn
 from transformers.cache_utils import DynamicCache
 
 from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
-from physicalai.data.observation import ACTION, IMAGES, STATE, TASK
-from physicalai.export import ExportableModelMixin
-from physicalai.export.backends import (
-    ExportParameters,
-    ONNXExportParameters,
-    OpenVINOExportParameters,
-    TorchExportParameters,
-)
+from physicalai.data.observation import ACTION, IMAGES
 from physicalai.policies.base import Model
 
 from .pi_gemma import (
@@ -163,7 +156,7 @@ def _clone_kv_cache(past_key_values: DynamicCache) -> DynamicCache:
         Cloned DynamicCache instance.
     """
     cloned = DynamicCache()
-    for layer_idx, (key_states, value_states) in enumerate(past_key_values):
+    for layer_idx, (key_states, value_states, _) in enumerate(past_key_values):
         cloned.update(key_states.clone(), value_states.clone(), layer_idx)
     return cloned
 
@@ -336,21 +329,21 @@ class PaliGemmaWithExpertModel(nn.Module):
         vlm_config_hf.vision_config.dtype = "float32"
 
         action_expert_config_hf = CONFIG_MAPPING["gemma"](
-            head_dim=action_expert_config.head_dim,
-            hidden_size=action_expert_config.width,
-            intermediate_size=action_expert_config.mlp_dim,
-            num_attention_heads=action_expert_config.num_heads,
-            num_hidden_layers=action_expert_config.depth,
-            num_key_value_heads=action_expert_config.num_kv_heads,
-            vocab_size=257152,
-            hidden_activation="gelu_pytorch_tanh",
+            head_dim=action_expert_config.head_dim,  # pyrefly: ignore[unexpected-keyword]
+            hidden_size=action_expert_config.width,  # pyrefly: ignore[unexpected-keyword]
+            intermediate_size=action_expert_config.mlp_dim,  # pyrefly: ignore[unexpected-keyword]
+            num_attention_heads=action_expert_config.num_heads,  # pyrefly: ignore[unexpected-keyword]
+            num_hidden_layers=action_expert_config.depth,  # pyrefly: ignore[unexpected-keyword]
+            num_key_value_heads=action_expert_config.num_kv_heads,  # pyrefly: ignore[unexpected-keyword]
+            vocab_size=257152,  # pyrefly: ignore[unexpected-keyword]
+            hidden_act="gelu_pytorch_tanh",  # pyrefly: ignore[unexpected-keyword]
             dtype="float32",
-            use_adarms=use_adarms[1],
-            adarms_cond_dim=action_expert_config.width if use_adarms[1] else None,
         )
 
-        self.paligemma = PaliGemmaForConditionalGenerationWithPiGemma(config=vlm_config_hf)
-        self.gemma_expert = PiGemmaForCausalLM(config=action_expert_config_hf)
+        self.paligemma = PaliGemmaForConditionalGenerationWithPiGemma(
+            config=vlm_config_hf,  # pyrefly: ignore[bad-argument-type]
+        )
+        self.gemma_expert = PiGemmaForCausalLM(config=action_expert_config_hf)  # pyrefly: ignore[bad-argument-type]
         self.gemma_expert.model.embed_tokens = None
 
         self.to_bfloat16_for_selected_params(precision)
@@ -415,7 +408,11 @@ class PaliGemmaWithExpertModel(nn.Module):
             image = image.to(torch.float32)
 
         image_outputs = self.paligemma.model.get_image_features(image)
-        features = image_outputs * self.paligemma.config.text_config.hidden_size**0.5
+        if not isinstance(image_outputs, torch.Tensor):
+            image_outputs = image_outputs.pooler_output
+        features = (
+            image_outputs * self.paligemma.config.text_config.hidden_size**0.5  # pyrefly: ignore[missing-attribute]
+        )
         if features.dtype != out_dtype:
             features = features.to(out_dtype)
         return features
@@ -476,7 +473,7 @@ class PaliGemmaWithExpertModel(nn.Module):
             prefix_past_key_values = None
         else:
             models = [self.paligemma.model.language_model, self.gemma_expert.model]
-            num_layers = self.paligemma.config.text_config.num_hidden_layers
+            num_layers = self.paligemma.config.text_config.num_hidden_layers  # pyrefly: ignore[missing-attribute]
 
             use_gradient_checkpointing = (
                 hasattr(self.gemma_expert.model, "gradient_checkpointing")
@@ -537,7 +534,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         return [prefix_output, suffix_output], prefix_past_key_values
 
 
-class Pi05Model(ExportableModelMixin, Model):
+class Pi05Model(Model):
     """Core Pi05 PyTorch model for flow matching VLA.
 
     This is the nn.Module that contains the actual model logic,
@@ -561,11 +558,17 @@ class Pi05Model(ExportableModelMixin, Model):
         time_sampling_offset: float = 0.001,
         min_period: float = 4e-3,
         max_period: float = 4.0,
+        snapflow_enabled: bool = False,
+        snapflow_alpha: float = 0.5,
+        snapflow_lambda: float = 1.0,
+        snapflow_num_inference_steps: int = 1,
         image_resolution: tuple[int, int] = (224, 224),
+        tokenizer_max_length: int = 200,
         freeze_vision_encoder: bool = False,
         train_expert_only: bool = True,
         gradient_checkpointing: bool = False,
         compile_model: bool = False,
+        use_random_input_noise: bool = False,
     ) -> None:
         """Initialize Pi05Model.
 
@@ -585,11 +588,20 @@ class Pi05Model(ExportableModelMixin, Model):
             time_sampling_offset: Offset for time sampling.
             min_period: Minimum period for sine-cosine positional encoding.
             max_period: Maximum period for sine-cosine positional encoding.
+            snapflow_enabled: Whether to enable SnapFlow self-distillation during training.
+            snapflow_alpha: Probability of replacing flow-matching loss with SnapFlow
+                consistency loss on each training step.
+            snapflow_lambda: Weight multiplier for the SnapFlow consistency loss term.
+            snapflow_num_inference_steps: Number of Euler steps used during SnapFlow
+                inference at test time.
             image_resolution: Target image resolution (height, width). Must be square.
+            tokenizer_max_length: Maximum token length for the tokenizer.
             freeze_vision_encoder: Whether to freeze the vision encoder during training.
             train_expert_only: Whether to train only the action expert.
             gradient_checkpointing: Whether to enable gradient checkpointing for memory optimization.
             compile_model: Whether to use torch.compile.
+            use_random_input_noise: Whether to use random noise as the initial input for the denoising
+                process during inference. If False, zeros are used instead.
 
         Raises:
             ValueError: If image resolution is not square.
@@ -606,12 +618,19 @@ class Pi05Model(ExportableModelMixin, Model):
         self._time_sampling_offset = time_sampling_offset
         self._min_period = min_period
         self._max_period = max_period
+        self._image_resolution = image_resolution
+        self._tokenizer_max_length = tokenizer_max_length
+        self._use_random_input_noise = use_random_input_noise
+        self._snapflow_enabled = snapflow_enabled
+        self._snapflow_alpha = snapflow_alpha
+        self._snapflow_lambda = snapflow_lambda
+        self._snapflow_num_inference_steps = snapflow_num_inference_steps
 
         paligemma_config = get_gemma_config(paligemma_variant)
         action_expert_config = get_gemma_config(action_expert_variant)
 
-        if image_resolution[0] != image_resolution[1]:
-            msg = f"PaliGemma expects square image resolution, invalid: {image_resolution}"
+        if self._image_resolution[0] != self._image_resolution[1]:
+            msg = f"PaliGemma expects square image resolution, invalid: {self._image_resolution}"
             raise ValueError(msg)
 
         self.paligemma_with_expert = PaliGemmaWithExpertModel(
@@ -619,7 +638,7 @@ class Pi05Model(ExportableModelMixin, Model):
             action_expert_config,
             use_adarms=[False, True],
             precision=dtype,
-            image_size=image_resolution[0],
+            image_size=self._image_resolution[0],
             freeze_vision_encoder=freeze_vision_encoder,
             train_expert_only=train_expert_only,
         )
@@ -629,6 +648,12 @@ class Pi05Model(ExportableModelMixin, Model):
 
         self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
         self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
+        self.target_time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
+        self.target_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
+        nn.init.zeros_(self.target_time_mlp_out.weight)
+        nn.init.zeros_(self.target_time_mlp_out.bias)
+
+        self.enable_rtc = False
 
         self.gradient_checkpointing_enabled = False
         if gradient_checkpointing:
@@ -645,87 +670,6 @@ class Pi05Model(ExportableModelMixin, Model):
     def set_dataset_stats(self, dataset_stats: dict) -> None:
         """Update dataset statistics used for normalization."""
         self._dataset_stats = dataset_stats
-
-    @property
-    def extra_export_args(self) -> dict[str, ExportParameters]:
-        """Additional export arguments for model conversion.
-
-        This property provides extra configuration parameters needed when exporting
-        the model to different formats (ONNX, OpenVINO, and PyTorch).
-
-        Returns:
-            dict[str, ExportParameters]: A dictionary mapping format names to their export parameters.
-            Supported formats: 'onnx', 'openvino', 'torch'.
-
-        Example:
-            >>> model = Pi05(input_features, output_features)
-            >>> export_args = model.extra_export_args
-            >>> onnx_args = export_args['onnx']
-            >>> print(onnx_args.exporter_kwargs)
-            {'output_names': ['action']}
-        """
-        extra_args: dict[str, ExportParameters] = {}
-        extra_args["onnx"] = ONNXExportParameters(
-            exporter_kwargs={
-                "output_names": ["action"],
-            },
-            preprocessing_type="pi05",
-            export_tokenizer=False,
-        )
-        extra_args["openvino"] = OpenVINOExportParameters(
-            outputs=["action"],
-            compress_to_fp16=True,
-            via_onnx=True,
-            export_tokenizer=False,
-            exporter_kwargs={},
-            preprocessing_type="pi05",
-        )
-        extra_args["torch"] = TorchExportParameters()
-
-        return extra_args
-
-    @property
-    def sample_input(self) -> dict[str, torch.Tensor | str]:
-        """Generate a sample input dictionary for the model with random tensors.
-
-        This method creates a dictionary containing sample input tensors that match the expected
-        input format of the model. The tensors are randomly initialized and have shapes derived
-        from the model's configuration.
-
-        Returns:
-            dict[str, torch.Tensor | dict[str, torch.Tensor]]: A dictionary with two keys
-                - 'state': A tensor representing the robot state with shape (1, *state_feature.shape).
-                - 'images': Either a single tensor or a dictionary of tensors representing visual inputs,
-                    depending on the number of image features configured.
-
-        Note:
-            The batch dimension (first dimension) is set to 1 for all tensors.
-            The tensors are created on the same device as the model's parameters.
-        """
-        device = next(self.paligemma_with_expert.parameters()).device
-
-        sample_input = {}
-
-        num_image_features = sum(1 for key in self._dataset_stats if "image" in key)
-
-        for feature_id in self._dataset_stats:
-            if STATE in feature_id:
-                state_feature = self._dataset_stats[feature_id]
-                sample_input[STATE] = torch.randn(1, *cast("tuple", state_feature["shape"]), device=device)
-            elif "image" in feature_id:
-                image_feature = self._dataset_stats[feature_id]
-                if num_image_features == 1:
-                    sample_input[IMAGES] = torch.randn(1, *cast("tuple", image_feature["shape"]), device=device)
-                else:
-                    sample_input[IMAGES + "." + str(image_feature["name"])] = torch.randn(
-                        1,
-                        *cast("tuple", image_feature["shape"]),
-                        device=device,
-                    )
-
-        sample_input[TASK] = "sample_task"
-
-        return sample_input
 
     @property
     def reward_delta_indices(self) -> None:
@@ -762,6 +706,12 @@ class Pi05Model(ExportableModelMixin, Model):
         self.paligemma_with_expert.paligemma.model.language_model.gradient_checkpointing = True
         self.paligemma_with_expert.paligemma.model.vision_tower.gradient_checkpointing = True
         self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = True
+        # Force eager attention on the vision tower so that SDPA/flash-attention
+        # ops do not appear inside checkpoint regions, which would otherwise
+        # cause a KeyError in the AOT autograd partitioner when torch.compile
+        # traces the backward graph (functionalize_rng_ops cannot map the
+        # _scaled_dot_product_flash_attention op between fwd/bwd graphs).
+        self.paligemma_with_expert.paligemma.model.vision_tower.config._attn_implementation = "eager"  # noqa: SLF001
         msg = "Enabled gradient checkpointing for Pi05Model"
         logger.info(msg)
 
@@ -796,16 +746,18 @@ class Pi05Model(ExportableModelMixin, Model):
         Returns:
             4D attention mask tensor.
         """
-        att_2d_masks_4d = att_2d_masks[:, None, :, :]
+        # .bool() is needed because JIT tracing promotes bool*bool → Long
+        # in _make_att_2d_masks, but torch.where requires a boolean condition.
+        att_2d_masks_4d = att_2d_masks[:, None, :, :].bool()
         return torch.where(att_2d_masks_4d, 0.0, OPENPI_ATTENTION_MASK_VALUE)
 
-    def sample_noise(self, shape: tuple, device: torch.device) -> Tensor:  # noqa: PLR6301
+    def sample_noise(self, shape: tuple, device: torch.device) -> Tensor:
         """Sample noise for the model.
 
         Returns:
             Noise tensor.
         """
-        if torch.jit.is_tracing() or torch.onnx.is_in_onnx_export():
+        if not self._use_random_input_noise:
             return torch.zeros(shape, dtype=torch.float32, device=device)
         return torch.normal(
             mean=0.0,
@@ -843,50 +795,72 @@ class Pi05Model(ExportableModelMixin, Model):
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Embed images with SigLIP and language tokens with embedding layer.
 
+        During inference or tracing (ONNX/OV export), batches all camera images
+        into a single encoder call for efficiency. During training, uses per-image
+        calls with gradient checkpointing support.
+
+        Args:
+            images: ``(num_cameras, batch, C, H, W)`` stacked image tensor.
+            img_masks: ``(num_cameras, batch)`` boolean camera masks.
+            tokens: ``(batch, seq_len)`` tokenized prompt.
+            masks: ``(batch, seq_len)`` prompt attention mask.
+
         Returns:
             Tuple of (embeddings, padding masks, attention masks).
         """
+        use_batched = not self.training
+
+        num_cameras = images.shape[0]
+        bsize = images.shape[1]
+
         embs = []
         pad_masks = []
-        att_masks = []
+        att_masks: list[int] = []
 
-        for img, img_mask in zip(images, img_masks, strict=True):
+        if use_batched:
+            # Single batched encoder call: [N*B, C, H, W]
+            imgs_flat = images.reshape(num_cameras * bsize, *images.shape[2:])
+            all_img_embs = self.paligemma_with_expert.embed_image(imgs_flat)
+            num_img_embs = all_img_embs.shape[1]
+            all_img_embs = all_img_embs.reshape(num_cameras, bsize, num_img_embs, -1)
 
-            def image_embed_func(img: Tensor) -> Tensor:
-                return self.paligemma_with_expert.embed_image(img)
+        for cam_idx in range(num_cameras):
+            if use_batched:
+                img_emb = all_img_embs[cam_idx]  # pyrefly: ignore[unbound-name]
+            else:
 
-            img_emb = self._apply_checkpoint(image_embed_func, img)
-            bsize, num_img_embs = img_emb.shape[:2]
+                def image_embed_func(img: Tensor) -> Tensor:
+                    return self.paligemma_with_expert.embed_image(img)
 
+                img_emb = self._apply_checkpoint(image_embed_func, images[cam_idx])
+
+            num_img_embs = img_emb.shape[1]
             embs.append(img_emb)
-            pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
+            pad_masks.append(img_masks[cam_idx][:, None].expand(bsize, num_img_embs))
             att_masks += [0] * num_img_embs
 
         def lang_embed_func(tokens: Tensor) -> Tensor:
             lang_emb = self.paligemma_with_expert.embed_language_tokens(tokens)
-            lang_emb_dim = lang_emb.shape[-1]
-            return lang_emb * math.sqrt(lang_emb_dim)
+            return lang_emb * math.sqrt(lang_emb.shape[-1])
 
-        lang_emb = self._apply_checkpoint(lang_embed_func, tokens)
+        lang_emb = lang_embed_func(tokens) if use_batched else self._apply_checkpoint(lang_embed_func, tokens)
+
         embs.append(lang_emb)
         pad_masks.append(masks)
+        att_masks += [0] * lang_emb.shape[1]
 
-        num_lang_embs = lang_emb.shape[1]
-        att_masks += [0] * num_lang_embs
+        embs_cat = torch.cat(embs, dim=1)
+        pad_masks_cat = torch.cat(pad_masks, dim=1)
+        att_masks_t = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks_cat.device)
+        att_masks_t = att_masks_t[None, :].expand(bsize, len(att_masks))
 
-        embs = torch.cat(embs, dim=1)
-        pad_masks = torch.cat(pad_masks, dim=1)
-        att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
-
-        bsize = pad_masks.shape[0]
-        att_masks = att_masks[None, :].expand(bsize, len(att_masks))
-
-        return embs, pad_masks, att_masks
+        return embs_cat, pad_masks_cat, att_masks_t
 
     def embed_suffix(
         self,
         noisy_actions: Tensor,
         timestep: Tensor,
+        target_time: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Embed noisy_actions and timestep for Expert Gemma processing.
 
@@ -918,6 +892,23 @@ class Pi05Model(ExportableModelMixin, Model):
             return F.silu(x)
 
         time_emb = self._apply_checkpoint(time_mlp_func, time_emb)
+        if target_time is not None and self._snapflow_enabled:
+            target_time_emb = _create_sinusoidal_pos_embedding(
+                target_time,
+                self.action_in_proj.out_features,
+                min_period=self._min_period,
+                max_period=self._max_period,
+                device=target_time.device,
+            )
+            target_time_emb = target_time_emb.type(dtype=timestep.dtype)
+
+            def target_time_mlp_func(emb: Tensor) -> Tensor:
+                x = self.target_time_mlp_in(emb)
+                x = F.silu(x)
+                return self.target_time_mlp_out(x)
+
+            target_time_emb = self._apply_checkpoint(target_time_mlp_func, target_time_emb)
+            time_emb += target_time_emb
         action_time_emb = action_emb
         adarms_cond = time_emb
 
@@ -935,101 +926,258 @@ class Pi05Model(ExportableModelMixin, Model):
 
         return embs, pad_masks, att_masks, adarms_cond
 
-    def forward(  # noqa: PLR0914
+    def _predict_velocity(
         self,
-        batch: dict[str, Any],
-    ) -> tuple[Tensor, dict[str, float]] | Tensor:
-        """Training forward pass: compute flow matching loss.
+        x_t: Tensor,
+        timestep: Tensor,
+        target_time: Tensor,
+        prefix_embs: Tensor,
+        prefix_pad_masks: Tensor,
+        prefix_att_masks: Tensor,
+    ) -> Tensor:
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(
+            x_t,
+            timestep,
+            target_time=target_time,
+        )
 
-        Args:
-            batch: Preprocessed batch dict containing IMAGES, IMAGE_MASKS,
-                TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, and ACTION.
+        local_prefix_embs = prefix_embs
+        if (
+            self.paligemma_with_expert.paligemma.model.language_model.layers[0].self_attn.q_proj.weight.dtype
+            == torch.bfloat16
+        ):
+            suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
+            local_prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
 
-        Returns:
-            Tuple of (mean loss tensor, loss dict with "loss" key).
-        """
-        if self.training:
-            images = batch[IMAGES]
-            img_masks = batch[IMAGE_MASKS]
-            tokens = batch[TOKENIZED_PROMPT]
-            masks = batch[TOKENIZED_PROMPT_MASK]
-            actions = batch[ACTION]
+        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
+        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+        att_2d_masks = _make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+        att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
 
-            noise = self.sample_noise(actions.shape, actions.device)
-            time = self.sample_time(actions.shape[0], actions.device)
+        def forward_func(
+            prefix_embs: Tensor,
+            suffix_embs: Tensor,
+            att_2d_masks_4d: Tensor,
+            position_ids: Tensor,
+            adarms_cond: Tensor,
+        ) -> Tensor:
+            (_, suffix_out), _ = self.paligemma_with_expert.forward(
+                attention_mask=att_2d_masks_4d,
+                position_ids=position_ids,
+                past_key_values=None,
+                inputs_embeds=[prefix_embs, suffix_embs],
+                use_cache=False,
+                adarms_cond=[None, adarms_cond],
+            )
+            return suffix_out
 
-            time_expanded = time[:, None, None]
-            x_t = time_expanded * noise + (1 - time_expanded) * actions
-            u_t = noise - actions
-
-            prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
-            suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, time)
-
-            if (
-                self.paligemma_with_expert.paligemma.model.language_model.layers[0].self_attn.q_proj.weight.dtype
-                == torch.bfloat16
-            ):
-                suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
-                prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
-
-            pad_masks_combined = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
-            att_masks_combined = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
-
-            att_2d_masks = _make_att_2d_masks(pad_masks_combined, att_masks_combined)
-            position_ids = torch.cumsum(pad_masks_combined, dim=1) - 1
-
-            att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
-
-            def forward_func(
-                prefix_embs: Tensor,
-                suffix_embs: Tensor,
-                att_2d_masks_4d: Tensor,
-                position_ids: Tensor,
-                adarms_cond: Tensor,
-            ) -> Tensor:
-                (_, suffix_out), _ = self.paligemma_with_expert.forward(
-                    attention_mask=att_2d_masks_4d,
-                    position_ids=position_ids,
-                    past_key_values=None,
-                    inputs_embeds=[prefix_embs, suffix_embs],
-                    use_cache=False,
-                    adarms_cond=[None, adarms_cond],
-                )
-                return suffix_out
-
+        if torch.is_grad_enabled():
             suffix_out = self._apply_checkpoint(
                 forward_func,
-                prefix_embs,
+                local_prefix_embs,
+                suffix_embs,
+                att_2d_masks_4d,
+                position_ids,
+                adarms_cond,
+            )
+        else:
+            suffix_out = forward_func(
+                local_prefix_embs,
                 suffix_embs,
                 att_2d_masks_4d,
                 position_ids,
                 adarms_cond,
             )
 
-            suffix_out = suffix_out[:, -self._chunk_size :]
-            suffix_out = suffix_out.to(dtype=torch.float32)
+        suffix_out = suffix_out[:, -self._chunk_size :]
+        suffix_out = suffix_out.to(dtype=torch.float32)
 
-            def action_out_proj_func(suffix_out: Tensor) -> Tensor:
-                return self.action_out_proj(suffix_out)
+        def action_out_proj_func(suffix_out: Tensor) -> Tensor:
+            return self.action_out_proj(suffix_out)
 
-            v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
+        if torch.is_grad_enabled():
+            return self._apply_checkpoint(action_out_proj_func, suffix_out)
+        return action_out_proj_func(suffix_out)
 
-            losses = F.mse_loss(u_t, v_t, reduction="none")
+    def forward(
+        self,
+        batch: dict[str, Any],
+    ) -> tuple[Tensor, dict[str, float]] | Tensor:
+        """Forward pass through the model.
 
-            # Truncate losses to actual action dimensions to avoid dilution from padding
-            original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1])
-            losses = losses[:, :, :original_action_dim]
+        Training mode: computes flow matching loss (with gradients).
+        Eval mode: returns predicted action chunk via denoising.
 
-            loss = losses.mean()
-            return loss, {"loss": loss.item()}
+        Args:
+            batch: Preprocessed batch dict.
+
+        Returns:
+            Training: (loss tensor, loss dict).  Eval: action tensor.
+        """
+        if self.training:
+            return self.compute_loss(batch)
         return self.predict_action_chunk(batch)
+
+    def compute_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, float]]:
+        """Compute flow matching training loss.
+
+        Delegates to :meth:`_flow_matching_loss`.
+
+        Returns:
+            Tuple of (loss tensor, loss dict with ``"loss"`` key).
+        """
+        return self._flow_matching_loss(batch)
+
+    def _flow_matching_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, float]]:  # noqa: PLR0914
+        """Compute flow matching training loss.
+
+        Samples random noise and timesteps, interpolates noisy actions,
+        predicts the velocity field, and returns the MSE between predicted
+        and target velocities.  When SnapFlow is enabled, uses a mixture
+        of standard FM loss and consistency distillation loss.
+
+        Args:
+            batch: Preprocessed batch dict containing IMAGES, IMAGE_MASKS,
+                TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, and ACTION.
+
+        Returns:
+            Tuple of (mean loss tensor, loss dict with ``"loss"`` key).
+        """
+        images = batch[IMAGES]
+        img_masks = batch[IMAGE_MASKS]
+        tokens = batch[TOKENIZED_PROMPT]
+        masks = batch[TOKENIZED_PROMPT_MASK]
+        actions = batch[ACTION]
+
+        bsize = actions.shape[0]
+        device = actions.device
+        noise = self.sample_noise(actions.shape, device)
+        time = self.sample_time(bsize, device)
+
+        time_expanded = time[:, None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+        if not self._snapflow_enabled:
+            v_t = self._predict_velocity(
+                x_t,
+                time,
+                time,
+                prefix_embs,
+                prefix_pad_masks,
+                prefix_att_masks,
+            )
+            losses = F.mse_loss(u_t, v_t, reduction="none")
+        else:
+            fm_mask = torch.rand(bsize, device=device) < self._snapflow_alpha
+            fm_idx = fm_mask.nonzero(as_tuple=True)[0]
+            cd_idx = (~fm_mask).nonzero(as_tuple=True)[0]
+
+            losses = torch.zeros_like(u_t)
+
+            if fm_idx.numel() > 0:
+                v_fm = self._predict_velocity(
+                    x_t[fm_idx],
+                    time[fm_idx],
+                    time[fm_idx],
+                    prefix_embs[fm_idx],
+                    prefix_pad_masks[fm_idx],
+                    prefix_att_masks[fm_idx],
+                )
+                losses[fm_idx] = F.mse_loss(u_t[fm_idx], v_fm, reduction="none")
+
+            if cd_idx.numel() > 0:
+                cd_actions_shape = (cd_idx.numel(), *actions.shape[1:])
+                x_1 = self.sample_noise(cd_actions_shape, device)
+                cd_prefix_embs = prefix_embs[cd_idx]
+                cd_prefix_pad_masks = prefix_pad_masks[cd_idx]
+                cd_prefix_att_masks = prefix_att_masks[cd_idx]
+
+                with torch.no_grad():
+                    cd_bsize = cd_idx.numel()
+                    t1 = torch.ones(cd_bsize, device=device)
+                    v_1 = self._predict_velocity(
+                        x_1,
+                        t1,
+                        t1,
+                        cd_prefix_embs,
+                        cd_prefix_pad_masks,
+                        cd_prefix_att_masks,
+                    )
+                    x_half = x_1 - 0.5 * v_1
+                    t_half = torch.full((cd_bsize,), 0.5, device=device)
+                    v_half = self._predict_velocity(
+                        x_half,
+                        t_half,
+                        t_half,
+                        cd_prefix_embs,
+                        cd_prefix_pad_masks,
+                        cd_prefix_att_masks,
+                    )
+                    v_target = 0.5 * (v_1 + v_half)
+
+                t1 = torch.ones(cd_idx.numel(), device=device)
+                t_zero = torch.zeros(cd_idx.numel(), device=device)
+                v_pred = self._predict_velocity(
+                    x_1,
+                    t1,
+                    t_zero,
+                    cd_prefix_embs,
+                    cd_prefix_pad_masks,
+                    cd_prefix_att_masks,
+                )
+                losses[cd_idx] = self._snapflow_lambda * F.mse_loss(
+                    v_pred,
+                    v_target.detach(),
+                    reduction="none",
+                )
+
+        # Truncate losses to actual action dimensions to avoid dilution from padding
+        original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1])
+        losses = losses[:, :, :original_action_dim]
+
+        loss = losses.mean()
+        return loss, {"loss": loss.item()}
+
+    @torch.no_grad()
+    def compute_val_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, float]]:
+        """Compute validation loss: MSE between predicted and ground-truth actions.
+
+        Runs the full denoising loop (same as inference) and compares the
+        result with the ground-truth actions from the batch.  This is
+        deterministic and gives a direct measure of action prediction
+        quality — unlike the stochastic flow matching training loss.
+
+        Args:
+            batch: Preprocessed batch dict containing IMAGES, IMAGE_MASKS,
+                TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, and ACTION.
+
+        Returns:
+            Tuple of (mean MSE loss tensor, loss dict with ``"loss"`` key).
+        """
+        gt_actions = batch[ACTION]
+        predicted = self.predict_action_chunk(batch)
+
+        # Compare in the original (unpadded) action space
+        original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1])
+        gt_trimmed = gt_actions[:, :, :original_action_dim]
+        pred_trimmed = predicted[:, :, :original_action_dim]
+
+        # Align chunk lengths (predicted may be clipped by n_action_steps)
+        min_len = min(gt_trimmed.shape[1], pred_trimmed.shape[1])
+        loss = F.mse_loss(pred_trimmed[:, :min_len], gt_trimmed[:, :min_len])
+        return loss, {"loss": loss.item()}
 
     def predict_action_chunk(self, batch: dict[str, Any]) -> Tensor:
         """Predict a chunk of actions from a preprocessed batch.
 
         Args:
             batch: Preprocessed batch dict containing IMAGES, IMAGE_MASKS,
-                TOKENIZED_PROMPT, and TOKENIZED_PROMPT_MASK.
+                TOKENIZED_PROMPT, and TOKENIZED_PROMPT_MASK. When ``self.enable_rtc``
+                is True, also expects RTC keys: ``prev_chunk_left_over``,
+                ``inference_delay``, ``max_guidance_weight``, and ``execution_horizon``.
 
         Returns:
             Denoised action tensor, unpadded and clipped to n_action_steps.
@@ -1038,7 +1186,23 @@ class Pi05Model(ExportableModelMixin, Model):
         img_masks = batch[IMAGE_MASKS]
         tokens = batch[TOKENIZED_PROMPT]
         masks = batch[TOKENIZED_PROMPT_MASK]
-        actions = self.sample_actions(images, img_masks, tokens, masks)
+
+        rtc_kwargs: dict[str, Any] = {}
+        if self.enable_rtc:
+            rtc_kwargs = {
+                "rtc_max_guidance": batch.get("max_guidance_weight", 0.0),
+                "rtc_execution_horizon": batch.get("execution_horizon", 0),
+                "rtc_latency": batch.get("inference_delay", 0.0),
+                "rtc_prev_action_chunk": batch.get("prev_chunk_left_over"),
+            }
+
+        actions = self.sample_actions(
+            images,
+            img_masks,
+            tokens,
+            masks,
+            **rtc_kwargs,
+        )
 
         # Unpad actions to actual action dimension
         original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1])
@@ -1051,6 +1215,78 @@ class Pi05Model(ExportableModelMixin, Model):
 
         return actions
 
+    def _compute_prefix_weights(
+        self,
+        inference_delay: Tensor,
+        execution_horizon: Tensor,
+        prefix_attention_schedule: Literal["linear", "exp"] = "linear",
+    ) -> Tensor:
+        """Compute prefix attention weights inside the graph.
+
+        Args:
+            inference_delay: Scalar tensor — the dynamic latency estimate.
+            execution_horizon: Scalar tensor — number of fresh actions per chunk.
+            prefix_attention_schedule: Schedule type for prefix attention weights ("linear" or "exp").
+
+        Returns:
+            ``(1, chunk_size, 1)`` weight tensor.
+        """
+        chunk_size = self._chunk_size
+        end = execution_horizon.float()
+        start = torch.minimum(inference_delay.float(), end)
+
+        idx = torch.arange(chunk_size, dtype=torch.float32, device=inference_delay.device)
+        denom = end - start + 1.0
+        weights = (end - idx) / denom
+        weights = torch.clamp(weights, min=0.0, max=1.0)
+
+        if prefix_attention_schedule == "exp":
+            weights = weights * (torch.exp(weights) - 1.0) / (math.e - 1.0)
+        # "linear" → no-op
+
+        return weights.unsqueeze(0).unsqueeze(-1)  # (1, chunk_size, 1)
+
+    @staticmethod
+    def _rtc_correct(
+        x_t: Tensor,
+        v_t: Tensor,
+        prev_chunk_left_over: Tensor,
+        prefix_weights: Tensor,
+        time: float,
+        max_guidance_weight: Tensor,
+    ) -> Tensor:
+        """Apply RTC guidance correction to velocity prediction.
+
+        Uses direct error (not autograd.grad) for OV traceability.
+
+        Returns:
+            Corrected velocity tensor.
+        """
+        tau = 1.0 - time
+
+        # Predicted clean actions at t=0
+        x1_t = x_t - time * v_t
+
+        # Weighted error between previous chunk and prediction
+        err = (prev_chunk_left_over - x1_t) * prefix_weights
+        correction = err
+
+        # Adaptive guidance weight
+        max_gw = max_guidance_weight.float()
+        tau_t = torch.as_tensor(tau)
+        squared_one_minus_tau = (1.0 - tau_t) ** 2
+        inv_r2 = (squared_one_minus_tau + tau_t**2) / squared_one_minus_tau
+
+        # Manual nan_to_num — torch.nan_to_num not supported by OV
+        c_raw = (1.0 - tau_t) / tau_t
+        c = torch.where(torch.isinf(c_raw), max_gw, c_raw)
+
+        guidance_weight_raw = c * inv_r2
+        guidance_weight = torch.where(torch.isinf(guidance_weight_raw), max_gw, guidance_weight_raw)
+        guidance_weight = torch.minimum(guidance_weight, max_gw)
+
+        return v_t - guidance_weight * correction
+
     @torch.no_grad()
     def sample_actions(  # noqa: PLR0914
         self,
@@ -1060,13 +1296,19 @@ class Pi05Model(ExportableModelMixin, Model):
         masks: Tensor,
         noise: Tensor | None = None,
         num_steps: int | None = None,
+        rtc_max_guidance: float = 0.0,
+        rtc_execution_horizon: int = 0,
+        rtc_latency: float = 0.0,
+        rtc_prev_action_chunk: Tensor | None = None,
     ) -> Tensor:
         """Inference forward pass: sample actions via iterative denoising.
 
         Returns:
             Denoised action tensor.
         """
-        if num_steps is None:
+        if self._snapflow_enabled:
+            num_steps = self._snapflow_num_inference_steps
+        elif num_steps is None:
             num_steps = self._num_inference_steps
 
         bsize = tokens.shape[0]
@@ -1097,13 +1339,29 @@ class Pi05Model(ExportableModelMixin, Model):
         for step in range(num_steps):
             time = 1.0 + step * dt
             time_tensor = torch.tensor(time, dtype=torch.float32, device=device).expand(bsize)
+            target_time = torch.zeros(bsize, device=device) if self._snapflow_enabled else time_tensor
 
             v_t = self.denoise_step(
                 prefix_pad_masks=prefix_pad_masks,
                 past_key_values=past_key_values,
                 x_t=x_t,
                 timestep=time_tensor,
+                target_time=target_time,
             )
+
+            if rtc_prev_action_chunk is not None:
+                prefix_weights = self._compute_prefix_weights(
+                    inference_delay=torch.tensor(rtc_latency, device=device),
+                    execution_horizon=torch.tensor(rtc_execution_horizon, device=device),
+                )
+                v_t = self._rtc_correct(
+                    x_t,
+                    v_t,
+                    prev_chunk_left_over=rtc_prev_action_chunk,
+                    prefix_weights=prefix_weights,
+                    time=time,
+                    max_guidance_weight=torch.tensor(rtc_max_guidance, device=device),
+                )
 
             x_t += dt * v_t
 
@@ -1115,13 +1373,18 @@ class Pi05Model(ExportableModelMixin, Model):
         past_key_values: DynamicCache | None,
         x_t: Tensor,
         timestep: Tensor,
+        target_time: Tensor | None = None,
     ) -> Tensor:
         """Apply one denoising step of noise x_t at a given timestep.
 
         Returns:
             Velocity prediction tensor for this denoising step.
         """
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, timestep)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(
+            x_t,
+            timestep,
+            target_time=target_time,
+        )
 
         suffix_len = suffix_pad_masks.shape[1]
         batch_size = prefix_pad_masks.shape[0]

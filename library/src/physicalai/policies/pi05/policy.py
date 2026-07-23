@@ -10,15 +10,23 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 from huggingface_hub import hf_hub_download
+from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
+from physicalai.inference.manifest import ComponentSpec
 from safetensors.torch import load_file
 
 from physicalai.data.dataset import Dataset
-from physicalai.data.observation import ACTION
+from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, FeatureType
 from physicalai.export import ExportablePolicyMixin, ExportBackend
+from physicalai.export.backends import (
+    ExportParameters,
+    ONNXExportParameters,
+    OpenVINOExportParameters,
+    TorchExportParameters,
+)
 from physicalai.policies.base import Policy
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 from physicalai.train.utils import reformat_dataset_to_match_policy
@@ -26,6 +34,7 @@ from physicalai.train.utils import reformat_dataset_to_match_policy
 from .config import Pi05Config
 from .model import Pi05Model
 from .preprocessor import make_pi05_preprocessors
+from .pretrained_utils import detect_normalization_mode as _detect_normalization_mode
 from .pretrained_utils import extract_dataset_stats as _extract_dataset_stats
 from .pretrained_utils import fix_state_dict_keys as _fix_state_dict_keys
 
@@ -57,12 +66,33 @@ class Pi05(ExportablePolicyMixin, Policy):
         max_state_dim: Maximum state dimension (padded). Default: 32.
         max_action_dim: Maximum action dimension (padded). Default: 32.
         num_inference_steps: Denoising steps for inference. Default: 10.
+        time_sampling_beta_alpha: Alpha for beta distribution time sampling. Default: 1.5.
+        time_sampling_beta_beta: Beta for beta distribution time sampling. Default: 1.0.
+        time_sampling_scale: Scale factor for time sampling. Default: 0.999.
+        time_sampling_offset: Offset for time sampling. Default: 0.001.
+        min_period: Minimum period for sine-cosine positional encoding. Default: 4e-3.
+        max_period: Maximum period for sine-cosine positional encoding. Default: 4.0.
+        use_random_input_noise: Use random noise as initial denoising input. Default: True.
         image_resolution: Target image resolution. Default: (224, 224).
+        empty_cameras: Number of empty camera slots to add. Default: 0.
         tokenizer_max_length: Maximum tokenizer length. Default: 200.
-        gradient_checkpointing: Enable gradient checkpointing. Default: False.
+        gradient_checkpointing: Enable gradient checkpointing. Default: True.
+        compile_model: Whether to use torch.compile. Default: False.
+        compile_mode: Torch compile mode. Default: "max-autotune".
         freeze_vision_encoder: Freeze vision encoder. Default: False.
-        train_expert_only: Train only action expert. Default: True.
+        train_expert_only: Train only action expert. Default: False.
+        normalization_mode: Normalization method for state/action features — ``"QUANTILES"``
+            (percentile-based, robust to outliers) or ``"MEAN_STD"``. Default: ``"QUANTILES"``.
+
         optimizer_lr: Learning rate. Default: 2.5e-5.
+        optimizer_betas: Adam beta coefficients. Default: (0.9, 0.95).
+        optimizer_eps: Optimizer epsilon for numerical stability. Default: 1e-8.
+        optimizer_weight_decay: Weight decay coefficient. Default: 0.01.
+        optimizer_grad_clip_norm: Maximum gradient norm for clipping. Default: 1.0.
+        scheduler_warmup_steps: Number of linear warmup steps. Default: 1000.
+        scheduler_decay_steps: Cosine decay horizon in steps. ``None`` auto-scales
+            to total training steps. Default: 30000.
+        scheduler_decay_lr: Final learning rate after cosine decay. Default: 2.5e-6.
         dataset_stats: Dataset stats for eager initialization. Default: None.
 
     Example:
@@ -78,7 +108,7 @@ class Pi05(ExportablePolicyMixin, Policy):
         >>> action = policy.select_action(obs)
     """
 
-    def __init__(  # noqa: PLR0913, PLR0917
+    def __init__(  # noqa: PLR0913
         self,
         # Pretrained model id
         pretrained_name_or_path: str | Path | None = None,
@@ -92,6 +122,7 @@ class Pi05(ExportablePolicyMixin, Policy):
         n_action_steps: int = 50,
         max_state_dim: int = 32,
         max_action_dim: int = 32,
+        *,
         # Flow matching
         num_inference_steps: int = 10,
         time_sampling_beta_alpha: float = 1.5,
@@ -100,19 +131,25 @@ class Pi05(ExportablePolicyMixin, Policy):
         time_sampling_offset: float = 0.001,
         min_period: float = 4e-3,
         max_period: float = 4.0,
+        use_random_input_noise: bool = True,
+        snapflow_enabled: bool = False,
+        snapflow_alpha: float = 0.5,
+        snapflow_lambda: float = 1.0,
+        snapflow_num_inference_steps: int = 1,
         # Image preprocessing
         image_resolution: tuple[int, int] = (224, 224),
         empty_cameras: int = 0,
         # Tokenizer
         tokenizer_max_length: int = 200,
         # Optimization
-        *,
         gradient_checkpointing: bool = True,
         compile_model: bool = False,
         compile_mode: str = "max-autotune",
         # Finetuning
         freeze_vision_encoder: bool = False,
-        train_expert_only: bool = True,
+        train_expert_only: bool = False,
+        # Normalization
+        normalization_mode: Literal["MEAN_STD", "QUANTILES"] = "QUANTILES",
         # Optimizer
         optimizer_lr: float = 2.5e-5,
         optimizer_betas: tuple[float, float] = (0.9, 0.95),
@@ -121,7 +158,7 @@ class Pi05(ExportablePolicyMixin, Policy):
         optimizer_grad_clip_norm: float = 1.0,
         # Scheduler
         scheduler_warmup_steps: int = 1_000,
-        scheduler_decay_steps: int | None = None,
+        scheduler_decay_steps: int | None = 30_000,
         scheduler_decay_lr: float = 2.5e-6,
         # Eager initialization
         dataset_stats: dict[str, dict[str, list[float] | str | tuple]] | None = None,
@@ -137,6 +174,7 @@ class Pi05(ExportablePolicyMixin, Policy):
                 n_action_steps=n_action_steps,
                 max_state_dim=max_state_dim,
                 num_inference_steps=num_inference_steps,
+                use_random_input_noise=use_random_input_noise,
                 gradient_checkpointing=gradient_checkpointing,
                 compile_model=compile_model,
                 compile_mode=compile_mode,
@@ -150,6 +188,10 @@ class Pi05(ExportablePolicyMixin, Policy):
                 scheduler_warmup_steps=scheduler_warmup_steps,
                 scheduler_decay_steps=scheduler_decay_steps,
                 scheduler_decay_lr=scheduler_decay_lr,
+                snapflow_enabled=snapflow_enabled,
+                snapflow_alpha=snapflow_alpha,
+                snapflow_lambda=snapflow_lambda,
+                snapflow_num_inference_steps=snapflow_num_inference_steps,
             )
         else:
             self.config = Pi05Config(
@@ -168,14 +210,20 @@ class Pi05(ExportablePolicyMixin, Policy):
                 time_sampling_offset=time_sampling_offset,
                 min_period=min_period,
                 max_period=max_period,
+                snapflow_enabled=snapflow_enabled,
+                snapflow_alpha=snapflow_alpha,
+                snapflow_lambda=snapflow_lambda,
+                snapflow_num_inference_steps=snapflow_num_inference_steps,
                 image_resolution=image_resolution,
                 empty_cameras=empty_cameras,
                 tokenizer_max_length=tokenizer_max_length,
+                use_random_input_noise=use_random_input_noise,
                 gradient_checkpointing=gradient_checkpointing,
                 compile_model=compile_model,
                 compile_mode=compile_mode,
                 freeze_vision_encoder=freeze_vision_encoder,
                 train_expert_only=train_expert_only,
+                normalization_mode=normalization_mode,
                 optimizer_lr=optimizer_lr,
                 optimizer_betas=optimizer_betas,
                 optimizer_eps=optimizer_eps,
@@ -185,9 +233,10 @@ class Pi05(ExportablePolicyMixin, Policy):
                 scheduler_decay_steps=scheduler_decay_steps,
                 scheduler_decay_lr=scheduler_decay_lr,
             )
-
-        self.save_hyperparameters(ignore=["config", "pretrained_name_or_path"])
-        self.hparams["config"] = self.config.to_dict()
+        # captures raw init args
+        self.save_hyperparameters(ignore=["config", "pretrained_name_or_path", "compile_model"])
+        # overwrites with resolved self.config values
+        self._set_hparam_keys()
 
         self.model: Pi05Model | None = None
 
@@ -198,6 +247,14 @@ class Pi05(ExportablePolicyMixin, Policy):
 
         if dataset_stats is not None:
             self._initialize_model(dataset_stats, weight_file)
+
+    def _set_hparam_keys(self) -> None:
+        """Sync top-level checkpoint hparams from the resolved policy config."""
+        for key, value in self.config.__dict__.items():
+            if key == "compile_model" or key not in self.hparams:
+                continue
+            self.hparams[key] = value
+        self.hparams["config"] = self.config.to_dict()
 
     def _initialize_model(
         self,
@@ -223,11 +280,17 @@ class Pi05(ExportablePolicyMixin, Policy):
             time_sampling_offset=self.config.time_sampling_offset,
             min_period=self.config.min_period,
             max_period=self.config.max_period,
+            snapflow_enabled=self.config.snapflow_enabled,
+            snapflow_alpha=self.config.snapflow_alpha,
+            snapflow_lambda=self.config.snapflow_lambda,
+            snapflow_num_inference_steps=self.config.snapflow_num_inference_steps,
             image_resolution=self.config.image_resolution,
+            tokenizer_max_length=self.config.tokenizer_max_length,
             freeze_vision_encoder=self.config.freeze_vision_encoder,
             train_expert_only=self.config.train_expert_only,
             gradient_checkpointing=self.config.gradient_checkpointing,
             compile_model=self.config.compile_model,
+            use_random_input_noise=self.config.use_random_input_noise,
         )
         if weights_file is not None:
             # load raw state dict
@@ -256,36 +319,41 @@ class Pi05(ExportablePolicyMixin, Policy):
             self.model.paligemma_with_expert._set_requires_grad()  # noqa: SLF001
 
         self._preprocessor, self._postprocessor = make_pi05_preprocessors(
-            max_state_dim=self.config.max_state_dim,
             max_action_dim=self.config.max_action_dim,
             stats=dataset_stats,
             image_resolution=self.config.image_resolution,
             max_token_len=self.config.tokenizer_max_length,
             empty_cameras=self.config.empty_cameras,
+            normalization_mode=self.config.normalization_mode,
         )
 
         self._dataset_stats = dataset_stats
 
-    def _from_hf(  # noqa: PLR6301, PLR0913
+    def _from_hf(  # noqa: PLR6301, PLR0913, PLR0912, PLR0915
         self,
         pretrained_name_or_path: str | Path,
         *,
-        dtype: Literal["bfloat16", "float32"] = "float32",
-        n_action_steps: int | None = 10,
+        dtype: Literal["bfloat16", "float32"] = "bfloat16",
+        n_action_steps: int | None = 50,
         max_state_dim: int | None = None,
         num_inference_steps: int | None = None,
-        gradient_checkpointing: bool = False,
+        use_random_input_noise: bool = True,
+        snapflow_enabled: bool | None = None,
+        snapflow_alpha: float | None = None,
+        snapflow_lambda: float | None = None,
+        snapflow_num_inference_steps: int | None = None,
+        gradient_checkpointing: bool = True,
         compile_model: bool = False,
         compile_mode: str | None = "max-autotune",
         freeze_vision_encoder: bool = False,
-        train_expert_only: bool = True,
+        train_expert_only: bool = False,
         optimizer_lr: float = 2.5e-5,
         optimizer_betas: tuple[float, float] = (0.9, 0.95),
         optimizer_eps: float = 1e-8,
         optimizer_weight_decay: float = 0.01,
         optimizer_grad_clip_norm: float = 1.0,
         scheduler_warmup_steps: int = 1_000,
-        scheduler_decay_steps: int | None = None,
+        scheduler_decay_steps: int | None = 30_000,
         scheduler_decay_lr: float = 2.5e-6,
         **kwargs: Any,  # noqa: ANN401
     ) -> tuple[Pi05Config, dict[str, dict[str, list[float] | str | tuple]], Path]:
@@ -307,6 +375,11 @@ class Pi05(ExportablePolicyMixin, Policy):
             n_action_steps: Override number of action steps to execute.
             max_state_dim: Override maximum state dimension.
             num_inference_steps: Override denoising steps for inference.
+            use_random_input_noise: Override whether to use random noise as initial denoising input.
+            snapflow_enabled: Override whether to enable SnapFlow self-distillation.
+            snapflow_alpha: Override SnapFlow consistency loss probability.
+            snapflow_lambda: Override SnapFlow consistency loss weight.
+            snapflow_num_inference_steps: Override SnapFlow Euler steps at test time.
             gradient_checkpointing: Override gradient checkpointing.
             compile_model: Override whether to use torch.compile.
             compile_mode: Override torch compile mode.
@@ -383,6 +456,15 @@ class Pi05(ExportablePolicyMixin, Policy):
             hf_config["max_state_dim"] = max_state_dim
         if num_inference_steps is not None:
             hf_config["num_inference_steps"] = num_inference_steps
+        hf_config["use_random_input_noise"] = use_random_input_noise
+        if snapflow_enabled is not None:
+            hf_config["snapflow_enabled"] = snapflow_enabled
+        if snapflow_alpha is not None:
+            hf_config["snapflow_alpha"] = snapflow_alpha
+        if snapflow_lambda is not None:
+            hf_config["snapflow_lambda"] = snapflow_lambda
+        if snapflow_num_inference_steps is not None:
+            hf_config["snapflow_num_inference_steps"] = snapflow_num_inference_steps
         hf_config["gradient_checkpointing"] = gradient_checkpointing
         hf_config["compile_model"] = compile_model
         if compile_mode is not None:
@@ -397,6 +479,13 @@ class Pi05(ExportablePolicyMixin, Policy):
         hf_config["scheduler_warmup_steps"] = scheduler_warmup_steps
         hf_config["scheduler_decay_steps"] = scheduler_decay_steps
         hf_config["scheduler_decay_lr"] = scheduler_decay_lr
+
+        # Auto-detect normalization_mode from pretrained preprocessor.
+        # The pretrained model's mode always wins over caller defaults.
+        if preprocessor_file is not None:
+            detected = _detect_normalization_mode(preprocessor_file)
+            if detected is not None:
+                hf_config["normalization_mode"] = detected
 
         # from_dict skips unknown keys and coerces lists→tuples via type hints
         config = Pi05Config.from_dict(hf_config)
@@ -455,12 +544,12 @@ class Pi05(ExportablePolicyMixin, Policy):
         """
         logger.info("Updating preprocessor stats for fine-tuning dataset")
         self._preprocessor, self._postprocessor = make_pi05_preprocessors(
-            max_state_dim=self.config.max_state_dim,
             max_action_dim=self.config.max_action_dim,
             stats=dataset_stats,
             image_resolution=self.config.image_resolution,
             max_token_len=self.config.tokenizer_max_length,
             empty_cameras=self.config.empty_cameras,
+            normalization_mode=self.config.normalization_mode,
         )
         self._dataset_stats = dataset_stats
         self.hparams["dataset_stats"] = dataset_stats
@@ -470,7 +559,7 @@ class Pi05(ExportablePolicyMixin, Policy):
     def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
         """Forward pass through the model.
 
-        Training mode: returns (loss, loss_dict).
+        Training mode: returns flow matching (loss, loss_dict) with gradients.
         Eval mode: returns action chunk predictions.
 
         Returns:
@@ -483,10 +572,32 @@ class Pi05(ExportablePolicyMixin, Policy):
             if self.model is None or self._preprocessor is None:
                 msg = "Model is not initialized"
                 raise ValueError(msg)
-
             processed_batch = self._preprocessor(batch.to_dict())
             return self.model(processed_batch)
         return self.predict_action_chunk(batch)
+
+    def compute_val_loss(self, batch: Observation) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute action prediction MSE on a batch (for validation).
+
+        Runs the full denoising loop and compares predicted actions to
+        ground-truth.  This is deterministic and directly measures action
+        prediction quality, unlike the stochastic flow matching training loss.
+
+        Args:
+            batch: Observation batch (must contain ground-truth actions).
+
+        Returns:
+            Tuple of (MSE loss tensor, loss dict).
+
+        Raises:
+            ValueError: If the model is not initialized.
+        """
+        if self.model is None or self._preprocessor is None:
+            msg = "Model is not initialized"
+            raise ValueError(msg)
+
+        processed_batch = self._preprocessor(batch.to_dict())
+        return self.model.compute_val_loss(processed_batch)
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
@@ -542,9 +653,11 @@ class Pi05(ExportablePolicyMixin, Policy):
             eps=self.config.optimizer_eps,
         )
 
+        num_training_steps = self.trainer.estimated_stepping_batches
+
         num_decay_steps = self.config.scheduler_decay_steps
         if num_decay_steps is None:
-            num_decay_steps = self.trainer.estimated_stepping_batches
+            num_decay_steps = num_training_steps
             msg = f"scheduler_decay_steps=None, using total training steps: {num_decay_steps}"
             logger.info(msg)
 
@@ -554,6 +667,7 @@ class Pi05(ExportablePolicyMixin, Policy):
             decay_lr=self.config.scheduler_decay_lr,
             num_warmup_steps=self.config.scheduler_warmup_steps,
             num_decay_steps=num_decay_steps,
+            num_training_steps=num_training_steps,
         )
 
         return {
@@ -580,8 +694,8 @@ class Pi05(ExportablePolicyMixin, Policy):
                 gradient_clip_algorithm=gradient_clip_algorithm or "norm",
             )
 
-    @property
-    def supported_export_backends(self) -> list[str | ExportBackend]:
+    @staticmethod
+    def get_supported_export_backends() -> list[str | ExportBackend]:
         """Get a list of export backends supported by policy.
 
         This method returns a list of supported export backends as strings.
@@ -589,4 +703,201 @@ class Pi05(ExportablePolicyMixin, Policy):
         Returns:
             list[str | ExportBackend]: A list of supported export backends.
         """
-        return [ExportBackend.TORCH, ExportBackend.OPENVINO, ExportBackend.ONNX]
+        return [ExportBackend.TORCH, ExportBackend.OPENVINO]
+
+    @property
+    def inputs_schema(self) -> list[InferenceFeature] | None:
+        """Describe the policy's expected model inputs for export tracing.
+
+        Returns:
+            A list of feature descriptors matching the model's expected input format,
+            covering the robot state, image observations, language task, and any
+            real-time chunking control tensors when ``enable_rtc`` is set on the model.
+            Returns ``None`` if the underlying model or dataset stats have not been
+            initialized yet.
+        """
+        if self.model is None or self._dataset_stats is None:
+            return None
+
+        dataset_stats = self._dataset_stats
+
+        schema: list[InferenceFeature] = []
+
+        num_image_features = sum(
+            1 for feature in dataset_stats.values() if str(FeatureType.VISUAL) in str(feature.get("type", ""))
+        )
+
+        for feature_id, feature in dataset_stats.items():
+            feature_type = str(feature.get("type", ""))
+            if STATE in feature_id:
+                schema.append(
+                    InferenceFeature(
+                        ftype=InferenceFeatureType.STATE,
+                        shape=cast("tuple", feature["shape"]),
+                        name=STATE,
+                        dtype=InferenceFeatureDtype.FLOAT32,
+                    ),
+                )
+            elif str(FeatureType.VISUAL) in feature_type:
+                feature_name = (
+                    str(feature.get("name", feature_id)).removeprefix("observation.").removeprefix(f"{IMAGES}.")
+                )
+                name = IMAGES if num_image_features == 1 else f"{IMAGES}.{feature_name}"
+                schema.append(
+                    InferenceFeature(
+                        ftype=InferenceFeatureType.VISUAL,
+                        shape=cast("tuple", feature["shape"]),
+                        name=name,
+                        dtype=InferenceFeatureDtype.FLOAT32,
+                    ),
+                )
+
+        schema.append(
+            InferenceFeature(
+                ftype=InferenceFeatureType.LANGUAGE,
+                shape=(),
+                name=TASK,
+                dtype=InferenceFeatureDtype.STRING,
+            ),
+        )
+
+        if self.model.enable_rtc:
+            schema.extend(
+                [
+                    InferenceFeature(
+                        ftype=InferenceFeatureType.COMMON,
+                        shape=(self.config.chunk_size, self.config.max_action_dim),
+                        name="prev_chunk_left_over",
+                        dtype=InferenceFeatureDtype.FLOAT32,
+                    ),
+                    InferenceFeature(
+                        ftype=InferenceFeatureType.COMMON,
+                        shape=(),
+                        name="inference_delay",
+                        dtype=InferenceFeatureDtype.INT64,
+                    ),
+                    InferenceFeature(
+                        ftype=InferenceFeatureType.COMMON,
+                        shape=(),
+                        name="max_guidance_weight",
+                        dtype=InferenceFeatureDtype.FLOAT32,
+                    ),
+                    InferenceFeature(
+                        ftype=InferenceFeatureType.COMMON,
+                        shape=(),
+                        name="execution_horizon",
+                        dtype=InferenceFeatureDtype.INT64,
+                    ),
+                ],
+            )
+
+        return schema
+
+    @property
+    def outputs_schema(self) -> list[InferenceFeature] | None:
+        """Describe the policy's model output for export.
+
+        Returns:
+            A list with a single ``action`` feature of shape
+            ``(chunk_size, *action_dim)``, where ``action_dim`` is the actual
+            action dimension taken from the dataset stats. Returns ``None`` if the
+            underlying model or dataset stats have not been initialized yet.
+        """
+        if self.model is None or self._dataset_stats is None:
+            return None
+
+        action_shape = cast("tuple", self._dataset_stats[ACTION]["shape"])
+
+        return [
+            InferenceFeature(
+                ftype=InferenceFeatureType.ACTION,
+                shape=(self.config.chunk_size, *action_shape),
+                name=ACTION,
+                dtype=InferenceFeatureDtype.FLOAT32,
+            ),
+        ]
+
+    @property
+    def extra_export_args(self) -> dict[str, ExportParameters]:
+        """Additional export arguments for model conversion.
+
+        Returns:
+            dict[str, ExportParameters]: A dictionary mapping format names to their export parameters.
+
+        Raises:
+            ValueError: If dataset stats are not available for export.
+        """
+        if self._dataset_stats is None:
+            msg = (
+                "Dataset stats are required for export. Initialize the policy with dataset_stats"
+                " or train for at least one epoch to populate them."
+            )
+            raise ValueError(msg)
+
+        base_preproc_specs = [
+            ComponentSpec(
+                type="normalize",
+                stats={STATE: self._dataset_stats[f"observation.{STATE}"]},
+                mode=self.config.normalization_mode.lower(),
+            ),
+            ComponentSpec(
+                type="pi05",
+                image_resolution=self.config.image_resolution,
+                empty_cameras=self.config.empty_cameras,
+            ),
+        ]
+        postproc_specs = [
+            ComponentSpec(
+                type="denormalize",
+                stats={ACTION: self._dataset_stats[ACTION]},
+                mode=self.config.normalization_mode.lower(),
+            ),
+        ]
+        torch_postproc_specs = []
+        if self.config.chunk_size != self.config.n_action_steps:
+            chunk_trimmer = ComponentSpec(
+                type="action_chunk_trimmer",
+                n_action_steps=self.config.n_action_steps,
+            )
+            postproc_specs.append(chunk_trimmer)
+            torch_postproc_specs.append(chunk_trimmer)
+
+        extra_args: dict[str, ExportParameters] = {}
+        output_names = [feature.name for feature in (self.outputs_schema or [])]
+        extra_args["onnx"] = ONNXExportParameters(
+            exporter_kwargs={
+                "output_names": output_names,
+            },
+            export_tokenizer=False,
+            preprocessors_specs=[
+                *base_preproc_specs,
+                ComponentSpec(
+                    type="hf_tokenizer",
+                    tokenizer_name="google/paligemma-3b-pt-224",
+                    revision="35e4f46485b4d07967e7e9935bc3786aad50687c",
+                    max_token_len=self.config.tokenizer_max_length,
+                ),
+            ],
+            postprocessors_specs=postproc_specs,
+        )
+        extra_args["openvino"] = OpenVINOExportParameters(
+            outputs=output_names,
+            compress_to_fp16=True,
+            via_onnx=True,
+            export_tokenizer=True,
+            exporter_kwargs={},
+            preprocessors_specs=[
+                *base_preproc_specs,
+                ComponentSpec(
+                    type="ov_tokenizer",
+                    artifact="tokenizer.xml",
+                ),
+            ],
+            postprocessors_specs=postproc_specs,
+        )
+        extra_args["torch"] = TorchExportParameters(
+            preprocessors_specs=[ComponentSpec(type="to_float_tensor")],
+            postprocessors_specs=torch_postproc_specs,
+        )
+
+        return extra_args

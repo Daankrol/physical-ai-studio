@@ -1,33 +1,90 @@
 import { Grid, StatusLight } from '@adobe/react-spectrum';
-import { ActionButton, Button, Flex, Heading, Icon, Item, Menu, MenuTrigger, View } from '@geti-ui/ui';
+import { ActionButton, Button, Flex, Heading, Icon, Item, Menu, MenuTrigger, toast, View } from '@geti-ui/ui';
 import { Add, MoreMenu } from '@geti-ui/ui/icons';
 import { clsx } from 'clsx';
 import { NavLink } from 'react-router-dom';
 
 import { $api } from '../../api/client';
+import { getApiErrorMessage, isResourceInUseError } from '../../api/errors';
 import { paths } from '../../router';
 import { useProjectId } from '../projects/use-project';
 import RobotArm from './../../assets/robot-arm.png';
+import { SchemaRobot } from './robot-types';
 
-import classes from './robots-list.module.scss';
+import classes from './robots-list.module.css';
 
-const MenuActions = ({ robot_id }: { robot_id: string }) => {
+const exportCalibration = async (_project_id: string, robot: SchemaRobot) => {
+    if (!('calibration' in robot.payload) || !robot.payload.calibration) {
+        return;
+    }
+    const downloadUrl = URL.createObjectURL(
+        new Blob([JSON.stringify(robot.payload.calibration, null, 4)], { type: 'application/json' })
+    );
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.download = `${robot.name}-calibration.json`;
+    link.click();
+    URL.revokeObjectURL(downloadUrl);
+};
+
+const MenuActions = ({ robot }: { robot: SchemaRobot }) => {
     const { project_id } = useProjectId();
-    const deleteRobotMutation = $api.useMutation('delete', '/api/projects/{project_id}/robots/{robot_id}');
+    const deleteRobotMutation = $api.useMutation('delete', '/api/projects/{project_id}/robots/{robot_id}', {
+        meta: {
+            invalidates: [
+                ['get', '/api/projects/{project_id}/robots', { params: { path: { project_id } } }],
+                ['get', '/api/projects/{project_id}/robots/online', { params: { path: { project_id } } }],
+            ],
+        },
+    });
+
+    const editPath = paths.project.robots.edit({ project_id, robot_id: robot.id });
+    const isSO101 = robot.type === 'SO101_Follower' || robot.type === 'SO101_Leader';
 
     return (
         <MenuTrigger>
-            <ActionButton isQuiet UNSAFE_style={{ fill: 'var(--spectrum-gray-900)' }}>
+            <ActionButton
+                aria-label={`Actions for ${robot.name}`}
+                isQuiet
+                UNSAFE_style={{ fill: 'var(--spectrum-gray-900)' }}
+            >
                 <MoreMenu />
             </ActionButton>
             <Menu
                 selectionMode='single'
-                onAction={(action) => {
+                disabledKeys={
+                    !('calibration' in robot.payload) || !robot.payload.calibration ? ['export-calibration'] : []
+                }
+                onAction={async (action) => {
                     if (action === 'delete') {
-                        deleteRobotMutation.mutate({ params: { path: { project_id, robot_id } } });
+                        await deleteRobotMutation.mutateAsync(
+                            { params: { path: { project_id, robot_id: robot.id } } },
+                            {
+                                onError: (error) => {
+                                    if (isResourceInUseError(error)) {
+                                        toast.info(
+                                            getApiErrorMessage(error) ?? 'This robot is in use and cannot be deleted.'
+                                        );
+                                        return;
+                                    }
+                                    toast.negative(getApiErrorMessage(error) ?? 'Failed to delete robot.');
+                                },
+                            }
+                        );
+                    }
+                    if (action === 'export-calibration') {
+                        try {
+                            await exportCalibration(project_id, robot);
+                        } catch {
+                            toast.negative('Failed to export calibration.');
+                        }
                     }
                 }}
             >
+                <Item key='edit' href={editPath}>
+                    Edit
+                </Item>
+                {isSO101 ? <Item key='export-calibration'>Export calibration</Item> : null}
                 <Item key='delete'>Delete</Item>
             </Menu>
         </MenuTrigger>
@@ -50,22 +107,22 @@ export const ConnectionStatus = ({ status }: { status: 'online' | 'offline' | 'u
 };
 
 const RobotListItem = ({
-    id,
-    name,
+    robot,
     status,
     isActive,
-    type,
-    connectionString,
-    serialNumber,
 }: {
-    id: string;
-    name: string;
-    type: string;
+    robot: SchemaRobot;
     status: 'online' | 'offline' | 'unknown';
-    connectionString: string | undefined;
-    serialNumber: string | undefined;
     isActive: boolean;
 }) => {
+    const payload = robot.payload;
+    const connectionString =
+        ('connection_string' in payload ? payload.connection_string : undefined) ??
+        ('connection_string_left' in payload && 'connection_string_right' in payload
+            ? `${payload.connection_string_left} | ${payload.connection_string_right}`
+            : undefined);
+    const serialNumber = 'serial_number' in robot.payload ? robot.payload.serial_number : undefined;
+
     return (
         <View
             padding='size-200'
@@ -80,10 +137,10 @@ const RobotListItem = ({
                         <img src={RobotArm} style={{ maxWidth: '32px' }} alt='Robot arm icon' />
                     </View>
                     <Heading level={2} gridArea='name' UNSAFE_style={isActive ? { color: 'var(--energy-blue)' } : {}}>
-                        {name}
+                        {robot.name}
                     </Heading>
                     <View gridArea='type' UNSAFE_style={{ fontSize: '14px' }}>
-                        {type.replaceAll('_', ' ')}
+                        {robot.type.replaceAll('_', ' ')}
                     </View>
                     <View gridArea='status'>
                         <ConnectionStatus status={status} />
@@ -113,12 +170,12 @@ const RobotListItem = ({
                                 </li>
                             ) : null}
                             <li style={{ marginLeft: 'var(--spectrum-global-dimension-size-200)' }}>
-                                ID: <pre style={{ margin: 0, display: 'inline' }}>{id}</pre>
+                                ID: <pre style={{ margin: 0, display: 'inline' }}>{robot.id}</pre>
                             </li>
                         </ul>
                     </View>
                     <View alignSelf={'end'}>
-                        <MenuActions robot_id={id} />
+                        <MenuActions robot={robot} />
                     </View>
                 </Flex>
             </Flex>
@@ -165,11 +222,7 @@ export const RobotsList = () => {
                         {({ isActive }) => {
                             return (
                                 <RobotListItem
-                                    id={robot.id}
-                                    name={robot.name}
-                                    connectionString={robot.connection_string}
-                                    serialNumber={robot.serial_number}
-                                    type={robot.type}
+                                    robot={robot}
                                     status={onlineProjectRobots === undefined ? 'unknown' : status}
                                     isActive={isActive}
                                 />

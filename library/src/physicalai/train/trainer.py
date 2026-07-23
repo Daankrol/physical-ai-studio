@@ -7,15 +7,15 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 import lightning
+import torch
 from lightning.pytorch.callbacks import BatchSizeFinder
+from lightning.pytorch.strategies import DDPStrategy
 
+from physicalai.config.instantiate import instantiate_obj_from_dict
 from physicalai.train.callbacks import PolicyDatasetInteraction
-
-logger = logging.getLogger(__name__)
 
 
 class Trainer(lightning.Trainer):
@@ -67,6 +67,8 @@ class Trainer(lightning.Trainer):
         # physicalai-specific parameters
         experiment_name: str | None = None,
         auto_scale_batch_size: bool = False,
+        allow_tf32: bool = False,
+        cudnn_benchmark: bool = True,
         # Hardware
         accelerator: str | Any = "auto",
         strategy: str | Any = "auto",
@@ -131,6 +133,11 @@ class Trainer(lightning.Trainer):
             auto_scale_batch_size: Add a ``BatchSizeFinder`` callback to find the
                 largest batch size that fits in memory before training.
                 ``False`` (default) disables it.  ``True`` enables exponential (power) scaling.
+            allow_tf32: Enable TF32 precision for matmul on Ampere+ GPUs. Provides ~3x speedup
+                for float32 operations with minimal accuracy loss. Defaults to False to match
+                PyTorch's default. Consider enabling when using 32-true precision.
+            cudnn_benchmark: Enable cuDNN benchmark mode to auto-tune convolution algorithms.
+                Speeds up training when input sizes are constant. Defaults to True.
             default_root_dir: Root directory for experiments (default: "experiments" instead of current dir)
             accelerator: Hardware accelerator ('auto', 'cpu', 'gpu', 'tpu', 'ipu', 'mps')
             max_epochs: Maximum number of epochs to train
@@ -155,10 +162,41 @@ class Trainer(lightning.Trainer):
                 default_hp_metric=False,
             )
 
-        callbacks = [PolicyDatasetInteraction()] if callbacks is None else [*callbacks, PolicyDatasetInteraction()]
+        user_callbacks: list[Any]
+        if callbacks is None:
+            user_callbacks = []
+        elif isinstance(callbacks, (list, tuple)):
+            user_callbacks = list(callbacks)
+        else:
+            user_callbacks = [callbacks]
+
+        # jsonargparse does not always instantiate callback list entries when the
+        # parameter type is broad (list | Any). Support callback specs in YAML.
+        normalized_callbacks: list[Any] = []
+        for callback in user_callbacks:
+            if isinstance(callback, dict) and "class_path" in callback:
+                normalized_callbacks.append(instantiate_obj_from_dict(callback))
+            else:
+                normalized_callbacks.append(callback)
+
+        callbacks = [*normalized_callbacks, PolicyDatasetInteraction()]
 
         if auto_scale_batch_size:
             callbacks.append(BatchSizeFinder(mode="power"))
+
+        if allow_tf32:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+
+        if cudnn_benchmark:
+            torch.backends.cudnn.benchmark = True
+
+        # When using auto strategy with multiple GPUs, default to DDP with
+        # find_unused_parameters=True. Policies like Pi05 freeze large portions
+        # of the model, so not all parameters participate in every training step.
+        multi_gpu = (isinstance(devices, int) and devices > 1) or (isinstance(devices, list) and len(devices) > 1)
+        if strategy == "auto" and multi_gpu:
+            strategy = DDPStrategy(find_unused_parameters=True)
 
         # Call parent Lightning Trainer __init__ with all parameters
         super().__init__(

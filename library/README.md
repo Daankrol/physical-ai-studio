@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="../docs/assets/physical_ai.png" alt="PhysicalAI Library" width="100%">
+  <img src="https://raw.githubusercontent.com/open-edge-platform/physical-ai-studio/main/docs/assets/physical_ai.png" alt="PhysicalAI Library" width="100%">
 </p>
 
 <div align="center">
@@ -126,7 +126,7 @@ Evaluate trained policies on standardized simulation environments.
 ## API
 
 ```python test="skip" reason="requires checkpoint and libero"
-from physicalai.benchmark import LiberoBenchmark
+from physicalai.benchmark.gyms import LiberoBenchmark
 from physicalai.policies import ACT
 
 # Load trained policy (path from training output)
@@ -147,14 +147,14 @@ results.to_json("results.json")
 ```bash
 # Basic benchmark
 physicalai benchmark \
-    --benchmark physicalai.benchmark.LiberoBenchmark \
+    --benchmark physicalai.benchmark.gyms.LiberoBenchmark \
     --benchmark.task_suite libero_10 \
     --policy physicalai.policies.ACT \
     --ckpt_path ./checkpoints/model.ckpt
 
 # With video recording
 physicalai benchmark \
-    --benchmark physicalai.benchmark.LiberoBenchmark \
+    --benchmark physicalai.benchmark.gyms.LiberoBenchmark \
     --benchmark.task_suite libero_10 \
     --benchmark.video_dir ./videos \
     --benchmark.record_mode failures \
@@ -179,8 +179,11 @@ policy.export("./exports", backend="openvino")
 ## CLI
 
 ```bash
-# CLI coming soon - use Python API for now
-# See API section above for export usage
+physicalai export \
+    --policy physicalai.policies.ACT \
+    --ckpt_path checkpoints/model.ckpt \
+    --backend openvino \
+    --output_dir ./exports
 ```
 
 ### Supported Backends
@@ -201,7 +204,7 @@ Deploy exported models with a unified inference API.
 from physicalai.inference import InferenceModel
 
 # Load exported model (auto-detects backend)
-policy = InferenceModel.load("./exports")
+policy = InferenceModel("./exports")
 
 # Run inference loop
 obs, info = env.reset()
@@ -218,11 +221,18 @@ The inference API is consistent across all export backends, making it easy to sw
 
 # Documentation
 
-- [Getting Started](docs/getting-started/README.md) - Installation, quickstart, first benchmark, first deployment
-- [How-To Guides](docs/how-to/README.md) - Goal-oriented guides for specific tasks
-- [Explanation](docs/explanation/README.md) - Architecture and design documentation
+- [Getting Started](https://github.com/open-edge-platform/physical-ai-studio/blob/main/library/docs/getting-started/README.md) - Installation, quickstart, first benchmark, first deployment
+- [How-To Guides](https://github.com/open-edge-platform/physical-ai-studio/blob/main/library/docs/how-to/README.md) - Goal-oriented guides for specific tasks
+- [Explanation](https://github.com/open-edge-platform/physical-ai-studio/blob/main/library/docs/explanation/README.md) - Architecture and design documentation
 
 # See Also
 
-- [Main Repository](../README.md) - Project overview
-- [Application](../application/) - GUI for data collection and training
+- [Main Repository](https://github.com/open-edge-platform/physical-ai-studio/blob/main/README.md) - Project overview
+- [Application](https://github.com/open-edge-platform/physical-ai-studio/tree/main/application) - GUI for data collection and training
+
+## Development Type Checking
+
+```bash
+# From library/
+uv run pyrefly check -c pyproject.toml
+```

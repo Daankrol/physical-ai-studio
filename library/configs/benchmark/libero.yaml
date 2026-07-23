@@ -37,7 +37,7 @@
 # =============================================================================
 
 benchmark:
-  class_path: physicalai.benchmark.LiberoBenchmark
+  class_path: physicalai.benchmark.gyms.LiberoBenchmark
   init_args:
     # -------------------------------------------------------------------------
     # Task Configuration
@@ -56,7 +56,7 @@ benchmark:
     num_episodes: 20
 
     # Maximum steps per episode (use null for task suite default)
-    max_steps: 300
+    max_steps: 520
 
     # Random seed for reproducibility
     seed: 42

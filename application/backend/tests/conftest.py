@@ -21,9 +21,9 @@ def mock_robot_client():
         "wrist_roll.pos",
         "gripper.pos",
     ]
-    client.connect = AsyncMock()
-    client.disconnect = AsyncMock()
-    client.read_state = AsyncMock(
+    client.connect = MagicMock()
+    client.disconnect = MagicMock()
+    client.read_state = MagicMock(
         return_value={
             "state": {
                 "shoulder_pan.pos": -8.705526116578355,
@@ -56,9 +56,11 @@ def test_environment():
                     "robot": {
                         "id": "c3f3f886-8813-4b3b-ba48-165cdaa39995",
                         "name": "Khaos",
-                        "connection_string": "",
-                        "serial_number": "5AA9017083",
                         "type": "SO101_Follower",
+                        "payload": {
+                            "connection_string": "",
+                            "serial_number": "5AA9017083",
+                        },
                     },
                     "tele_operator": {"type": "none"},
                 }
@@ -131,7 +133,6 @@ def test_dataset():
     return Dataset.model_validate(
         {
             "name": "Collect blocks",
-            "path": "/some/path/to/dataset",
             "default_task": "Collect blocks",
             "project_id": "35b48dc9-31df-40be-b295-08ae1d5378b1",
             "environment_id": "7656679b-25fe-4af5-a19d-73e7df16f384",
