@@ -632,6 +632,51 @@ class Pi05(ExportablePolicyMixin, Policy):
         self.log("train/loss", loss_dict["loss"], prog_bar=True)
         return loss
 
+    def enable_snapflow(
+        self,
+        alpha: float = 0.5,
+        lambda_: float = 0.1,
+        num_inference_steps: int = 1,
+    ) -> None:
+        """Enable SnapFlow self-distillation and freeze the VLM backbone.
+
+        Activates the SnapFlow mixed FM/consistency objective and freezes
+        PaliGemma so only the action expert and target-time embedding are
+        trained.  This is the phase-2 entry point used by
+        :class:`~physicalai.train.callbacks.SnapFlowPhaseCallback` and can
+        also be called manually before ``trainer.fit()``.
+
+        Args:
+            alpha: Weight for the flow-matching loss branch (``L_FM``).
+                Paper default: ``0.5``.
+            lambda_: Scaling factor for the shortcut consistency loss
+                (``L_shortcut``).  Paper default: ``0.1``.
+            num_inference_steps: Number of denoising steps at inference time.
+                Set to ``1`` for the full single-step SnapFlow speedup.
+
+        Raises:
+            RuntimeError: If called before the model has been initialized
+                (i.e. before ``setup()`` runs).
+        """
+        if self.model is None:
+            msg = "enable_snapflow() called before the model was initialized (setup() has not run yet)."
+            raise RuntimeError(msg)
+        inner: Pi05Model = self.model
+        inner._snapflow_enabled = True  # noqa: SLF001
+        inner._snapflow_alpha = alpha  # noqa: SLF001
+        inner._snapflow_lambda = lambda_  # noqa: SLF001
+        inner._snapflow_num_inference_steps = num_inference_steps  # noqa: SLF001
+        # Config is a frozen dataclass — bypass the immutability check so the
+        # updated flags are included in checkpoint hparams.
+        object.__setattr__(self.config, "snapflow_enabled", True)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
+        object.__setattr__(self.config, "snapflow_alpha", alpha)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
+        object.__setattr__(self.config, "snapflow_lambda", lambda_)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
+        object.__setattr__(self.config, "snapflow_num_inference_steps", num_inference_steps)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
+        object.__setattr__(self.config, "train_expert_only", True)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
+        inner.paligemma_with_expert.train_expert_only = True
+        inner.paligemma_with_expert._set_requires_grad()  # noqa: SLF001
+        inner.train()
+
     def configure_optimizers(self) -> dict[str, Any]:
         """Configure optimizer and scheduler.
 

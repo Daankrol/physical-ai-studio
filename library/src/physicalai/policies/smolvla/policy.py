@@ -32,7 +32,7 @@ from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 from physicalai.train.utils import reformat_dataset_to_match_policy
 
 from .config import SmolVLAConfig
-from .model import SmolVLAModel
+from .model import SmolVLAModel, VLAFlowMatching
 from .pretrained_utils import extract_dataset_stats, fix_state_dict_keys
 
 if TYPE_CHECKING:
@@ -615,6 +615,43 @@ class SmolVLA(ExportablePolicyMixin, Policy):
                 "interval": "step",
             },
         }
+
+    def enable_snapflow(
+        self,
+        alpha: float = 0.5,
+        lambda_: float = 0.1,
+        num_inference_steps: int = 1,
+    ) -> None:
+        """Enable SnapFlow self-distillation and freeze the VLM backbone.
+
+        Activates the SnapFlow mixed FM/consistency objective and freezes the VLM
+        so only the action expert and target-time embedding are trained.  This is
+        the phase-2 entry point used by :class:`~physicalai.train.callbacks.SnapFlowPhaseCallback`
+        and can also be called manually before ``trainer.fit()``.
+
+        Args:
+            alpha: Weight for the flow-matching loss branch (``L_FM``).
+                Paper default: ``0.5``.
+            lambda_: Scaling factor for the shortcut consistency loss
+                (``L_shortcut``).  Paper default: ``0.1``.
+            num_inference_steps: Number of denoising steps at inference time.
+                Set to ``1`` for the full single-step SnapFlow speedup.
+        """
+        inner: VLAFlowMatching = self.model._model  # noqa: SLF001
+        inner._snapflow_enabled = True  # noqa: SLF001
+        inner._snapflow_alpha = alpha  # noqa: SLF001
+        inner._snapflow_lambda = lambda_  # noqa: SLF001
+        inner._snapflow_num_inference_steps = num_inference_steps  # noqa: SLF001
+        # Config is a frozen dataclass — bypass the immutability check so the
+        # updated flags are included in checkpoint hparams.
+        object.__setattr__(self.config, "snapflow_enabled", True)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
+        object.__setattr__(self.config, "snapflow_alpha", alpha)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
+        object.__setattr__(self.config, "snapflow_lambda", lambda_)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
+        object.__setattr__(self.config, "snapflow_num_inference_steps", num_inference_steps)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
+        object.__setattr__(self.config, "train_expert_only", True)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
+        inner.vlm_with_expert.train_expert_only = True
+        inner.vlm_with_expert.set_requires_grad()
+        self.model.train()
 
     def configure_gradient_clipping(
         self,

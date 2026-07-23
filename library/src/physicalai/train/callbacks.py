@@ -3,6 +3,7 @@
 
 """Callbacks for training."""
 
+import logging
 import time
 from collections.abc import Callable, Mapping
 from typing import cast
@@ -11,6 +12,8 @@ import lightning as L  # noqa: N812
 from lightning.pytorch.callbacks import Callback
 
 from physicalai.train.utils import reformat_dataset_to_match_policy
+
+logger = logging.getLogger(__name__)
 
 ReportFn = Callable[[int, str | None, dict[str, object]], None]
 """Telemetry sink: ``(progress, message, extra_info)`` with progress in 0-100."""
@@ -257,3 +260,108 @@ class PolicyDatasetInteraction(Callback):
     def on_fit_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
         """Called at the start of `trainer.fit()`."""
         self._interact_policy_dataset(trainer, pl_module)
+
+
+class SnapFlowPhaseCallback(Callback):
+    """Enable SnapFlow self-distillation at a step boundary within a single training run.
+
+    At ``start_step`` the callback transitions the policy from standard
+    flow-matching (phase 1) into SnapFlow distillation (phase 2) without
+    requiring a second CLI invocation:
+
+    - Calls ``policy.enable_snapflow(alpha, lambda_, num_inference_steps)``
+      which activates the mixed FM/consistency loss and freezes the VLM
+      backbone via the policy's existing ``set_requires_grad`` primitive.
+    - Reconfigures the optimizer so it only covers the now-trainable
+      parameters (action expert + target-time embedding), giving a clean
+      optimizer state for phase 2.
+
+    The policy must expose an ``enable_snapflow`` method — both
+    :class:`~physicalai.policies.SmolVLA` and
+    :class:`~physicalai.policies.Pi05` satisfy this contract.
+
+    Args:
+        start_step: Global training step at which to activate SnapFlow.
+            Typical value: the number of phase-1 steps already taken.
+        alpha: Weight for the flow-matching loss branch (``L_FM``).
+            Paper default: ``0.5``.
+        lambda_: Scaling factor for the shortcut consistency loss
+            (``L_shortcut``).  Paper default: ``0.1``.
+        num_inference_steps: Denoising steps at inference time.
+            Set to ``1`` for the full single-step SnapFlow speedup.
+
+    Example:
+        >>> from physicalai.train.callbacks import SnapFlowPhaseCallback
+        >>> cb = SnapFlowPhaseCallback(start_step=50_000)
+        >>> trainer = Trainer(max_steps=80_000, callbacks=[cb])
+    """
+
+    def __init__(
+        self,
+        start_step: int,
+        alpha: float = 0.5,
+        lambda_: float = 0.1,
+        num_inference_steps: int = 1,
+    ) -> None:
+        """Store phase-transition hyperparameters.
+
+        Args:
+            start_step: Global step at which SnapFlow distillation begins.
+            alpha: FM-loss weight.  Paper default: ``0.5``.
+            lambda_: Shortcut-loss scale.  Paper default: ``0.1``.
+            num_inference_steps: Inference denoising steps.  Use ``1`` for
+                1-NFE SnapFlow.
+        """
+        super().__init__()
+        self.start_step = start_step
+        self.alpha = alpha
+        self.lambda_ = lambda_
+        self.num_inference_steps = num_inference_steps
+        self._activated = False
+
+    def on_train_batch_start(
+        self,
+        trainer: L.Trainer,
+        pl_module: L.LightningModule,
+        batch: object,  # noqa: ARG002
+        batch_idx: int,  # noqa: ARG002
+    ) -> None:
+        """Activate SnapFlow distillation at the configured step boundary.
+
+        Args:
+            trainer: The active Lightning trainer.
+            pl_module: The policy being trained.
+            batch: Current batch (unused).
+            batch_idx: Current batch index within the epoch (unused).
+
+        Raises:
+            TypeError: If ``pl_module`` does not expose an ``enable_snapflow``
+                method (i.e. is not a SmolVLA or Pi05 policy).
+        """
+        if self._activated or trainer.global_step < self.start_step:
+            return
+
+        if not hasattr(pl_module, "enable_snapflow"):
+            msg = (
+                f"{type(pl_module).__name__} does not implement enable_snapflow(); "
+                "SnapFlowPhaseCallback requires a SmolVLA or Pi05 policy."
+            )
+            raise TypeError(msg)
+
+        logger.info(
+            "SnapFlowPhaseCallback: activating SnapFlow distillation at step %d "
+            "(alpha=%.2f, lambda_=%.2f, num_inference_steps=%d)",
+            trainer.global_step,
+            self.alpha,
+            self.lambda_,
+            self.num_inference_steps,
+        )
+        pl_module.enable_snapflow(  # type: ignore[union-attr]
+            alpha=self.alpha,
+            lambda_=self.lambda_,
+            num_inference_steps=self.num_inference_steps,
+        )
+        # Reconfigure optimizers so frozen VLM params are excluded and phase 2
+        # starts with a fresh optimizer state (no stale momentum from phase 1).
+        trainer.strategy.setup_optimizers(trainer)
+        self._activated = True
