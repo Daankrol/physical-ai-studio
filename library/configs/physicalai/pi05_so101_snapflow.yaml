@@ -1,0 +1,100 @@
+# Pi05 + SnapFlow two-phase training on the SO101 pick-and-place dataset.
+#
+# Single-run two-phase recipe (no second CLI call needed):
+#   Phase 1 (steps 0 .. start_step)      -> standard flow-matching finetuning
+#                                           warm-started from lerobot/pi05_base
+#   Phase 2 (start_step .. max_steps)    -> SnapFlow self-distillation, VLM frozen,
+#                                           trains action expert + target-time embed
+#
+# The SnapFlowPhaseCallback flips the model into SnapFlow mode at `start_step`
+# and reconfigures the optimizer for a clean phase-2 state. ModelCheckpoint saves
+# a checkpoint every 5000 steps (keeping all of them) so you can compare both how
+# much finetuning and how many "snapflow-steps" are needed.
+#
+# Run:
+#   physicalai fit --config configs/physicalai/pi05_so101_snapflow.yaml
+#
+# Handy overrides:
+#   --trainer.max_steps 40000                    # shorten total budget
+#   --data.train_batch_size 4                    # if you hit OOM
+#   --trainer.callbacks.init_args.start_step ... # move the phase-1/2 boundary
+#
+# Step budgets: phase 1 ~30k (openpi Pi0.5 finetune recipe / Pi05 scheduler decay),
+# phase 2 ~30k (SnapFlow paper arXiv:2604.05656 §3.6 + Appendix J).
+
+model:
+  class_path: physicalai.policies.Pi05
+  init_args:
+    # Warm-start from the base VLA and finetune (phase 1 is standard flow matching;
+    # SnapFlow is enabled later by the callback, so snapflow_enabled stays false here).
+    pretrained_name_or_path: lerobot/pi05_base
+
+    # Model architecture
+    paligemma_variant: gemma_2b
+    action_expert_variant: gemma_300m
+    dtype: bfloat16
+
+    # Input / output structure
+    n_obs_steps: 1
+    chunk_size: 50
+    n_action_steps: 50
+    max_state_dim: 32
+    max_action_dim: 32
+
+    # Image preprocessing
+    image_resolution:
+      - 224
+      - 224
+
+    # Flow matching (multi-step teacher used during phase 1)
+    num_inference_steps: 10
+
+    # Finetuning settings (full finetune in phase 1; the callback freezes the VLM
+    # for phase 2 via train_expert_only under the hood)
+    freeze_vision_encoder: false
+    train_expert_only: false
+
+    # Optimizer
+    optimizer_lr: 2.5e-5
+    optimizer_weight_decay: 0.01
+    optimizer_grad_clip_norm: 1.0
+
+    # Scheduler
+    scheduler_warmup_steps: 1000
+    scheduler_decay_steps: 30000
+    scheduler_decay_lr: 2.5e-6
+
+data:
+  class_path: physicalai.data.lerobot.LeRobotDataModule
+  init_args:
+    repo_id: "Daankrol/pick-and-place-so101"
+    train_batch_size: 8
+    data_format: "physicalai"
+    # revision="main" bypasses lerobot's get_safe_version() tag lookup, which
+    # fails when the dataset has no HF git tags (lerobot 0.6.0 /
+    # huggingface_hub ≥1.23 incompatibility).
+    revision: "main"
+
+trainer:
+  # Total budget = phase 1 (30k) + phase 2 (30k).
+  max_steps: 60000
+  accelerator: gpu
+  devices: 1
+  precision: bf16-mixed
+  log_every_n_steps: 100
+  callbacks:
+    # Phase-2 boundary: enable SnapFlow distillation at step 30000.
+    - class_path: physicalai.train.SnapFlowPhaseCallback
+      init_args:
+        start_step: 30000
+        alpha: 0.5           # FM-loss weight (paper)
+        lambda_: 0.1         # shortcut-loss scale (paper)
+        num_inference_steps: 1  # 1-NFE inference
+    # Save every 5000 steps and keep them all (staged comparison across both phases).
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        every_n_train_steps: 5000
+        save_top_k: -1
+        save_last: true
+        filename: "step{step}"
+        auto_insert_metric_name: false
