@@ -54,12 +54,12 @@ conflicts = [[
 ]]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-09-08T08:20:34.624688126Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
 markupsafe = false
-pyrealsense2 = { timestamp = "0001-01-01T00:00:00Z", span = "P1D" }
+pyrealsense2 = { timestamp = "2026-09-14T08:20:34.624717421Z", span = "P1D" }
 physicalai-studio-plugin = false
 
 [manifest]
@@ -3086,6 +3086,7 @@ requires-dist = [
     { name = "peft", specifier = ">=0.20.0,<1.0.0" },
     { name = "peft", marker = "extra == 'rldx1'", specifier = ">=0.13.0,<1.0.0" },
     { name = "physicalai", git = "https://github.com/openvinotoolkit/physicalai.git?rev=89a6faff37e2be91ae2f4c34746ec6dbeadb9f1d" },
+    { name = "physicalai-train", extras = ["diffusion"], marker = "extra == 'all'" },
     { name = "physicalai-train", extras = ["groot"], marker = "extra == 'all'" },
     { name = "physicalai-train", extras = ["libero"], marker = "extra == 'all'" },
     { name = "physicalai-train", extras = ["nncf"], marker = "extra == 'executorch-openvino'" },
