@@ -167,7 +167,10 @@ class SmolVLAModel(Model):
             self.predict_action_chunk = torch.compile(self.predict_action_chunk, mode=compile_mode)  # type: ignore[method-assign]
             self.forward = torch.compile(self.forward, mode=compile_mode)  # type: ignore[method-assign]
 
-    def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
+    def forward(
+        self,
+        batch: dict[str, torch.Tensor],
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
         """Forward pass for the SmolVLA model.
 
         During training, processes the input batch to compute the loss for action prediction.
@@ -194,7 +197,7 @@ class SmolVLAModel(Model):
             return self.compute_loss(batch)
         return self.predict_action_chunk(batch)
 
-    def compute_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, float]]:
+    def compute_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
         """Compute training loss for action prediction.
 
         Args:
@@ -211,7 +214,7 @@ class SmolVLAModel(Model):
         lang_tokens = batch[TOKENIZED_PROMPT]
         lang_masks = batch[TOKENIZED_PROMPT_MASK]
         actions_is_pad = batch.get(EXTRA + ".actions_id_pad")
-        loss_dict: dict[str, float] = {}
+        loss_dict: dict[str, torch.Tensor | float] = {}
         losses = self._model.forward(images, img_masks, lang_tokens, lang_masks, state, actions)
         loss_dict["losses_after_forward"] = losses.clone()
 
@@ -226,11 +229,12 @@ class SmolVLAModel(Model):
         loss_dict["losses_after_rm_padding"] = losses.clone()
 
         loss = losses.mean()
-        loss_dict["loss"] = loss.item()
+        # Detached tensor, not `.item()` float: see Model.compute_loss docstring.
+        loss_dict["loss"] = loss.detach()
         return loss, loss_dict
 
     @torch.no_grad()
-    def compute_val_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, float]]:
+    def compute_val_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
         """Compute validation loss: MSE between predicted and ground-truth actions.
 
         Runs the full denoising loop and compares predicted actions with
