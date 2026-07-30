@@ -1,9 +1,8 @@
 # How to record a dataset for imitation learning
 
 A goal-oriented guide for recording demonstration datasets that actually train
-well. It codifies the [LeRobot AGENT_GUIDE
-§5](https://github.com/huggingface/lerobot/blob/main/AGENT_GUIDE.md) data
-recommendations.
+well. It codifies the [LeRobot AGENT_GUIDE §5](https://github.com/huggingface/lerobot/blob/main/AGENT_GUIDE.md)
+data recommendations.
 
 > **Good data beats clever models.** Every hour spent on rig setup and recording
 > discipline saves several hours of training and debugging.
