@@ -210,3 +210,10 @@ __marimo__/
 tmp*
 lightning_logs
 .DS_Store
+
+# Training artifacts (checkpoints, logs) written by `physicalai fit` / benchmark runs
+experiments/
+library/experiments/
+
+# Knowledge-graph cache produced by the graphify tooling
+graphify-out/

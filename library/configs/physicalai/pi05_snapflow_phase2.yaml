@@ -1,8 +1,8 @@
 # Pi05 SnapFlow Phase-2 Distillation Configuration
 #
-# Use this config for the second phase of SnapFlow two-phase training.
-# Warm-start from a phase-1 checkpoint (normal flow-matching) and run
-# SnapFlow self-distillation with the VLM backbone frozen.
+# Use this config for the second phase of SnapFlow two-phase training when you
+# want two explicit runs — for example to distill from a checkpoint you already
+# have, or to give phase 2 its own optimizer state and LR horizon.
 #
 # Two-phase recipe (two explicit CLI runs):
 #
@@ -11,14 +11,19 @@
 #
 #   # Phase 2 — SnapFlow distillation, VLM frozen
 #   physicalai fit \
-#       --config configs/physicalai/pi05_snapflow.yaml \
-#       --ckpt_path ./lightning_logs/version_0/checkpoints/last.ckpt \
+#       --config configs/physicalai/pi05_snapflow_phase2.yaml \
+#       --fit.ckpt_path ./experiments/lightning_logs/version_0/checkpoints/last.ckpt \
 #       --trainer.max_steps 30000
 #
-# Single-run alternative (SnapFlowPhaseCallback):
-#   Add the callback to pi05.yaml trainer.callbacks and set start_step
-#   to the number of phase-1 steps, then run a single `physicalai fit`.
+# Note that `--fit.ckpt_path` is a full Lightning *resume*: it restores the
+# global step, optimizer state, and LR schedule from phase 1. Set
+# `--trainer.max_steps` to the combined phase-1 + phase-2 budget accordingly.
 #
+# Single-run alternative (recommended):
+#   configs/physicalai/pi05_so101_snapflow.yaml uses SnapFlowPhaseCallback to
+#   run both phases in one `physicalai fit`, with no checkpoint handoff.
+#
+# See docs/how-to/training/snapflow-two-phase.md.
 # Paper reference: arXiv:2604.05656 (SnapFlow)
 
 model:
@@ -43,13 +48,13 @@ model:
 
     # SnapFlow distillation — paper defaults (§3.6 + Appendix J)
     snapflow_enabled: true
-    snapflow_alpha: 0.5          # FM-loss weight
-    snapflow_lambda: 0.1         # shortcut-loss scale
-    snapflow_num_inference_steps: 1  # 1-NFE inference
+    snapflow_alpha: 0.5 # FM-loss weight
+    snapflow_lambda: 0.1 # shortcut-loss scale
+    snapflow_num_inference_steps: 1 # 1-NFE inference
 
     # Freeze VLM; train only action expert + target-time embedding (~10% params)
     train_expert_only: true
-    freeze_vision_encoder: false  # train_expert_only already covers the VLM
+    freeze_vision_encoder: false # train_expert_only already covers the VLM
 
     # Optimizer
     optimizer_lr: 2.5e-5

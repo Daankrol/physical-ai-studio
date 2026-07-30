@@ -28,6 +28,7 @@ from physicalai.export.backends import (
     TorchExportParameters,
 )
 from physicalai.policies.base import Policy
+from physicalai.policies.common import SnapFlowPolicyMixin
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 from physicalai.train.utils import reformat_dataset_to_match_policy
 
@@ -43,7 +44,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class SmolVLA(ExportablePolicyMixin, Policy):
+class SmolVLA(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
     """SmolVLA Policy - Hugging Face's flow matching VLA model.
 
     Lightning wrapper for training and inference with SmolVLA model.
@@ -616,39 +617,22 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             },
         }
 
-    def enable_snapflow(
-        self,
-        alpha: float = 0.5,
-        lambda_: float = 0.1,
-        num_inference_steps: int = 1,
-    ) -> None:
-        """Enable SnapFlow self-distillation and freeze the VLM backbone.
+    @property
+    def inner_model(self) -> VLAFlowMatching:
+        """The unwrapped SmolVLA flow-matching module.
 
-        Activates the SnapFlow mixed FM/consistency objective and freezes the VLM
-        so only the action expert and target-time embedding are trained.  This is
-        the phase-2 entry point used by :class:`~physicalai.train.callbacks.SnapFlowPhaseCallback`
-        and can also be called manually before ``trainer.fit()``.
-
-        Args:
-            alpha: Weight for the flow-matching loss branch (``L_FM``).
-                Paper default: ``0.5``.
-            lambda_: Scaling factor for the shortcut consistency loss
-                (``L_shortcut``).  Paper default: ``0.1``.
-            num_inference_steps: Number of denoising steps at inference time.
-                Set to ``1`` for the full single-step SnapFlow speedup.
+        Raises:
+            RuntimeError: If accessed before ``setup()`` has initialized the model.
         """
-        inner: VLAFlowMatching = self.model._model  # noqa: SLF001
-        inner._snapflow_enabled = True  # noqa: SLF001
-        inner._snapflow_alpha = alpha  # noqa: SLF001
-        inner._snapflow_lambda = lambda_  # noqa: SLF001
-        inner._snapflow_num_inference_steps = num_inference_steps  # noqa: SLF001
-        # Config is a frozen dataclass — bypass the immutability check so the
-        # updated flags are included in checkpoint hparams.
-        object.__setattr__(self.config, "snapflow_enabled", True)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
-        object.__setattr__(self.config, "snapflow_alpha", alpha)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
-        object.__setattr__(self.config, "snapflow_lambda", lambda_)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
-        object.__setattr__(self.config, "snapflow_num_inference_steps", num_inference_steps)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
-        object.__setattr__(self.config, "train_expert_only", True)  # noqa: PLC2801  # type: ignore[misc]  # pyrefly: ignore[read-only]
+        if self.model is None:
+            msg = "inner_model accessed before the model was initialized (setup() has not run yet)."
+            raise RuntimeError(msg)
+        return self.model._model  # noqa: SLF001
+
+    def freeze_vlm(self) -> None:
+        """Freeze the VLM so only the action expert and target-time embedding train."""
+        inner = self.inner_model
+        object.__setattr__(self.config, "train_expert_only", True)  # noqa: PLC2801
         inner.vlm_with_expert.train_expert_only = True
         inner.vlm_with_expert.set_requires_grad()
         self.model.train()

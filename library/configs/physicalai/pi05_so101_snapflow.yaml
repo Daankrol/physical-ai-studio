@@ -1,32 +1,36 @@
-# Pi05 + SnapFlow two-phase training on the SO101 pick-and-place dataset.
+# Pi05 + SnapFlow two-phase distillation on the SO-101 pick-and-place dataset.
 #
-# Single-run two-phase recipe (no second CLI call needed):
-#   Phase 1 (steps 0 .. start_step)      -> standard flow-matching finetuning
-#                                           warm-started from lerobot/pi05_base
-#   Phase 2 (start_step .. max_steps)    -> SnapFlow self-distillation, VLM frozen,
-#                                           trains action expert + target-time embed
+# Single-run recipe — no second CLI call, no checkpoint juggling:
 #
-# The SnapFlowPhaseCallback flips the model into SnapFlow mode at `start_step`
-# and reconfigures the optimizer for a clean phase-2 state. ModelCheckpoint saves
-# a checkpoint every 5000 steps (keeping all of them) so you can compare both how
-# much finetuning and how many "snapflow-steps" are needed.
+#   Phase 1 (epochs 0-9)   standard flow-matching finetuning, warm-started from
+#                          lerobot/pi05_base. Full model trains.
+#   Phase 2 (epochs 10-14) SnapFlow self-distillation. SnapFlowPhaseCallback
+#                          freezes the VLM and reconfigures the optimizer, so
+#                          only the action expert + target-time embedding train
+#                          (~10% of parameters) toward 1-NFE inference.
 #
 # Run:
 #   physicalai fit --config configs/physicalai/pi05_so101_snapflow.yaml
 #
 # Handy overrides:
-#   --trainer.max_steps 40000                    # shorten total budget
-#   --data.train_batch_size 4                    # if you hit OOM
-#   --trainer.callbacks.init_args.start_step ... # move the phase-1/2 boundary
+#   --data.train_batch_size 8                       # if you hit OOM
+#   --trainer.accumulate_grad_batches 2             # recover effective batch size
+#   --trainer.max_epochs 20                         # longer total budget
+#   --trainer.fast_dev_run 1                        # smoke test the wiring
 #
-# Step budgets: phase 1 ~30k (openpi Pi0.5 finetune recipe / Pi05 scheduler decay),
-# phase 2 ~30k (SnapFlow paper arXiv:2604.05656 §3.6 + Appendix J).
+# Epoch budgets follow LeRobot's guidance (5-10 epochs, fewer for warm-started
+# VLAs) rather than a raw step count, so they hold as the batch size changes.
+# Phase 2 is short because the target-time embedding is zero-initialised: the
+# model starts phase 2 numerically identical to the phase-1 teacher.
+#
+# See docs/how-to/training/snapflow-two-phase.md for the full guide.
+# Paper reference: arXiv:2604.05656 (SnapFlow).
 
 model:
   class_path: physicalai.policies.Pi05
   init_args:
-    # Warm-start from the base VLA and finetune (phase 1 is standard flow matching;
-    # SnapFlow is enabled later by the callback, so snapflow_enabled stays false here).
+    # Warm-start from the base VLA. Phase 1 is standard flow matching; SnapFlow
+    # is switched on later by the callback, so snapflow_enabled stays false here.
     pretrained_name_or_path: lerobot/pi05_base
 
     # Model architecture
@@ -49,52 +53,70 @@ model:
     # Flow matching (multi-step teacher used during phase 1)
     num_inference_steps: 10
 
-    # Finetuning settings (full finetune in phase 1; the callback freezes the VLM
-    # for phase 2 via train_expert_only under the hood)
+    # Full finetune in phase 1; the callback freezes the VLM for phase 2.
     freeze_vision_encoder: false
     train_expert_only: false
+
+    # Memory / throughput
+    gradient_checkpointing: true
+    compile_model: true
 
     # Optimizer
     optimizer_lr: 2.5e-5
     optimizer_weight_decay: 0.01
     optimizer_grad_clip_norm: 1.0
 
-    # Scheduler
-    scheduler_warmup_steps: 1000
-    scheduler_decay_steps: 30000
+    # Scheduler. decay_steps=null derives the cosine horizon from the real step
+    # budget (trainer.estimated_stepping_batches) instead of a hard-coded 30k,
+    # so the LR lands on scheduler_decay_lr exactly at the end of the run.
+    # Warmup must then be given explicitly; ~5% of the total step budget is a
+    # reasonable target. Compute it as:
+    #   steps_per_epoch = floor(train_frames / (batch_size * devices))
+    #                       / accumulate_grad_batches
+    #   warmup          = 0.05 * max_epochs * steps_per_epoch
+    scheduler_warmup_steps: 100
+    scheduler_decay_steps: null
     scheduler_decay_lr: 2.5e-6
 
 data:
   class_path: physicalai.data.lerobot.LeRobotDataModule
   init_args:
     repo_id: "Daankrol/pick-and-place-so101"
-    train_batch_size: 8
+    train_batch_size: 16
     data_format: "physicalai"
     # revision="main" bypasses lerobot's get_safe_version() tag lookup, which
     # fails when the dataset has no HF git tags (lerobot 0.6.0 /
-    # huggingface_hub ≥1.23 incompatibility).
+    # huggingface_hub >= 1.23 incompatibility).
     revision: "main"
+    # Hold out whole episodes so val/loss measures generalisation, not
+    # memorisation. Without this there is no signal to tell them apart on a
+    # dataset this small.
+    val_split: 0.1
+    val_split_seed: 42
+    val_batch_size: 16
 
 trainer:
-  # Total budget = phase 1 (30k) + phase 2 (30k).
-  max_steps: 60000
+  # Total budget = phase 1 (10 epochs) + phase 2 (5 epochs).
+  max_epochs: 15
   accelerator: gpu
   devices: 1
   precision: bf16-mixed
-  log_every_n_steps: 100
+  log_every_n_steps: 25
+  check_val_every_n_epoch: 1
   callbacks:
-    # Phase-2 boundary: enable SnapFlow distillation at step 30000.
+    # Phase-2 boundary: switch to SnapFlow distillation at the start of epoch 10.
     - class_path: physicalai.train.SnapFlowPhaseCallback
       init_args:
-        start_step: 30000
-        alpha: 0.5           # FM-loss weight (paper)
-        lambda_: 0.1         # shortcut-loss scale (paper)
-        num_inference_steps: 1  # 1-NFE inference
-    # Save every 5000 steps and keep them all (staged comparison across both phases).
+        start_epoch: 10
+        alpha: 0.5 # FM-loss weight (paper)
+        lambda_: 0.1 # shortcut-loss scale (paper)
+        num_inference_steps: 1 # 1-NFE inference
+    # Keep every staged checkpoint from both phases so you can compare how much
+    # finetuning and how much distillation each contributed.
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        every_n_train_steps: 5000
+        every_n_epochs: 2
         save_top_k: -1
-        save_last: true
-        filename: "step{step}"
+        save_last: link
+        filename: "epoch{epoch:03d}"
         auto_insert_metric_name: false

@@ -6,8 +6,9 @@
 from unittest.mock import MagicMock
 
 import lightning as L
+import pytest
 
-from physicalai.train.callbacks import IterationTimer, ProgressReportingCallback
+from physicalai.train.callbacks import IterationTimer, ProgressReportingCallback, SnapFlowPhaseCallback
 
 
 def _loss(value: float) -> MagicMock:
@@ -192,3 +193,90 @@ class TestIterationTimer:
         logged_time = pl_module.log.call_args[0][1]
         assert logged_time >= 0.04  # allow small timing tolerance
         assert logged_time < 1.0  # sanity upper bound
+
+
+class TestSnapFlowPhaseCallback:
+    """Tests for the SnapFlow phase-transition callback."""
+
+    @staticmethod
+    def _policy() -> MagicMock:
+        """Build a stand-in policy exposing the enable_snapflow contract."""
+        policy = MagicMock(spec=["enable_snapflow", "parameters"])
+        policy.parameters.return_value = []
+        return policy
+
+    def test_requires_exactly_one_boundary(self) -> None:
+        with pytest.raises(ValueError, match="exactly one of start_step or start_epoch"):
+            SnapFlowPhaseCallback()
+        with pytest.raises(ValueError, match="exactly one of start_step or start_epoch"):
+            SnapFlowPhaseCallback(start_step=10, start_epoch=2)
+
+    def test_rejects_negative_boundary(self) -> None:
+        with pytest.raises(ValueError, match="must be >= 0"):
+            SnapFlowPhaseCallback(start_step=-1)
+        with pytest.raises(ValueError, match="must be >= 0"):
+            SnapFlowPhaseCallback(start_epoch=-1)
+
+    def test_step_boundary_activates_once_at_start_step(self) -> None:
+        cb = SnapFlowPhaseCallback(start_step=100, alpha=0.4, lambda_=0.2, num_inference_steps=2)
+        policy = self._policy()
+
+        cb.on_train_batch_start(_trainer(global_step=99, max_steps=200), policy, None, 0)
+        policy.enable_snapflow.assert_not_called()
+
+        trainer = _trainer(global_step=100, max_steps=200)
+        cb.on_train_batch_start(trainer, policy, None, 0)
+        policy.enable_snapflow.assert_called_once_with(alpha=0.4, lambda_=0.2, num_inference_steps=2)
+        trainer.strategy.setup_optimizers.assert_called_once_with(trainer)
+
+        # Subsequent batches must not re-activate.
+        cb.on_train_batch_start(_trainer(global_step=101, max_steps=200), policy, None, 0)
+        policy.enable_snapflow.assert_called_once()
+
+    def test_epoch_boundary_activates_at_start_epoch(self) -> None:
+        cb = SnapFlowPhaseCallback(start_epoch=10)
+        policy = self._policy()
+
+        cb.on_train_epoch_start(_trainer(global_step=0, max_steps=-1, epoch=9), policy)
+        policy.enable_snapflow.assert_not_called()
+
+        trainer = _trainer(global_step=0, max_steps=-1, epoch=10)
+        cb.on_train_epoch_start(trainer, policy)
+        policy.enable_snapflow.assert_called_once_with(alpha=0.5, lambda_=0.1, num_inference_steps=1)
+        trainer.strategy.setup_optimizers.assert_called_once_with(trainer)
+
+    def test_boundaries_do_not_cross_trigger(self) -> None:
+        """A step-configured callback ignores epochs, and vice versa."""
+        step_cb = SnapFlowPhaseCallback(start_step=100)
+        policy = self._policy()
+        step_cb.on_train_epoch_start(_trainer(global_step=0, max_steps=200, epoch=999), policy)
+        policy.enable_snapflow.assert_not_called()
+
+        epoch_cb = SnapFlowPhaseCallback(start_epoch=10)
+        epoch_cb.on_train_batch_start(_trainer(global_step=10_000, max_steps=-1, epoch=0), policy, None, 0)
+        policy.enable_snapflow.assert_not_called()
+
+    def test_rejects_policy_without_enable_snapflow(self) -> None:
+        cb = SnapFlowPhaseCallback(start_step=0)
+        policy = MagicMock(spec=["parameters"])
+
+        with pytest.raises(TypeError, match="does not implement enable_snapflow"):
+            cb.on_train_batch_start(_trainer(global_step=0, max_steps=10), policy, None, 0)
+
+    def test_activation_state_survives_checkpoint_round_trip(self) -> None:
+        cb = SnapFlowPhaseCallback(start_step=100)
+        policy = self._policy()
+        cb.on_train_batch_start(_trainer(global_step=100, max_steps=200), policy, None, 0)
+        assert cb.state_dict() == {"activated": True}
+
+        resumed = SnapFlowPhaseCallback(start_step=100)
+        resumed.load_state_dict(cb.state_dict())
+        resumed_policy = self._policy()
+        resumed.on_train_batch_start(_trainer(global_step=150, max_steps=200), resumed_policy, None, 0)
+        resumed_policy.enable_snapflow.assert_not_called()
+
+    def test_fresh_callback_reports_not_activated(self) -> None:
+        cb = SnapFlowPhaseCallback(start_epoch=5)
+        assert cb.state_dict() == {"activated": False}
+        cb.load_state_dict({})
+        assert cb.state_dict() == {"activated": False}

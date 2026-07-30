@@ -6,7 +6,7 @@
 import logging
 import time
 from collections.abc import Callable, Mapping
-from typing import cast
+from typing import Protocol, cast, runtime_checkable
 
 import lightning as L  # noqa: N812
 from lightning.pytorch.callbacks import Callback
@@ -20,6 +20,27 @@ ReportFn = Callable[[int, str | None, dict[str, object]], None]
 
 StopFn = Callable[[], bool]
 """Cooperative cancellation probe: returns True when training should stop."""
+
+
+@runtime_checkable
+class SnapFlowCapable(Protocol):
+    """A policy that can switch into SnapFlow self-distillation.
+
+    Satisfied by any policy mixing in
+    :class:`~physicalai.policies.common.SnapFlowPolicyMixin`, which covers
+    :class:`~physicalai.policies.Pi05` and
+    :class:`~physicalai.policies.SmolVLA`.
+
+    Note:
+        Used for static typing and documentation. Runtime detection goes through
+        ``hasattr`` rather than ``isinstance``, because protocol ``isinstance``
+        checks inspect the class and would reject duck-typed objects that carry
+        the method on the instance.
+    """
+
+    def enable_snapflow(self, alpha: float, lambda_: float, num_inference_steps: int) -> None:
+        """Activate the SnapFlow objective and freeze the VLM backbone."""
+        ...
 
 
 class ProgressReportingCallback(Callback):
@@ -263,9 +284,9 @@ class PolicyDatasetInteraction(Callback):
 
 
 class SnapFlowPhaseCallback(Callback):
-    """Enable SnapFlow self-distillation at a step boundary within a single training run.
+    """Enable SnapFlow self-distillation at a phase boundary within a single training run.
 
-    At ``start_step`` the callback transitions the policy from standard
+    At the configured boundary the callback transitions the policy from standard
     flow-matching (phase 1) into SnapFlow distillation (phase 2) without
     requiring a second CLI invocation:
 
@@ -276,13 +297,28 @@ class SnapFlowPhaseCallback(Callback):
       parameters (action expert + target-time embedding), giving a clean
       optimizer state for phase 2.
 
+    The boundary is expressed either in optimizer steps (``start_step``) or in
+    epochs (``start_epoch``); exactly one must be given. Use ``start_epoch``
+    when the run is budgeted with ``Trainer(max_epochs=...)`` so the boundary
+    does not have to be converted to steps by hand.
+
     The policy must expose an ``enable_snapflow`` method — both
     :class:`~physicalai.policies.SmolVLA` and
     :class:`~physicalai.policies.Pi05` satisfy this contract.
 
+    Note:
+        Reconfiguring the optimizer rebuilds the LR scheduler, so phase 2 starts
+        with a fresh warmup. The cosine decay horizon is derived from
+        ``Trainer.estimated_stepping_batches``, which reports the *total* run
+        budget rather than the phase-2 remainder, so the phase-2 LR decays more
+        slowly than a standalone phase-2 run would. Use two explicit
+        ``physicalai fit`` runs if you need an exact phase-2 decay horizon.
+
     Args:
-        start_step: Global training step at which to activate SnapFlow.
-            Typical value: the number of phase-1 steps already taken.
+        start_step: Optimizer step at which to activate SnapFlow. Mutually
+            exclusive with ``start_epoch``.
+        start_epoch: Epoch at which to activate SnapFlow, applied at the start
+            of that epoch. Mutually exclusive with ``start_step``.
         alpha: Weight for the flow-matching loss branch (``L_FM``).
             Paper default: ``0.5``.
         lambda_: Scaling factor for the shortcut consistency loss
@@ -294,69 +330,98 @@ class SnapFlowPhaseCallback(Callback):
         >>> from physicalai.train.callbacks import SnapFlowPhaseCallback
         >>> cb = SnapFlowPhaseCallback(start_step=50_000)
         >>> trainer = Trainer(max_steps=80_000, callbacks=[cb])
+
+        >>> # Epoch-budgeted run: 10 epochs of flow matching, then 5 of distillation.
+        >>> cb = SnapFlowPhaseCallback(start_epoch=10)
+        >>> trainer = Trainer(max_epochs=15, callbacks=[cb])
     """
 
     def __init__(
         self,
-        start_step: int,
+        start_step: int | None = None,
         alpha: float = 0.5,
         lambda_: float = 0.1,
         num_inference_steps: int = 1,
+        start_epoch: int | None = None,
     ) -> None:
         """Store phase-transition hyperparameters.
 
         Args:
-            start_step: Global step at which SnapFlow distillation begins.
+            start_step: Optimizer step at which SnapFlow distillation begins.
             alpha: FM-loss weight.  Paper default: ``0.5``.
             lambda_: Shortcut-loss scale.  Paper default: ``0.1``.
             num_inference_steps: Inference denoising steps.  Use ``1`` for
                 1-NFE SnapFlow.
+            start_epoch: Epoch at which SnapFlow distillation begins.
+
+        Raises:
+            ValueError: If neither or both of ``start_step`` and ``start_epoch``
+                are given, or if the given boundary is negative.
         """
         super().__init__()
+        if (start_step is None) == (start_epoch is None):
+            msg = (
+                "SnapFlowPhaseCallback requires exactly one of start_step or start_epoch, "
+                f"got start_step={start_step}, start_epoch={start_epoch}."
+            )
+            raise ValueError(msg)
+        boundary = start_step if start_step is not None else start_epoch
+        if boundary is not None and boundary < 0:
+            msg = f"SnapFlow phase boundary must be >= 0, got {boundary}."
+            raise ValueError(msg)
+
         self.start_step = start_step
+        self.start_epoch = start_epoch
         self.alpha = alpha
         self.lambda_ = lambda_
         self.num_inference_steps = num_inference_steps
         self._activated = False
 
-    def on_train_batch_start(
-        self,
-        trainer: L.Trainer,
-        pl_module: L.LightningModule,
-        batch: object,  # noqa: ARG002
-        batch_idx: int,  # noqa: ARG002
-    ) -> None:
-        """Activate SnapFlow distillation at the configured step boundary.
+    def state_dict(self) -> dict[str, object]:
+        """Persist the activation flag so a resume does not re-trigger phase 2.
+
+        Returns:
+            Callback state to embed in the checkpoint.
+        """
+        return {"activated": self._activated}
+
+    def load_state_dict(self, state_dict: dict[str, object]) -> None:
+        """Restore the activation flag from a checkpoint.
+
+        Args:
+            state_dict: State previously produced by :meth:`state_dict`.
+        """
+        self._activated = bool(state_dict.get("activated"))
+
+    def _activate(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Flip the policy into SnapFlow mode and rebuild the optimizer.
 
         Args:
             trainer: The active Lightning trainer.
             pl_module: The policy being trained.
-            batch: Current batch (unused).
-            batch_idx: Current batch index within the epoch (unused).
 
         Raises:
             TypeError: If ``pl_module`` does not expose an ``enable_snapflow``
                 method (i.e. is not a SmolVLA or Pi05 policy).
         """
-        if self._activated or trainer.global_step < self.start_step:
-            return
-
         if not hasattr(pl_module, "enable_snapflow"):
             msg = (
                 f"{type(pl_module).__name__} does not implement enable_snapflow(); "
                 "SnapFlowPhaseCallback requires a SmolVLA or Pi05 policy."
             )
             raise TypeError(msg)
+        policy = cast("SnapFlowCapable", pl_module)
 
         logger.info(
-            "SnapFlowPhaseCallback: activating SnapFlow distillation at step %d "
+            "SnapFlowPhaseCallback: activating SnapFlow distillation at step %d / epoch %d "
             "(alpha=%.2f, lambda_=%.2f, num_inference_steps=%d)",
             trainer.global_step,
+            trainer.current_epoch,
             self.alpha,
             self.lambda_,
             self.num_inference_steps,
         )
-        pl_module.enable_snapflow(  # type: ignore[union-attr]
+        policy.enable_snapflow(
             alpha=self.alpha,
             lambda_=self.lambda_,
             num_inference_steps=self.num_inference_steps,
@@ -365,3 +430,42 @@ class SnapFlowPhaseCallback(Callback):
         # starts with a fresh optimizer state (no stale momentum from phase 1).
         trainer.strategy.setup_optimizers(trainer)
         self._activated = True
+
+        trainable = sum(p.numel() for p in pl_module.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in pl_module.parameters())
+        logger.info(
+            "SnapFlowPhaseCallback: phase-2 trainable params %.1fM / %.1fM (%.1f%%)",
+            trainable / 1e6,
+            total / 1e6,
+            100 * trainable / max(1, total),
+        )
+
+    def on_train_epoch_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Activate SnapFlow at an epoch boundary when configured with ``start_epoch``.
+
+        Args:
+            trainer: The active Lightning trainer.
+            pl_module: The policy being trained.
+        """
+        if self._activated or self.start_epoch is None or trainer.current_epoch < self.start_epoch:
+            return
+        self._activate(trainer, pl_module)
+
+    def on_train_batch_start(
+        self,
+        trainer: L.Trainer,
+        pl_module: L.LightningModule,
+        batch: object,  # noqa: ARG002
+        batch_idx: int,  # noqa: ARG002
+    ) -> None:
+        """Activate SnapFlow at a step boundary when configured with ``start_step``.
+
+        Args:
+            trainer: The active Lightning trainer.
+            pl_module: The policy being trained.
+            batch: Current batch (unused).
+            batch_idx: Current batch index within the epoch (unused).
+        """
+        if self._activated or self.start_step is None or trainer.global_step < self.start_step:
+            return
+        self._activate(trainer, pl_module)
