@@ -576,7 +576,7 @@ class Pi05(ExportablePolicyMixin, Policy):
             return self.model(processed_batch)
         return self.predict_action_chunk(batch)
 
-    def compute_val_loss(self, batch: Observation) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
+    def compute_val_loss(self, batch: Observation) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute action prediction MSE on a batch (for validation).
 
         Runs the full denoising loop and compares predicted actions to

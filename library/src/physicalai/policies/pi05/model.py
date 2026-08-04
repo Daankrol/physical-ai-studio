@@ -1144,7 +1144,7 @@ class Pi05Model(Model):
         return loss, {"loss": loss.detach()}
 
     @torch.no_grad()
-    def compute_val_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, Tensor | float]]:
+    def compute_val_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, float]]:
         """Compute validation loss: MSE between predicted and ground-truth actions.
 
         Runs the full denoising loop (same as inference) and compares the

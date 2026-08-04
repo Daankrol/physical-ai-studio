@@ -259,7 +259,7 @@ class ACT(Model):
         return loss, loss_dict
 
     @torch.no_grad()
-    def compute_val_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
+    def compute_val_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute validation loss (L1 + optional KL divergence).
 
         Temporarily sets the inner model to training mode so the VAE encoder
