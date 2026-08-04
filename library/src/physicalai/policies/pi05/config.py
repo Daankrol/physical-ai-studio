@@ -19,8 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from physicalai.config import Config
 from physicalai.policies.common import SnapFlowConfigFields
+from physicalai.training_config import Config
 
 
 @dataclass(frozen=True)

@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 import torch
-from physicalai.config import Config
+from physicalai.training_config import Config
 from physicalai.policies import Pi05, SmolVLA
 from physicalai.policies.common import SnapFlowConfigFields, SnapFlowPolicyMixin
 from physicalai.policies.pi05 import Pi05Config
@@ -204,17 +204,19 @@ class TestPoliciesShareTheMixin:
     """Pi05 and SmolVLA must not carry divergent copies of the logic."""
 
     @pytest.mark.parametrize("policy_cls", [Pi05, SmolVLA])
-    def test_uses_shared_enable_snapflow(self, policy_cls: type) -> None:
+    def test_uses_shared_enable_snapflow(self, policy_cls: type[SnapFlowPolicyMixin]) -> None:
         assert policy_cls.enable_snapflow is SnapFlowPolicyMixin.enable_snapflow
 
     @pytest.mark.parametrize("policy_cls", [Pi05, SmolVLA])
-    def test_implements_required_capabilities(self, policy_cls: type) -> None:
+    def test_implements_required_capabilities(self, policy_cls: type[SnapFlowPolicyMixin]) -> None:
         assert policy_cls.inner_model is not SnapFlowPolicyMixin.inner_model
         assert policy_cls.freeze_vlm is not SnapFlowPolicyMixin.freeze_vlm
 
     @pytest.mark.parametrize("policy_cls", [Pi05, SmolVLA])
-    def test_guards_against_uninitialized_model(self, policy_cls: type) -> None:
-        policy = policy_cls.__new__(policy_cls)
+    def test_guards_against_uninitialized_model(self, policy_cls: type[SnapFlowPolicyMixin]) -> None:
+        # Bypass __init__ so `model` is never assigned, mimicking a policy whose
+        # setup() has not run yet.
+        policy = object.__new__(policy_cls)
         policy.model = None
 
         with pytest.raises(RuntimeError, match="before the model was initialized"):

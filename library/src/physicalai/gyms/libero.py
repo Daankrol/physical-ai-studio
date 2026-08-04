@@ -442,10 +442,10 @@ class LiberoGym(Gym):
         Returns:
             Formatted observation dict with 'pixels' and optionally 'agent_pos'
         """
-        # Pass raw images to the policy without rotation — pretrained checkpoints
-        # (e.g. HuggingFaceVLA/smolvla_libero, lerobot/pi05_libero_finetuned_v044)
-        # are trained on raw robosuite orientation via LeRobot's LiberoEnv, which
-        # does NOT rotate images in its observation path.
+        # Pass raw images to the policy without rotation. Pretrained checkpoints such
+        # as HuggingFaceVLA/smolvla_libero and lerobot/pi05_libero_finetuned_v044 are
+        # trained on raw robosuite orientation via LeRobot's LiberoEnv, which does NOT
+        # rotate images in its observation path.
         images = {}
         for camera_name in self.camera_names:
             image = raw_obs[camera_name]

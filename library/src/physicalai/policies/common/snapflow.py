@@ -47,7 +47,7 @@ SNAPFLOW_DEFAULT_NUM_INFERENCE_STEPS = 1
 class SnapFlowConfigFields:
     """SnapFlow self-distillation flags shared by flow-matching policy configs.
 
-    Mix into a policy config ahead of :class:`~physicalai.config.Config` and call
+    Mix into a policy config ahead of :class:`~physicalai.training_config.Config` and call
     :meth:`_validate_snapflow` from the config's ``__post_init__``.
 
     Attributes:
@@ -64,7 +64,7 @@ class SnapFlowConfigFields:
 
     Example:
         >>> from dataclasses import dataclass
-        >>> from physicalai.config import Config
+        >>> from physicalai.training_config import Config
         >>> from physicalai.policies.common import SnapFlowConfigFields
         >>> @dataclass(frozen=True)
         ... class MyConfig(SnapFlowConfigFields, Config):
