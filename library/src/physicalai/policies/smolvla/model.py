@@ -213,17 +213,14 @@ class SmolVLAModel(Model):
         actions_is_pad = batch.get(EXTRA + ".action_is_pad")
         loss_dict: dict[str, float] = {}
         losses = self._model.forward(images, img_masks, lang_tokens, lang_masks, state, actions)
-        loss_dict["losses_after_forward"] = losses.clone()
 
         if actions_is_pad is not None:
             in_episode_bound = ~actions_is_pad
             losses *= in_episode_bound.unsqueeze(-1)
-            loss_dict["losses_after_in_ep_bound"] = losses.clone()
 
         # Truncate losses to actual action dimensions to avoid dilution from padding
         original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1])
         losses = losses[:, :, :original_action_dim]
-        loss_dict["losses_after_rm_padding"] = losses.clone()
 
         if actions_is_pad is None:
             loss = losses.mean()
