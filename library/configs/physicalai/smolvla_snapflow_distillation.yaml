@@ -11,7 +11,7 @@
 #
 #   # Phase 2 — SnapFlow distillation, VLM frozen
 #   physicalai fit \
-#       --config configs/physicalai/smolvla_snapflow_phase2.yaml \
+#       --config configs/physicalai/smolvla_snapflow_distillation.yaml \
 #       --fit.ckpt_path ./experiments/lightning_logs/version_0/checkpoints/last.ckpt \
 #       --trainer.max_steps 30000
 #
@@ -22,9 +22,10 @@
 # Single-run alternative (recommended):
 #   Add SnapFlowPhaseCallback to smolvla.yaml trainer.callbacks with a
 #   start_epoch (or start_step) boundary and run a single `physicalai fit`.
-#   See configs/physicalai/pi05_so101_snapflow.yaml for a worked example.
+#   See configs/physicalai/pi05_finetune_and_snapflow_distillation.yaml for a
+#   worked example.
 #
-# See docs/how-to/training/snapflow-two-phase.md.
+# See docs/how-to/training/snapflow_distillation.md.
 # Paper reference: arXiv:2604.05656 (SnapFlow)
 
 model:

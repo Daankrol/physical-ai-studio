@@ -27,7 +27,7 @@ model whose velocity field is already good:
 | Phase | What trains                                            | Objective                       | Typical budget                 |
 | ----- | ------------------------------------------------------ | ------------------------------- | ------------------------------ |
 | 1     | Full model                                             | Standard flow matching          | 5-10 epochs (warm-started VLA) |
-| 2     | Action expert + target-time embedding (~10% of params) | Mixed FM + shortcut consistency | ~5 epochs                      |
+| 2     | Action expert + target-time embedding (~10% of params) | Mixed FM + shortcut consistency | 3-5 epochs                     |
 
 Three properties make phase 2 cheap and safe:
 
@@ -52,10 +52,10 @@ phase boundary and rebuilds the optimizer over the now-trainable parameters. No
 checkpoint handoff, no second command.
 
 A complete worked config ships at
-[`configs/physicalai/pi05_so101_snapflow.yaml`](../../../configs/physicalai/pi05_so101_snapflow.yaml):
+[`configs/physicalai/pi05_finetune_and_snapflow_distillation.yaml`](../../../configs/physicalai/pi05_finetune_and_snapflow_distillation.yaml):
 
 ```bash
-physicalai fit --config configs/physicalai/pi05_so101_snapflow.yaml
+physicalai fit --config configs/physicalai/pi05_finetune_and_snapflow_distillation.yaml
 ```
 
 The parts that matter:
@@ -71,12 +71,12 @@ model:
     scheduler_warmup_steps: 100
 
 trainer:
-  max_epochs: 15 # phase 1 (10) + phase 2 (5)
+  max_epochs: 8 # phase 1 (5) + phase 2 (3)
   precision: bf16-mixed
   callbacks:
     - class_path: physicalai.train.SnapFlowPhaseCallback
       init_args:
-        start_epoch: 10 # phase-2 boundary
+        start_epoch: 5 # phase-2 boundary
         alpha: 0.5
         lambda_: 0.1
         num_inference_steps: 1
@@ -117,15 +117,15 @@ Exactly one of the two must be set:
 
 ```bash
 # Smoke-test the wiring without training anything
-physicalai fit --config configs/physicalai/pi05_so101_snapflow.yaml \
+physicalai fit --config configs/physicalai/pi05_finetune_and_snapflow_distillation.yaml \
     --trainer.fast_dev_run 1
 
 # Smaller GPU
-physicalai fit --config configs/physicalai/pi05_so101_snapflow.yaml \
+physicalai fit --config configs/physicalai/pi05_finetune_and_snapflow_distillation.yaml \
     --data.train_batch_size 8 --trainer.accumulate_grad_batches 2
 
 # Longer total budget
-physicalai fit --config configs/physicalai/pi05_so101_snapflow.yaml \
+physicalai fit --config configs/physicalai/pi05_finetune_and_snapflow_distillation.yaml \
     --trainer.max_epochs 20
 ```
 
@@ -151,15 +151,15 @@ physicalai fit --config configs/physicalai/pi05.yaml
 
 # Phase 2 — SnapFlow distillation, VLM frozen, resumed from phase 1
 physicalai fit \
-    --config configs/physicalai/pi05_snapflow_phase2.yaml \
+    --config configs/physicalai/pi05_snapflow_distillation.yaml \
     --fit.ckpt_path ./experiments/lightning_logs/version_0/checkpoints/last.ckpt \
     --trainer.max_steps 60000
 ```
 
 Substitute `pi05` with `smolvla` for the SmolVLA policy. Phase-2 templates:
 
-- `configs/physicalai/pi05_snapflow_phase2.yaml`
-- `configs/physicalai/smolvla_snapflow_phase2.yaml`
+- `configs/physicalai/pi05_snapflow_distillation.yaml`
+- `configs/physicalai/smolvla_snapflow_distillation.yaml`
 
 Both set `snapflow_enabled: true`, `train_expert_only: true`, and the paper
 defaults (`snapflow_alpha: 0.5`, `snapflow_lambda: 0.1`,
@@ -194,7 +194,7 @@ policy = Pi05.load_from_checkpoint(
     compile_model=True,
 )
 
-Trainer(max_epochs=5, precision="bf16-mixed").fit(policy, datamodule=datamodule)
+Trainer(max_epochs=3, precision="bf16-mixed").fit(policy, datamodule=datamodule)
 ```
 
 Or flip an already-constructed policy after `setup()` has run:
@@ -207,14 +207,14 @@ policy.enable_snapflow(alpha=0.5, lambda_=0.1, num_inference_steps=1)
 
 ## Hyperparameter guidance
 
-| Parameter                | Paper default          | Notes                                                                  |
-| ------------------------ | ---------------------- | ---------------------------------------------------------------------- |
-| `alpha`                  | `0.5`                  | FM-loss weight. Keep at or above `0.5` to preserve multi-step ability. |
-| `lambda_`                | `0.1`                  | Shortcut-loss scale, balances the two gradient magnitudes.             |
-| `num_inference_steps`    | `1`                    | `1` gives the full SnapFlow speedup; raise it for intermediate modes.  |
-| Phase-1 budget           | 5-10 epochs            | Fewer for a warm-started VLA than for from-scratch training.           |
-| Phase-2 budget           | ~5 epochs (~30k steps) | Short because the target-time embedding is zero-initialised.           |
-| `scheduler_warmup_steps` | ~5% of total steps     | No fractional option exists; compute it from your dataset (below).     |
+| Parameter                | Paper default            | Notes                                                                  |
+| ------------------------ | ------------------------ | ---------------------------------------------------------------------- |
+| `alpha`                  | `0.5`                    | FM-loss weight. Keep at or above `0.5` to preserve multi-step ability. |
+| `lambda_`                | `0.1`                    | Shortcut-loss scale, balances the two gradient magnitudes.             |
+| `num_inference_steps`    | `1`                      | `1` gives the full SnapFlow speedup; raise it for intermediate modes.  |
+| Phase-1 budget           | 5-10 epochs              | Fewer for a warm-started VLA than for from-scratch training.           |
+| Phase-2 budget           | ~3-5 epochs (~30k steps) | Short because the target-time embedding is zero-initialised.           |
+| `scheduler_warmup_steps` | ~5% of total steps       | No fractional option exists; compute it from your dataset (below).     |
 
 Converting an epoch budget into steps, for warmup sizing:
 

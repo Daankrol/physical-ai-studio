@@ -2,15 +2,15 @@
 #
 # Single-run recipe — no second CLI call, no checkpoint juggling:
 #
-#   Phase 1 (epochs 0-9)   standard flow-matching finetuning, warm-started from
+#   Phase 1 (epochs 0-4)   standard flow-matching finetuning, warm-started from
 #                          lerobot/pi05_base. Full model trains.
-#   Phase 2 (epochs 10-14) SnapFlow self-distillation. SnapFlowPhaseCallback
+#   Phase 2 (epochs 5-7)   SnapFlow self-distillation. SnapFlowPhaseCallback
 #                          freezes the VLM and reconfigures the optimizer, so
 #                          only the action expert + target-time embedding train
 #                          (~10% of parameters) toward 1-NFE inference.
 #
 # Run:
-#   physicalai fit --config configs/physicalai/pi05_so101_snapflow.yaml
+#   physicalai fit --config configs/physicalai/pi05_finetune_and_snapflow_distillation.yaml
 #
 # Handy overrides:
 #   --data.train_batch_size 8                       # if you hit OOM
@@ -23,7 +23,7 @@
 # Phase 2 is short because the target-time embedding is zero-initialised: the
 # model starts phase 2 numerically identical to the phase-1 teacher.
 #
-# See docs/how-to/training/snapflow-two-phase.md for the full guide.
+# See docs/how-to/training/snapflow_distillation.md for the full guide.
 # Paper reference: arXiv:2604.05656 (SnapFlow).
 
 model:
@@ -59,7 +59,7 @@ model:
 
     # Memory / throughput
     gradient_checkpointing: true
-    compile_model: true
+    compile_model: true # disable compile_model if you hit OOM
 
     # Optimizer
     optimizer_lr: 2.5e-5
@@ -81,33 +81,29 @@ model:
 data:
   class_path: physicalai.data.lerobot.LeRobotDataModule
   init_args:
-    repo_id: "Daankrol/pick-and-place-so101"
-    train_batch_size: 16
+    # Example SO-101 pick-and-place dataset. Swap in your own recorded dataset;
+    # the phase budgets below are epoch-based, so they carry over unchanged.
+    repo_id: "Daankrol/simple-pick-up-and-place-so101"
+    train_batch_size: 16 # change this depending on your GPU memory
     data_format: "physicalai"
-    # revision="main" bypasses lerobot's get_safe_version() tag lookup, which
-    # fails when the dataset has no HF git tags (lerobot 0.6.0 /
-    # huggingface_hub >= 1.23 incompatibility).
     revision: "main"
-    # Hold out whole episodes so val/loss measures generalisation, not
-    # memorisation. Without this there is no signal to tell them apart on a
-    # dataset this small.
     val_split: 0.1
     val_split_seed: 42
     val_batch_size: 16
 
 trainer:
-  # Total budget = phase 1 (10 epochs) + phase 2 (5 epochs).
-  max_epochs: 15
+  # Total budget = phase 1 (5 epochs) + phase 2 (3 epochs).
+  max_epochs: 8
   accelerator: gpu
   devices: 1
   precision: bf16-mixed
   log_every_n_steps: 25
   check_val_every_n_epoch: 1
   callbacks:
-    # Phase-2 boundary: switch to SnapFlow distillation at the start of epoch 10.
+    # Phase-2 boundary: switch to SnapFlow distillation at the start of epoch 5 (zero-indexed).
     - class_path: physicalai.train.SnapFlowPhaseCallback
       init_args:
-        start_epoch: 10
+        start_epoch: 5
         alpha: 0.5 # FM-loss weight (paper)
         lambda_: 0.1 # shortcut-loss scale (paper)
         num_inference_steps: 1 # 1-NFE inference

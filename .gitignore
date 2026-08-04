@@ -215,6 +215,7 @@ lightning_logs
 # Training artifacts (checkpoints, logs) written by `physicalai fit` / benchmark runs
 experiments/
 library/experiments/
+library/results/
 
 # Knowledge-graph cache produced by the graphify tooling
 graphify-out/

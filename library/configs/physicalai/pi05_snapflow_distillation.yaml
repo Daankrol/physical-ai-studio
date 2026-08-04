@@ -11,7 +11,7 @@
 #
 #   # Phase 2 — SnapFlow distillation, VLM frozen
 #   physicalai fit \
-#       --config configs/physicalai/pi05_snapflow_phase2.yaml \
+#       --config configs/physicalai/pi05_snapflow_distillation.yaml \
 #       --fit.ckpt_path ./experiments/lightning_logs/version_0/checkpoints/last.ckpt \
 #       --trainer.max_steps 30000
 #
@@ -20,10 +20,11 @@
 # `--trainer.max_steps` to the combined phase-1 + phase-2 budget accordingly.
 #
 # Single-run alternative (recommended):
-#   configs/physicalai/pi05_so101_snapflow.yaml uses SnapFlowPhaseCallback to
-#   run both phases in one `physicalai fit`, with no checkpoint handoff.
+#   configs/physicalai/pi05_finetune_and_snapflow_distillation.yaml uses
+#   SnapFlowPhaseCallback to run both phases in one `physicalai fit`, with no
+#   checkpoint handoff.
 #
-# See docs/how-to/training/snapflow-two-phase.md.
+# See docs/how-to/training/snapflow_distillation.md.
 # Paper reference: arXiv:2604.05656 (SnapFlow)
 
 model:
