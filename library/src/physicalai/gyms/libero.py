@@ -55,9 +55,7 @@ Example:
 
 Note:
     - Requires optional dependencies: `uv pip install hf-libero`
-    - Images fed to policies are in raw robosuite orientation (no rotation), matching
-      the LeRobot training convention. The 180° flip is applied only in render()
-      for human-viewable output.
+    - Images are automatically rotated 180° to match LeRobot conventions
     - State space: 8-dim (3 pos + 3 orientation + 2 gripper)
     - Action space: 7-dim
     - See TASK_SUITE_MAX_STEPS for episode limits per suite
@@ -367,11 +365,9 @@ class LiberoGym(Gym):
 
         raw_obs = self.env.reset()
 
-        # Apply init state if available, then advance the index so successive
-        # episodes use distinct starting configurations.
+        # Apply init state if available
         if self.init_states and self._init_states is not None:
-            raw_obs = self.env.set_init_state(self._init_states[self._init_state_id % len(self._init_states)])
-            self._init_state_id += 1
+            raw_obs = self.env.set_init_state(self._init_states[self._init_state_id])
 
         # After reset, objects may be unstable (slightly floating, intersecting, etc.).
         # Step the simulator with a no-op action for a few frames so everything settles.
@@ -442,13 +438,12 @@ class LiberoGym(Gym):
         Returns:
             Formatted observation dict with 'pixels' and optionally 'agent_pos'
         """
-        # Pass raw images to the policy without rotation. Pretrained checkpoints such
-        # as HuggingFaceVLA/smolvla_libero and lerobot/pi05_libero_finetuned_v044 are
-        # trained on raw robosuite orientation via LeRobot's LiberoEnv, which does NOT
-        # rotate images in its observation path.
+        # Process images (rotate 180° to match LeRobot convention)
         images = {}
         for camera_name in self.camera_names:
             image = raw_obs[camera_name]
+            # Rotate 180 degrees (copy to avoid negative strides)
+            image = image[::-1, ::-1].copy()
             images[self.CAMERA_NAME_MAPPING[camera_name]] = image
 
         # For pixels-only mode, skip state processing
@@ -484,9 +479,7 @@ class LiberoGym(Gym):
         # OffScreenRenderEnv wraps a robosuite environment (double nesting)
         # Using _get_observations() is the standard LIBERO pattern - no public alternative
         raw_obs = self.env.env._get_observations()  # noqa: SLF001
-        image = self._format_raw_obs(raw_obs)["pixels"]["image"]
-        # Rotate 180° for human-viewable output only, matching LeRobot's LiberoEnv.render().
-        return image[::-1, ::-1].copy()
+        return self._format_raw_obs(raw_obs)["pixels"]["image"]
 
     def close(self) -> None:
         """Close the environment and release resources.
