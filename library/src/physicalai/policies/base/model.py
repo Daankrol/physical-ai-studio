@@ -50,7 +50,7 @@ class Model(nn.Module, ABC):
         """
 
     @torch.no_grad()
-    def compute_val_loss(self, batch: dict[str, Any]) -> tuple[torch.Tensor, dict[str, float]]:
+    def compute_val_loss(self, batch: dict[str, Any]) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
         """Compute the validation loss for this model.
 
         Override in subclasses to use a different metric from the training

@@ -382,7 +382,7 @@ class GrootModel(Model):
     def compute_val_loss(
         self,
         batch: Mapping[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, dict[str, float]]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
         """Compute validation loss: MSE between predicted and ground-truth actions.
 
         Runs the full denoising loop and compares predicted actions with
