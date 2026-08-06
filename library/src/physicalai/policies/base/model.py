@@ -112,12 +112,7 @@ class Model(nn.Module, ABC):
         """
         if in_episode_bound is None:
             return losses.mean()
-        # Not an in-place `*=`: `losses` is often a slice of a larger tensor and
-        # mutating a caller's argument here would be a surprising side effect.
         masked = losses * in_episode_bound.unsqueeze(-1)
-        # Divide by the number of *valid* elements, not the full tensor. A plain
-        # .mean() would count the zeroed-out padded steps in the denominator and
-        # shrink the loss (and gradient) in proportion to the padding fraction.
         num_valid = (in_episode_bound.sum() * losses.shape[-1]).clamp_min(1)
         return masked.sum() / num_valid
 

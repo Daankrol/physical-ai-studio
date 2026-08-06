@@ -1142,15 +1142,7 @@ class Pi05Model(Model):
                 )
 
         # Mask out action steps that only exist because the chunk query was
-        # clamped at an episode boundary. LeRobot repeats the terminal action to
-        # fill the chunk and flags those steps as `action_is_pad`, so without
-        # this the final `chunk_size` frames of every episode are supervised
-        # towards a frozen pose.
-        #
-        # SnapFlow consistency-distillation samples are exempt: that branch
-        # regresses onto a self-generated teacher velocity rather than the
-        # dataset action, so padded steps carry no bad supervision there and
-        # masking them would drop valid distillation signal.
+        # clamped at an episode boundary.
         in_episode_bound = self.in_episode_bound(batch, cd_idx)
 
         # Truncate losses to actual action dimensions to avoid dilution from padding
