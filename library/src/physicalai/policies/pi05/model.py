@@ -1038,9 +1038,14 @@ class Pi05Model(Model):
         and target velocities.  When SnapFlow is enabled, uses a mixture
         of standard FM loss and consistency distillation loss.
 
+        Action steps flagged by ``extra.action_is_pad`` are excluded from both
+        the numerator and the denominator, so end-of-episode padding neither
+        supervises the policy nor scales down the gradient.
+
         Args:
             batch: Preprocessed batch dict containing IMAGES, IMAGE_MASKS,
-                TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, and ACTION.
+                TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, and ACTION, and
+                optionally ``extra.action_is_pad``.
 
         Returns:
             Tuple of (mean loss tensor, loss dict with ``"loss"`` key).
@@ -1061,6 +1066,7 @@ class Pi05Model(Model):
         u_t = noise - actions
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+        cd_idx: Tensor | None = None
         if not self._snapflow_enabled:
             v_t = self._predict_velocity(
                 x_t,
@@ -1135,11 +1141,23 @@ class Pi05Model(Model):
                     reduction="none",
                 )
 
+        # Mask out action steps that only exist because the chunk query was
+        # clamped at an episode boundary. LeRobot repeats the terminal action to
+        # fill the chunk and flags those steps as `action_is_pad`, so without
+        # this the final `chunk_size` frames of every episode are supervised
+        # towards a frozen pose.
+        #
+        # SnapFlow consistency-distillation samples are exempt: that branch
+        # regresses onto a self-generated teacher velocity rather than the
+        # dataset action, so padded steps carry no bad supervision there and
+        # masking them would drop valid distillation signal.
+        in_episode_bound = self.in_episode_bound(batch, cd_idx)
+
         # Truncate losses to actual action dimensions to avoid dilution from padding
         original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1])
         losses = losses[:, :, :original_action_dim]
 
-        loss = losses.mean()
+        loss = self.reduce_losses(losses, in_episode_bound)
         # Detached tensor, not `.item()` float: see Model.compute_loss docstring.
         return loss, {"loss": loss.detach()}
 
@@ -1152,9 +1170,14 @@ class Pi05Model(Model):
         deterministic and gives a direct measure of action prediction
         quality — unlike the stochastic flow matching training loss.
 
+        Action steps flagged by ``extra.action_is_pad`` are excluded, so the
+        metric is not diluted by the repeated terminal actions LeRobot inserts
+        at episode boundaries.
+
         Args:
             batch: Preprocessed batch dict containing IMAGES, IMAGE_MASKS,
-                TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, and ACTION.
+                TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, and ACTION, and
+                optionally ``extra.action_is_pad``.
 
         Returns:
             Tuple of (mean MSE loss tensor, loss dict with ``"loss"`` key).
@@ -1169,7 +1192,12 @@ class Pi05Model(Model):
 
         # Align chunk lengths (predicted may be clipped by n_action_steps)
         min_len = min(gt_trimmed.shape[1], pred_trimmed.shape[1])
-        loss = F.mse_loss(pred_trimmed[:, :min_len], gt_trimmed[:, :min_len])
+        losses = F.mse_loss(pred_trimmed[:, :min_len], gt_trimmed[:, :min_len], reduction="none")
+
+        in_episode_bound = self.in_episode_bound(batch)
+        if in_episode_bound is not None:
+            in_episode_bound = in_episode_bound[:, :min_len]
+        loss = self.reduce_losses(losses, in_episode_bound)
         return loss, {"loss": loss.item()}
 
     def predict_action_chunk(self, batch: dict[str, Any]) -> Tensor:
