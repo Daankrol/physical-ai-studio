@@ -710,8 +710,6 @@ class TestActionPaddingMask:
             _prepare_action=lambda b: None,
             _model=SimpleNamespace(forward=lambda *_a, **_kw: losses.clone()),
             _dataset_stats={ACTION: {"shape": (action_dim,)}},
-            in_episode_bound=SmolVLAModel.in_episode_bound,
-            reduce_losses=SmolVLAModel.reduce_losses,
         )
         loss, _ = SmolVLAModel.compute_loss(stub, batch)
         return float(loss)
@@ -795,8 +793,6 @@ class TestActionPaddingMask:
             _prepare_action=lambda b: None,
             _model=SimpleNamespace(forward=lambda *_a, **_kw: source * 2.0),
             _dataset_stats={ACTION: {"shape": (2,)}},
-            in_episode_bound=SmolVLAModel.in_episode_bound,
-            reduce_losses=SmolVLAModel.reduce_losses,
         )
         batch: dict = {
             IMAGES: None,
@@ -853,8 +849,6 @@ class TestActionPaddingMask:
             _prepare_action=lambda _b: torch.zeros(bsize, chunk, action_dim),
             _dataset_stats={ACTION: {"shape": (action_dim,)}},
             predict_action_chunk=lambda _b: predicted,
-            in_episode_bound=SmolVLAModel.in_episode_bound,
-            reduce_losses=SmolVLAModel.reduce_losses,
         )
         loss, _ = SmolVLAModel.compute_val_loss(stub, batch)
         return float(loss)

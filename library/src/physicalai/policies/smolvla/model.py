@@ -19,7 +19,7 @@ from torch import nn
 
 from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.observation import ACTION, IMAGES, STATE
-from physicalai.policies.base import Model
+from physicalai.policies.base import Model, in_episode_bound, reduce_losses
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -220,7 +220,7 @@ class SmolVLAModel(Model):
         original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1])
         losses = losses[:, :, :original_action_dim]
 
-        loss = self.reduce_losses(losses, self.in_episode_bound(batch))
+        loss = reduce_losses(losses, in_episode_bound(batch))
         # Detached tensor, not `.item()` float: see Model.compute_loss docstring.
         loss_dict["loss"] = loss.detach()
         return loss, loss_dict
@@ -256,10 +256,10 @@ class SmolVLAModel(Model):
         min_len = min(gt_trimmed.shape[1], pred_trimmed.shape[1])
         losses = F.mse_loss(pred_trimmed[:, :min_len], gt_trimmed[:, :min_len], reduction="none")
 
-        in_episode_bound = self.in_episode_bound(processed)
-        if in_episode_bound is not None:
-            in_episode_bound = in_episode_bound[:, :min_len]
-        loss = self.reduce_losses(losses, in_episode_bound)
+        bound = in_episode_bound(processed)
+        if bound is not None:
+            bound = bound[:, :min_len]
+        loss = reduce_losses(losses, bound)
         return loss, {"loss": loss.item()}
 
     def predict_action_chunk(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:

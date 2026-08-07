@@ -1389,8 +1389,6 @@ class TestActionPaddingMask:
             sample_time=lambda b, _device: torch.full((b,), 0.5),
             embed_prefix=lambda *_a, **_kw: (None, None, None),
             _predict_velocity=lambda *_a, **_kw: velocity,
-            in_episode_bound=Pi05Model.in_episode_bound,
-            reduce_losses=Pi05Model.reduce_losses,
         )
         loss, _ = Pi05Model._flow_matching_loss(stub, batch)
         return float(loss)
@@ -1497,8 +1495,6 @@ class TestActionPaddingMask:
             sample_time=lambda b, _device: torch.full((b,), 0.5),
             embed_prefix=lambda *_a, **_kw: (None, None, None),
             _predict_velocity=lambda *_a, **_kw: source * 2.0,
-            in_episode_bound=Pi05Model.in_episode_bound,
-            reduce_losses=Pi05Model.reduce_losses,
         )
         batch: dict = {
             IMAGES: None,
@@ -1548,8 +1544,6 @@ class TestActionPaddingMask:
             sample_time=lambda b, _device: torch.full((b,), 0.5),
             embed_prefix=lambda *_a, **_kw: (torch.zeros(1, 1, 1),) * 3,
             _predict_velocity=predict,
-            in_episode_bound=Pi05Model.in_episode_bound,
-            reduce_losses=Pi05Model.reduce_losses,
         )
         batch: dict = {
             IMAGES: None,
@@ -1601,8 +1595,6 @@ class TestActionPaddingMask:
         stub = SimpleNamespace(
             _dataset_stats={ACTION: {"shape": (action_dim,)}},
             predict_action_chunk=lambda _b: predicted,
-            in_episode_bound=Pi05Model.in_episode_bound,
-            reduce_losses=Pi05Model.reduce_losses,
         )
         loss, _ = Pi05Model.compute_val_loss(stub, batch)
         return float(loss)

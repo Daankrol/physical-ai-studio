@@ -19,7 +19,7 @@ from transformers.cache_utils import DynamicCache
 
 from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.observation import ACTION, IMAGES
-from physicalai.policies.base import Model
+from physicalai.policies.base import Model, in_episode_bound, reduce_losses
 
 from .pi_gemma import (
     PaliGemmaForConditionalGenerationWithPiGemma,
@@ -1143,13 +1143,13 @@ class Pi05Model(Model):
 
         # Mask out action steps that only exist because the chunk query was
         # clamped at an episode boundary.
-        in_episode_bound = self.in_episode_bound(batch, cd_idx)
+        bound = in_episode_bound(batch, cd_idx)
 
         # Truncate losses to actual action dimensions to avoid dilution from padding
         original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1])
         losses = losses[:, :, :original_action_dim]
 
-        loss = self.reduce_losses(losses, in_episode_bound)
+        loss = reduce_losses(losses, bound)
         # Detached tensor, not `.item()` float: see Model.compute_loss docstring.
         return loss, {"loss": loss.detach()}
 
@@ -1186,10 +1186,10 @@ class Pi05Model(Model):
         min_len = min(gt_trimmed.shape[1], pred_trimmed.shape[1])
         losses = F.mse_loss(pred_trimmed[:, :min_len], gt_trimmed[:, :min_len], reduction="none")
 
-        in_episode_bound = self.in_episode_bound(batch)
-        if in_episode_bound is not None:
-            in_episode_bound = in_episode_bound[:, :min_len]
-        loss = self.reduce_losses(losses, in_episode_bound)
+        bound = in_episode_bound(batch)
+        if bound is not None:
+            bound = bound[:, :min_len]
+        loss = reduce_losses(losses, bound)
         return loss, {"loss": loss.item()}
 
     def predict_action_chunk(self, batch: dict[str, Any]) -> Tensor:
