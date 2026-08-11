@@ -17,10 +17,10 @@ Example (API):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from physicalai.config import Config
 from physicalai.policies.common import SnapFlowConfigFields
-from physicalai.training_config import Config
 
 
 @dataclass(frozen=True)
@@ -35,8 +35,11 @@ class SmolVLAConfig(SnapFlowConfigFields, Config):
         max_action_dim: Maximum dimension for action vectors; shorter vectors will be padded. Defaults to 32.
         resize_imgs_with_padding: Target size (height, width) for image preprocessing with padding.
             Defaults to (512, 512).
-        empty_cameras: Number of empty camera images to add. Used by smolvla_aloha_sim for adding empty wrist cameras.
-            Defaults to 0.
+        image_key_reorder_map: Optional mapping from dataset camera keys to policy camera indices.
+            This is applied in preprocessing before image stacking. Defaults to {}.
+        num_cameras: Total number of camera slots expected by the policy. Slots not covered by the batch
+            image keys (or by ``image_key_reorder_map``) are filled with masked empty cameras. Values <= 0
+            keep only the batch cameras. Defaults to 0.
         adapt_to_pi_aloha: Whether to convert joint and gripper values from standard Aloha space to pi internal
             runtime space. Defaults to False.
         tokenizer_max_length: Maximum length for tokenizer output. Defaults to 48.
@@ -83,7 +86,9 @@ class SmolVLAConfig(SnapFlowConfigFields, Config):
 
     resize_imgs_with_padding: tuple[int, int] = (512, 512)
 
-    empty_cameras: int = 0
+    image_key_reorder_map: dict[str, int] = field(default_factory=dict)
+
+    num_cameras: int = 0
 
     adapt_to_pi_aloha: bool = False
 

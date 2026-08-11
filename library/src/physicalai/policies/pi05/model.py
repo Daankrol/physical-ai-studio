@@ -1007,7 +1007,7 @@ class Pi05Model(SnapFlowModelMixin, Model):
     def forward(
         self,
         batch: dict[str, Any],
-    ) -> tuple[Tensor, dict[str, float]] | Tensor:
+    ) -> tuple[Tensor, dict[str, Tensor | float]] | Tensor:
         """Forward pass through the model.
 
         Training mode: computes flow matching loss (with gradients).
@@ -1023,7 +1023,7 @@ class Pi05Model(SnapFlowModelMixin, Model):
             return self.compute_loss(batch)
         return self.predict_action_chunk(batch)
 
-    def compute_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, float]]:
+    def compute_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, Tensor | float]]:
         """Compute flow matching training loss.
 
         Delegates to :meth:`_flow_matching_loss`.
@@ -1033,7 +1033,7 @@ class Pi05Model(SnapFlowModelMixin, Model):
         """
         return self._flow_matching_loss(batch)
 
-    def _flow_matching_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, float]]:  # noqa: PLR0914
+    def _flow_matching_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, Tensor | float]]:  # noqa: PLR0914
         """Compute flow matching training loss.
 
         Samples random noise and timesteps, interpolates noisy actions,
@@ -1092,10 +1092,11 @@ class Pi05Model(SnapFlowModelMixin, Model):
         losses = losses[:, :, :original_action_dim]
 
         loss = losses.mean()
-        return loss, {"loss": loss.item()}
+        # Detached tensor, not `.item()` float: see Model.compute_loss docstring.
+        return loss, {"loss": loss.detach()}
 
     @torch.no_grad()
-    def compute_val_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, float]]:
+    def compute_val_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, Tensor | float]]:
         """Compute validation loss: MSE between predicted and ground-truth actions.
 
         Runs the full denoising loop (same as inference) and compares the
