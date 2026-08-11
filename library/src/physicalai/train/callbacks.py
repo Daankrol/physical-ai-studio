@@ -404,6 +404,12 @@ class SnapFlowPhaseCallback(Callback):
             TypeError: If ``pl_module`` does not expose an ``enable_snapflow``
                 method (i.e. is not a SmolVLA or Pi05 policy).
         """
+        logger.info(
+            "SnapFlowPhaseCallback: phase boundary reached at step %d / epoch %d, "
+            "starting SnapFlow activation",
+            trainer.global_step,
+            trainer.current_epoch,
+        )
         if not hasattr(pl_module, "enable_snapflow"):
             msg = (
                 f"{type(pl_module).__name__} does not implement enable_snapflow(); "

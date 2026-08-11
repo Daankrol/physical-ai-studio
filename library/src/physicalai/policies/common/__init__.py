@@ -3,6 +3,6 @@
 
 """Behaviour shared by more than one first-party policy family."""
 
-from physicalai.policies.common.snapflow import SnapFlowConfigFields, SnapFlowPolicyMixin
+from physicalai.policies.common.snapflow import SnapFlowConfigFields, SnapFlowModelMixin, SnapFlowPolicyMixin
 
-__all__ = ["SnapFlowConfigFields", "SnapFlowPolicyMixin"]
+__all__ = ["SnapFlowConfigFields", "SnapFlowModelMixin", "SnapFlowPolicyMixin"]

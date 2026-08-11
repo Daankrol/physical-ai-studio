@@ -8,16 +8,20 @@ multi-step Euler denoising loop of a flow-matching VLA into a single forward
 pass by self-distillation. It is trained in two phases: standard flow matching
 first, then a short distillation phase with the VLM backbone frozen.
 
-The *math* lives in each policy's model (the target-time embedding, the mixed
-FM/consistency objective, and the 1-NFE sampling loop are all inside
-``nn.Module`` forward paths that are ``torch.compile``-wrapped and traced during
-export). What this module owns is the policy-level surface that was otherwise
-duplicated verbatim between :class:`~physicalai.policies.Pi05` and
+The target-time embedding and the ``nn.Module`` forward paths that are
+``torch.compile``-wrapped and traced during export still live in each policy's
+model. What this module owns is the surface that was otherwise duplicated
+verbatim between :class:`~physicalai.policies.Pi05` and
 :class:`~physicalai.policies.SmolVLA`:
 
 - :class:`SnapFlowConfigFields` — the four config flags and their validation.
 - :class:`SnapFlowPolicyMixin` — the ``enable_snapflow()`` phase-2 entry point
   used by :class:`~physicalai.train.callbacks.SnapFlowPhaseCallback`.
+- :class:`SnapFlowModelMixin` — the mixed FM/consistency-distillation training
+  loss and the inference-time step-count/target-time selection, shared by each
+  policy's flow-matching ``nn.Module``. A new flow matcher only needs to
+  implement ``_predict_velocity`` (source-time, target-time conditioned
+  velocity prediction) and a ``sample_noise`` callable to reuse it.
 
 Example:
     >>> from physicalai.policies import Pi05
@@ -29,6 +33,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+import torch
+import torch.nn.functional as F  # noqa: N812
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -229,3 +236,196 @@ class SnapFlowPolicyMixin:
         # policies. hparams["config"] is a to_dict() snapshot, not a live view,
         # so it must be refreshed explicitly.
         self._set_hparam_keys()
+
+
+class SnapFlowModelMixin:
+    """Give a flow-matching ``nn.Module`` the SnapFlow training/inference math.
+
+    Implements the pieces of SnapFlow that were duplicated verbatim between
+    :class:`~physicalai.policies.smolvla.model.VLAFlowMatching` and
+    :class:`~physicalai.policies.pi05.model.Pi05Model`:
+
+    - :meth:`snapflow_mixed_loss` — the mixed flow-matching / consistency
+      distillation training loss (self-distillation via a two-step Euler
+      shortcut target).
+    - :meth:`snapflow_num_inference_steps` and :meth:`snapflow_target_time` —
+      the inference-time step-count and target-time overrides used by the
+      1-NFE sampling loop.
+
+    This mixin does not define ``__init__`` (mixing into an ``nn.Module``
+    subclass makes constructor chaining brittle). Call
+    :meth:`init_snapflow_state` explicitly at the end of the host model's own
+    ``__init__``, mirroring how :class:`SnapFlowConfigFields` expects
+    ``_validate_snapflow()`` to be called from ``__post_init__``.
+
+    A host model must additionally provide:
+
+    - A ``_predict_velocity(x_t, timestep, target_time, *cond) -> Tensor``
+      method (or equivalent callable passed to :meth:`snapflow_mixed_loss`)
+      that predicts the velocity field conditioned on both the source
+      timestep and the SnapFlow target time.
+
+    Example:
+        >>> class MyFlowMatching(SnapFlowModelMixin, nn.Module):  # doctest: +SKIP
+        ...     def __init__(self, *, snapflow_enabled=False, snapflow_alpha=0.5,
+        ...                  snapflow_lambda=1.0, snapflow_num_inference_steps=1):
+        ...         super().__init__()
+        ...         self.init_snapflow_state(
+        ...             enabled=snapflow_enabled,
+        ...             alpha=snapflow_alpha,
+        ...             lambda_=snapflow_lambda,
+        ...             num_inference_steps=snapflow_num_inference_steps,
+        ...         )
+    """
+
+    # Declared for type checkers only; set by init_snapflow_state().
+    _snapflow_enabled: bool
+    _snapflow_alpha: float
+    _snapflow_lambda: float
+    _snapflow_num_inference_steps: int
+
+    def init_snapflow_state(
+        self,
+        *,
+        enabled: bool,
+        alpha: float,
+        lambda_: float,
+        num_inference_steps: int,
+    ) -> None:
+        """Store the SnapFlow flags on the host model.
+
+        Call once from the host model's ``__init__``, after ``super().__init__()``.
+        Values are expected to already be validated (config-level validation is
+        done by :meth:`SnapFlowConfigFields._validate_snapflow`).
+
+        Args:
+            enabled: Whether SnapFlow self-distillation is active.
+            alpha: Mixing ratio between FM and consistency objectives.
+            lambda_: Weight for the consistency (shortcut) loss component.
+            num_inference_steps: Number of denoising steps at inference when enabled.
+        """
+        self._snapflow_enabled = enabled
+        self._snapflow_alpha = alpha
+        self._snapflow_lambda = lambda_
+        self._snapflow_num_inference_steps = num_inference_steps
+
+    def snapflow_mixed_loss(  # noqa: PLR0914
+        self,
+        *,
+        u_t: torch.Tensor,
+        x_t: torch.Tensor,
+        time: torch.Tensor,
+        actions: torch.Tensor,
+        prefix_embs: torch.Tensor,
+        prefix_pad_masks: torch.Tensor,
+        prefix_att_masks: torch.Tensor,
+        sample_noise: Callable[[tuple[int, ...], torch.device], torch.Tensor],
+        predict_velocity: Callable[
+            [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+            torch.Tensor,
+        ],
+    ) -> torch.Tensor:
+        """Compute the SnapFlow mixed FM/consistency-distillation loss.
+
+        Splits the batch into a flow-matching (FM) fraction (``alpha``) and a
+        consistency-distillation (CD) fraction (``1 - alpha``). The FM fraction
+        uses the standard flow-matching objective (matching ``predict_velocity``
+        against ``u_t`` at matching source/target time). The CD fraction
+        bootstraps a two-step Euler shortcut target from the model's own
+        velocity predictions (with gradients detached) and trains a single-step
+        shortcut to match it, scaled by ``snapflow_lambda``.
+
+        Args:
+            u_t: Target velocity ``noise - actions``, shape ``(B, T, D)``.
+            x_t: Noisy interpolated actions ``time * noise + (1 - time) * actions``.
+            time: Sampled diffusion time, shape ``(B,)``.
+            actions: Ground-truth action tensor, used only for shape/device/dtype.
+            prefix_embs: Precomputed prefix (vision+language(+state)) embeddings.
+            prefix_pad_masks: Padding mask for the prefix sequence.
+            prefix_att_masks: Attention mask for the prefix sequence.
+            sample_noise: Callable ``(shape, device) -> Tensor`` sampling noise
+                with the given shape.
+            predict_velocity: Callable
+                ``(x_t, timestep, target_time, prefix_embs, prefix_pad_masks, prefix_att_masks) -> Tensor``
+                predicting the velocity field.
+
+        Returns:
+            Per-element loss tensor, same shape as ``actions``.
+        """
+        bsize = actions.shape[0]
+        device = actions.device
+        fm_mask = torch.rand(bsize, device=device) < self._snapflow_alpha
+        fm_idx = fm_mask.nonzero(as_tuple=True)[0]
+        cd_idx = (~fm_mask).nonzero(as_tuple=True)[0]
+
+        losses = torch.zeros_like(actions)
+
+        if fm_idx.numel() > 0:
+            v_fm = predict_velocity(
+                x_t[fm_idx],
+                time[fm_idx],
+                time[fm_idx],
+                prefix_embs[fm_idx],
+                prefix_pad_masks[fm_idx],
+                prefix_att_masks[fm_idx],
+            )
+            losses[fm_idx] = F.mse_loss(u_t[fm_idx], v_fm, reduction="none")
+
+        if cd_idx.numel() > 0:
+            cd_bsize = cd_idx.numel()
+            cd_actions_shape = (cd_bsize, *actions.shape[1:])
+            x_1 = sample_noise(cd_actions_shape, device)
+            cd_prefix_embs = prefix_embs[cd_idx]
+            cd_prefix_pad_masks = prefix_pad_masks[cd_idx]
+            cd_prefix_att_masks = prefix_att_masks[cd_idx]
+
+            with torch.no_grad():
+                t1 = torch.ones(cd_bsize, dtype=torch.float32, device=device)
+                v_1 = predict_velocity(x_1, t1, t1, cd_prefix_embs, cd_prefix_pad_masks, cd_prefix_att_masks)
+                x_half = x_1 - 0.5 * v_1
+                t_half = torch.full((cd_bsize,), 0.5, dtype=torch.float32, device=device)
+                v_half = predict_velocity(
+                    x_half,
+                    t_half,
+                    t_half,
+                    cd_prefix_embs,
+                    cd_prefix_pad_masks,
+                    cd_prefix_att_masks,
+                )
+                v_target = 0.5 * (v_1 + v_half)
+
+            t1 = torch.ones(cd_bsize, dtype=torch.float32, device=device)
+            t_zero = torch.zeros(cd_bsize, dtype=torch.float32, device=device)
+            v_pred = predict_velocity(x_1, t1, t_zero, cd_prefix_embs, cd_prefix_pad_masks, cd_prefix_att_masks)
+            losses[cd_idx] = self._snapflow_lambda * F.mse_loss(v_pred, v_target.detach(), reduction="none")
+
+        return losses
+
+    def snapflow_num_inference_steps(self, default: int) -> int:
+        """Return the number of inference denoising steps to use.
+
+        Args:
+            default: Number of steps to use when SnapFlow is not enabled.
+
+        Returns:
+            ``snapflow_num_inference_steps`` when SnapFlow is enabled, else ``default``.
+        """
+        return self._snapflow_num_inference_steps if self._snapflow_enabled else default
+
+    def snapflow_target_time(self, bsize: int, time_tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+        """Return the target-time tensor to condition the velocity prediction on.
+
+        Args:
+            bsize: Batch size.
+            time_tensor: The current source-time tensor, used verbatim when
+                SnapFlow is not enabled.
+            device: Device to allocate the zero target-time tensor on.
+
+        Returns:
+            A zero tensor of shape ``(bsize,)`` when SnapFlow is enabled (the
+            1-NFE shortcut always targets ``t=0``), else ``time_tensor``.
+        """
+        if not self._snapflow_enabled:
+            return time_tensor
+
+        return torch.zeros(bsize, dtype=torch.float32, device=device)
