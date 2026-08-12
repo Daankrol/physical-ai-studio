@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
-import lightning as L  # ruff: ignore[lowercase-imported-as-non-lowercase]
+import lightning as L  # noqa: N812
 import torch
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
 from lightning.pytorch.utilities import rank_zero_only, rank_zero_warn
@@ -261,7 +261,7 @@ class ProgressReportingCallback(Callback):
         outputs: object,
         _batch: object,
         batch_idx: int,
-        dataloader_idx: int = 0,  # ruff: ignore[unused-method-argument]  # Lightning hook signature; unused here.
+        dataloader_idx: int = 0,  # noqa: ARG002  # Lightning hook signature; unused here.
     ) -> None:
         """Report a throttled validation batch; honor cancellation."""
         current = batch_idx + 1
@@ -539,8 +539,8 @@ class SnapFlowPhaseCallback(Callback):
 
     def on_save_checkpoint(
         self,
-        trainer: L.Trainer,  # ruff: ignore[unused-method-argument]
-        pl_module: L.LightningModule,  # ruff: ignore[unused-method-argument]
+        trainer: L.Trainer,  # noqa: ARG002
+        pl_module: L.LightningModule,  # noqa: ARG002
         checkpoint: dict[str, Any],
     ) -> None:
         """Stamp the SnapFlow phase into every checkpoint this run writes.
@@ -836,8 +836,8 @@ class SnapFlowPhaseCallback(Callback):
         self,
         trainer: L.Trainer,
         pl_module: L.LightningModule,
-        batch: object,  # ruff: ignore[unused-method-argument]
-        batch_idx: int,  # ruff: ignore[unused-method-argument]
+        batch: object,  # noqa: ARG002
+        batch_idx: int,  # noqa: ARG002
     ) -> None:
         """Activate SnapFlow at a step boundary and keep the phase visible thereafter.
 

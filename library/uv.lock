@@ -85,7 +85,7 @@ conflicts = [[
 ]]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-08-05T14:26:46.432155967Z"
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -3695,6 +3695,7 @@ dependencies = [
     { name = "pillow" },
     { name = "pydantic" },
     { name = "pymunk" },
+    { name = "wandb" },
 ]
 
 [package.optional-dependencies]
@@ -3857,6 +3858,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'groot'", specifier = ">=5.5.0,<5.6.0" },
     { name = "transformers", marker = "extra == 'pi0'", specifier = ">=5.5.0,<5.6.0" },
     { name = "transformers", marker = "extra == 'smolvla'", specifier = ">=5.5.0,<5.6.0" },
+    { name = "wandb", specifier = ">=0.28.1" },
     { name = "wandb", marker = "extra == 'loggers'", specifier = ">=0.22" },
 ]
 provides-extras = ["cpu", "cu128", "xpu", "tests", "loggers", "libero", "diffusion", "pi0", "pi05", "groot", "smolvla", "executorch", "executorch-openvino", "all"]
