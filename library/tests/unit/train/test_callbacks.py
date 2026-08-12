@@ -3,12 +3,19 @@
 
 """Tests for training callbacks."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import lightning as L
 import pytest
+from lightning.pytorch.callbacks import ModelCheckpoint
 
-from physicalai.train.callbacks import IterationTimer, ProgressReportingCallback, SnapFlowPhaseCallback
+from physicalai.train.callbacks import (
+    SNAPFLOW_PROGRESS_BAR_KEY,
+    IterationTimer,
+    ProgressReportingCallback,
+    SnapFlowPhaseCallback,
+)
 
 
 def _loss(value: float) -> MagicMock:
@@ -28,6 +35,9 @@ def _trainer(
     trainer.current_epoch = epoch
     trainer.should_stop = False
     trainer.callback_metrics = {}
+    # Real Trainers expose these as lists; MagicMock(spec=...) would hand back a
+    # non-iterable mock and break the SnapFlow checkpoint-prefixing walk.
+    trainer.checkpoint_callbacks = []
     return trainer
 
 
@@ -214,11 +224,17 @@ class TestSnapFlowPhaseCallback:
     """Tests for the SnapFlow phase-transition callback."""
 
     @staticmethod
-    def _policy() -> MagicMock:
+    def _policy(*, compile_model: bool = False) -> MagicMock:
         """Build a stand-in policy exposing the enable_snapflow contract."""
-        policy = MagicMock(spec=["enable_snapflow", "parameters"])
+        policy = MagicMock(spec=["enable_snapflow", "parameters", "log", "config"])
         policy.parameters.return_value = []
+        policy.config = SimpleNamespace(compile_model=compile_model)
         return policy
+
+    @staticmethod
+    def _checkpoint_callback(filename: str | None = "epoch{epoch:03d}") -> ModelCheckpoint:
+        """Build a real ModelCheckpoint so filename rewriting is exercised for real."""
+        return ModelCheckpoint(filename=filename)
 
     def test_requires_exactly_one_boundary(self) -> None:
         with pytest.raises(ValueError, match="exactly one of start_step or start_epoch"):
@@ -282,7 +298,7 @@ class TestSnapFlowPhaseCallback:
         cb = SnapFlowPhaseCallback(start_step=100)
         policy = self._policy()
         cb.on_train_batch_start(_trainer(global_step=100, max_steps=200), policy, None, 0)
-        assert cb.state_dict() == {"activated": True}
+        assert cb.state_dict() == {"activated": True, "activated_at_step": 100}
 
         resumed = SnapFlowPhaseCallback(start_step=100)
         resumed.load_state_dict(cb.state_dict())
@@ -292,6 +308,118 @@ class TestSnapFlowPhaseCallback:
 
     def test_fresh_callback_reports_not_activated(self) -> None:
         cb = SnapFlowPhaseCallback(start_epoch=5)
-        assert cb.state_dict() == {"activated": False}
+        assert cb.state_dict() == {"activated": False, "activated_at_step": None}
         cb.load_state_dict({})
-        assert cb.state_dict() == {"activated": False}
+        assert cb.state_dict() == {"activated": False, "activated_at_step": None}
+
+    def test_phase_metric_absent_before_activation_and_present_after(self) -> None:
+        """The metric's presence in the progress bar is itself the phase indicator."""
+        cb = SnapFlowPhaseCallback(start_step=100)
+        policy = self._policy()
+
+        cb.on_train_batch_start(_trainer(global_step=99, max_steps=200), policy, None, 0)
+        policy.log.assert_not_called()
+
+        cb.on_train_batch_start(_trainer(global_step=100, max_steps=200), policy, None, 0)
+        name, value = policy.log.call_args[0]
+        assert name == SNAPFLOW_PROGRESS_BAR_KEY
+        assert value == 1.0
+        assert policy.log.call_args[1]["prog_bar"] is True
+
+    def test_phase_metric_logged_after_epoch_boundary_activation(self) -> None:
+        cb = SnapFlowPhaseCallback(start_epoch=10)
+        policy = self._policy()
+
+        cb.on_train_epoch_start(_trainer(global_step=0, max_steps=-1, epoch=10), policy)
+        cb.on_train_batch_start(_trainer(global_step=1, max_steps=-1, epoch=10), policy, None, 0)
+
+        policy.log.assert_called_once()
+        assert policy.log.call_args[0][0] == SNAPFLOW_PROGRESS_BAR_KEY
+
+    def test_checkpoint_filenames_get_phase_prefix(self) -> None:
+        cb = SnapFlowPhaseCallback(start_step=100)
+        ckpt = self._checkpoint_callback()
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [ckpt]
+
+        cb.on_train_batch_start(trainer, self._policy(), None, 0)
+
+        assert ckpt.filename == "snapflow-epoch{epoch:03d}"
+
+    def test_unset_checkpoint_template_keeps_lightning_default_shape(self) -> None:
+        """An unset filename must not silently change shape when prefixed."""
+        cb = SnapFlowPhaseCallback(start_step=0)
+        ckpt = self._checkpoint_callback(filename=None)
+        trainer = _trainer(global_step=0, max_steps=10)
+        trainer.checkpoint_callbacks = [ckpt]
+
+        cb.on_train_batch_start(trainer, self._policy(), None, 0)
+
+        assert ckpt.filename == f"snapflow-{{epoch}}{ModelCheckpoint.CHECKPOINT_JOIN_CHAR}{{step}}"
+
+    def test_checkpoint_prefixing_is_idempotent_across_resume(self) -> None:
+        """Resuming a phase-2 checkpoint must not stack a second prefix."""
+        ckpt = self._checkpoint_callback(filename="snapflow-epoch{epoch:03d}")
+        resumed = SnapFlowPhaseCallback(start_step=100)
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [ckpt]
+
+        resumed.on_train_batch_start(trainer, self._policy(), None, 0)
+
+        assert ckpt.filename == "snapflow-epoch{epoch:03d}"
+
+    def test_checkpoint_prefix_can_be_disabled(self) -> None:
+        cb = SnapFlowPhaseCallback(start_step=100, checkpoint_prefix=None)
+        ckpt = self._checkpoint_callback()
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [ckpt]
+
+        cb.on_train_batch_start(trainer, self._policy(), None, 0)
+
+        assert ckpt.filename == "epoch{epoch:03d}"
+
+    def test_checkpoint_is_stamped_with_phase_metadata(self) -> None:
+        cb = SnapFlowPhaseCallback(start_step=100, alpha=0.4, lambda_=0.2, num_inference_steps=2)
+        policy = self._policy()
+        trainer = _trainer(global_step=100, max_steps=200)
+
+        before: dict[str, object] = {}
+        cb.on_save_checkpoint(trainer, policy, before)
+        assert before["snapflow"] == {
+            "enabled": False,
+            "alpha": 0.4,
+            "lambda_": 0.2,
+            "num_inference_steps": 2,
+            "activated_at_step": None,
+        }
+
+        cb.on_train_batch_start(trainer, policy, None, 0)
+        after: dict[str, object] = {}
+        cb.on_save_checkpoint(trainer, policy, after)
+        assert after["snapflow"] == {
+            "enabled": True,
+            "alpha": 0.4,
+            "lambda_": 0.2,
+            "num_inference_steps": 2,
+            "activated_at_step": 100,
+        }
+
+    def test_banner_is_printed_through_the_progress_bar(self) -> None:
+        """The banner must go through the bar's print so tqdm output is not garbled."""
+        cb = SnapFlowPhaseCallback(start_step=100)
+        trainer = _trainer(global_step=100, max_steps=200)
+
+        cb.on_train_batch_start(trainer, self._policy(), None, 0)
+
+        banner = trainer.progress_bar_callback.print.call_args[0][0]
+        assert "SnapFlow distillation ENABLED at step 100" in banner
+        assert "compile_model" not in banner
+
+    def test_banner_warns_about_the_compile_recompile_stall(self) -> None:
+        cb = SnapFlowPhaseCallback(start_step=100)
+        trainer = _trainer(global_step=100, max_steps=200)
+
+        cb.on_train_batch_start(trainer, self._policy(compile_model=True), None, 0)
+
+        banner = trainer.progress_bar_callback.print.call_args[0][0]
+        assert "compile_model is on" in banner

@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Final, cast
 
 from jsonargparse import ActionConfigFile, ArgumentParser, Namespace
 
+from physicalai.cli._logging import configure_console_logging  # noqa: PLC2701
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -64,6 +66,7 @@ def _dispatch(method_name: str) -> Callable[[ArgumentParser, Namespace], int]:
     """
 
     def _run(parser: ArgumentParser, cfg: Namespace) -> int:
+        configure_console_logging()
         cfg_init = cast("Namespace", parser.instantiate_classes(cfg))
         trainer = cfg_init.trainer
         method_ns = getattr(cfg_init, method_name, None)

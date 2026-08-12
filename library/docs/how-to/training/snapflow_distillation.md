@@ -71,12 +71,12 @@ model:
     scheduler_warmup_steps: 100
 
 trainer:
-  max_epochs: 8 # phase 1 (5) + phase 2 (3)
+  max_epochs: 14 # phase 1 (epochs 0-9) + phase 2 (epochs 10-13)
   precision: bf16-mixed
   callbacks:
     - class_path: physicalai.train.SnapFlowPhaseCallback
       init_args:
-        start_epoch: 5 # phase-2 boundary
+        start_epoch: 10 # phase-2 boundary
         alpha: 0.5
         lambda_: 0.1
         num_inference_steps: 1
@@ -84,7 +84,7 @@ trainer:
       init_args:
         every_n_epochs: 2
         save_top_k: -1 # keep every staged checkpoint
-        save_last: link
+        save_last: true
         filename: "epoch{epoch:03d}"
         auto_insert_metric_name: false
 ```
@@ -101,6 +101,67 @@ At the boundary the callback:
    policies.
 2. Calls `trainer.strategy.setup_optimizers(trainer)` so the optimizer covers
    only the unfrozen parameters and starts with clean state.
+3. Prints a phase banner, starts logging `snapflow` to the progress bar, and
+   prefixes new checkpoint filenames — see the next section.
+
+### What to expect at the phase boundary
+
+The transition is deliberately noisy, because a run silently changing its
+training objective is worse than a run that tells you.
+
+**A banner is printed once**, routed through the progress bar so it does not
+garble the bar's own output:
+
+```text
+==============================================================================
+SnapFlow distillation ENABLED at step 30000 (epoch 10)
+  alpha=0.50  lambda_=0.10  num_inference_steps=1
+  trainable params: 311.9M / 3138.4M (9.9%) - VLM backbone is now frozen
+  Optimizer and LR scheduler rebuilt; phase 2 restarts the warmup.
+  Expect slower steps: the consistency branch runs 3 velocity passes per sample.
+  checkpoints from here on: 'snapflow-epoch{epoch:03d}.ckpt' ('last.ckpt' is unchanged)
+==============================================================================
+```
+
+**The progress bar gains a `snapflow` entry** for the rest of the run. It is not
+logged during phase 1, so the key's presence is itself the phase indicator:
+
+```text
+Epoch 10/13 ━━━━━━━━━╺━━━━━━ 812/1875 train/loss: 0.243  snapflow: 1.000
+```
+
+**Checkpoints written after the boundary are prefixed** with `snapflow-`, so a
+staged run is unambiguous on disk:
+
+```text
+epoch008.ckpt            <- phase 1, flow matching
+snapflow-epoch012.ckpt   <- phase 2, distilled
+last.ckpt                <- always the newest, whichever phase
+```
+
+`last.ckpt` keeps its stock name on purpose, so resuming always has a stable
+entry point. Change the prefix with `checkpoint_prefix: "distilled-"`, or set it
+to `null` to leave filenames alone. Every checkpoint also carries the phase in
+machine-readable form:
+
+```python
+import torch
+
+ckpt = torch.load("snapflow-epoch012.ckpt", weights_only=False)
+print(ckpt["snapflow"])
+# {'enabled': True, 'alpha': 0.5, 'lambda_': 0.1,
+#  'num_inference_steps': 1, 'activated_at_step': 30000}
+```
+
+**The first phase-2 step is slow.** Two independent reasons:
+
+- The consistency branch runs three velocity passes per sample (`v_1`, `v_half`,
+  `v_pred`) where flow matching runs one, so phase-2 steps are ~2-3x slower for
+  the whole phase. This is by construction.
+- With `compile_model: true`, flipping the SnapFlow flag invalidates the
+  `torch.compile` guards along with the `requires_grad` and eval-mode changes
+  from freezing the VLM, so the first phase-2 step pays a full recompile of a
+  new, larger graph. That can take minutes on a VLA. It is not a hang.
 
 ### Step-based boundary
 
@@ -212,6 +273,7 @@ policy.enable_snapflow(alpha=0.5, lambda_=0.1, num_inference_steps=1)
 | `alpha`                  | `0.5`                    | FM-loss weight. Keep at or above `0.5` to preserve multi-step ability. |
 | `lambda_`                | `0.1`                    | Shortcut-loss scale, balances the two gradient magnitudes.             |
 | `num_inference_steps`    | `1`                      | `1` gives the full SnapFlow speedup; raise it for intermediate modes.  |
+| `checkpoint_prefix`      | `"snapflow-"`            | Marks phase-2 checkpoints on disk. `null` disables the rewrite.        |
 | Phase-1 budget           | 5-10 epochs              | Fewer for a warm-started VLA than for from-scratch training.           |
 | Phase-2 budget           | ~3-5 epochs (~30k steps) | Short because the target-time embedding is zero-initialised.           |
 | `scheduler_warmup_steps` | ~5% of total steps       | No fractional option exists; compute it from your dataset (below).     |
@@ -269,10 +331,3 @@ physicalai export --ckpt_path experiments/.../last.ckpt --backend openvino
 ```
 
 See [Export and deploy](../export/export_inference.md).
-
-## Known gaps
-
-- There is no `--seed_everything` equivalent in the CLI. For a fully reproducible
-  run, call `lightning.seed_everything(seed)` from a Python entry point.
-- `scheduler_warmup_steps` takes an absolute step count only; fractions of the
-  total budget must be computed by hand using the formula above.

@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 import torch
-from physicalai.training_config import Config
+from physicalai.config import Config
 from physicalai.policies import Pi05, SmolVLA
 from physicalai.policies.common import SnapFlowConfigFields, SnapFlowPolicyMixin
 from physicalai.policies.pi05 import Pi05Config
@@ -43,7 +43,7 @@ class TestSnapFlowConfigFields:
         config = config_cls()
         assert config.snapflow_enabled is False
         assert config.snapflow_alpha == 0.5
-        assert config.snapflow_lambda == 1.0
+        assert config.snapflow_lambda == 0.1
         assert config.snapflow_num_inference_steps == 1
 
     @pytest.mark.parametrize("config_cls", [Pi05Config, SmolVLAConfig])

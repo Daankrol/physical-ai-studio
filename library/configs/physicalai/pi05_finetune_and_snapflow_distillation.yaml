@@ -83,7 +83,7 @@ data:
   init_args:
     # Example SO-101 pick-and-place dataset. Swap in your own recorded dataset;
     # the phase budgets below are epoch-based, so they carry over unchanged.
-    repo_id: "Daankrol/simple-pick-up-and-place-so101"
+    repo_id: "Daankrol/pick-and-place-multi-obj"
     train_batch_size: 16 # change this depending on your GPU memory
     data_format: "physicalai"
     revision: "main"
@@ -92,7 +92,7 @@ data:
     val_batch_size: 16
 
 trainer:
-  # Total budget = phase 1 (5 epochs) + phase 2 (3 epochs).
+  # Total budget = phase 1 (epochs 0-4) + phase 2 (epochs 5-7).
   max_epochs: 8
   accelerator: gpu
   devices: 1
@@ -108,11 +108,20 @@ trainer:
         lambda_: 0.1 # shortcut-loss scale (paper)
         num_inference_steps: 1 # 1-NFE inference
     # Keep every staged checkpoint from both phases so you can compare how much
-    # finetuning and how much distillation each contributed.
+    # finetuning and how much distillation each contributed. From the boundary
+    # onwards the callback prefixes this template with "snapflow-", so phase-2
+    # checkpoints are "snapflow-epoch012.ckpt". "last.ckpt" keeps its name.
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
         every_n_epochs: 2
         save_top_k: -1
-        save_last: link
+        save_last: True
         filename: "epoch{epoch:03d}"
         auto_insert_metric_name: false
+        dirpath: /mnt/data/experiments/snapflow-multi-object
+  logger:
+    class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      project: "physicalai_snapflow"
+      name: "pi05_finetune_and_distill_no_augment"
+      log_model: false

@@ -54,7 +54,7 @@ SNAPFLOW_DEFAULT_NUM_INFERENCE_STEPS = 1
 class SnapFlowConfigFields:
     """SnapFlow self-distillation flags shared by flow-matching policy configs.
 
-    Mix into a policy config ahead of :class:`~physicalai.training_config.Config` and call
+    Mix into a policy config ahead of :class:`~physicalai.config.Config` and call
     :meth:`_validate_snapflow` from the config's ``__post_init__``.
 
     Attributes:
@@ -65,13 +65,13 @@ class SnapFlowConfigFields:
             use standard flow-matching loss, ``1-alpha`` use the two-step Euler shortcut consistency loss.
             Must be in [0, 1]. Defaults to 0.5.
         snapflow_lambda: Weight for the consistency (shortcut) loss component. Balances gradient magnitudes
-            between FM and consistency objectives. Defaults to 1.0.
+            between FM and consistency objectives. Defaults to 0.1.
         snapflow_num_inference_steps: Number of denoising steps at inference when SnapFlow is enabled.
             Set to 1 for single-step (1-NFE) generation. Defaults to 1.
 
     Example:
         >>> from dataclasses import dataclass
-        >>> from physicalai.training_config import Config
+        >>> from physicalai.config import Config
         >>> from physicalai.policies.common import SnapFlowConfigFields
         >>> @dataclass(frozen=True)
         ... class MyConfig(SnapFlowConfigFields, Config):
@@ -86,7 +86,7 @@ class SnapFlowConfigFields:
     # SnapFlow self-distillation (arxiv.org/abs/2604.05656)
     snapflow_enabled: bool = False
     snapflow_alpha: float = SNAPFLOW_DEFAULT_ALPHA
-    snapflow_lambda: float = 1.0
+    snapflow_lambda: float = SNAPFLOW_DEFAULT_LAMBDA
     snapflow_num_inference_steps: int = SNAPFLOW_DEFAULT_NUM_INFERENCE_STEPS
 
     def _validate_snapflow(self) -> None:

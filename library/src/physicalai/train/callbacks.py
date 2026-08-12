@@ -6,10 +6,11 @@
 import logging
 import time
 from collections.abc import Callable, Mapping
-from typing import Protocol, cast, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 import lightning as L  # noqa: N812
-from lightning.pytorch.callbacks import Callback
+from lightning.pytorch.callbacks import Callback, ModelCheckpoint
+from lightning.pytorch.utilities import rank_zero_only
 
 from physicalai.train.utils import reformat_dataset_to_match_policy
 
@@ -20,6 +21,56 @@ ReportFn = Callable[[int, str | None, dict[str, object]], None]
 
 StopFn = Callable[[], bool]
 """Cooperative cancellation probe: returns True when training should stop."""
+
+SNAPFLOW_PROGRESS_BAR_KEY = "snapflow"
+"""Progress-bar metric key logged while SnapFlow distillation is active.
+
+The key is only logged once SnapFlow has been activated, so its *presence* in
+the progress bar is the phase-2 indicator: the bar stays clean during phase 1.
+"""
+
+SNAPFLOW_CHECKPOINT_KEY = "snapflow"
+"""Checkpoint dict key holding the SnapFlow phase metadata stamped at save time."""
+
+_PARAM_COUNT_MILLIONS_THRESHOLD = 1_000_000
+
+
+def _format_param_count(count: int) -> str:
+    """Render a parameter count readably at both toy and VLA scale.
+
+    Args:
+        count: Number of parameters.
+
+    Returns:
+        A ``"311.9M"``-style string for real models, or an exact count for the
+        small models used in tests, where ``0.0M`` would say nothing.
+    """
+    if count >= _PARAM_COUNT_MILLIONS_THRESHOLD:
+        return f"{count / 1e6:.1f}M"
+    return f"{count:,}"
+
+
+@rank_zero_only
+def _print_banner(trainer: L.Trainer, message: str) -> None:
+    """Emit ``message`` to the console without garbling an active progress bar.
+
+    Routed through the progress bar's ``print`` (``tqdm.write`` under the hood)
+    when one is running, so the banner does not collide with the bar's own
+    output. Falls back to ``logger.info`` otherwise. Only one sink is used, so
+    the banner never shows up twice.
+
+    Args:
+        trainer: The active Lightning trainer.
+        message: Pre-formatted, possibly multi-line banner text.
+    """
+    bar = trainer.progress_bar_callback
+    # is_enabled lives on TQDMProgressBar/RichProgressBar, not on the ProgressBar
+    # base class, and the base class's print() is a no-op. Default to False so an
+    # exotic bar falls through to the logger rather than swallowing the banner.
+    if bar is not None and getattr(bar, "is_enabled", False):
+        bar.print(message)
+        return
+    logger.info(message)
 
 
 @runtime_checkable
@@ -307,6 +358,19 @@ class SnapFlowPhaseCallback(Callback):
     :class:`~physicalai.policies.SmolVLA` and
     :class:`~physicalai.policies.Pi05` satisfy this contract.
 
+    Phase 2 is made visible in three ways, so a run never switches objectives
+    silently:
+
+    - A console banner is printed at the boundary through the progress bar
+      (tqdm-safe), or through ``logger.info`` when no progress bar is running.
+    - ``snapflow`` is logged as a progress-bar metric for every phase-2 batch.
+      It is deliberately not logged during phase 1, so the key's presence in the
+      bar is itself the phase indicator.
+    - Every :class:`~lightning.pytorch.callbacks.ModelCheckpoint` filename
+      template is prefixed with ``checkpoint_prefix`` from the boundary onwards,
+      and the phase metadata is stamped into the checkpoint under a ``snapflow``
+      key.
+
     Note:
         Reconfiguring the optimizer rebuilds the LR scheduler, so phase 2 starts
         with a fresh warmup. The cosine decay horizon is derived from
@@ -314,6 +378,12 @@ class SnapFlowPhaseCallback(Callback):
         budget rather than the phase-2 remainder, so the phase-2 LR decays more
         slowly than a standalone phase-2 run would. Use two explicit
         ``physicalai fit`` runs if you need an exact phase-2 decay horizon.
+
+    Note:
+        The ``save_last`` checkpoint keeps its stock ``last.ckpt`` name across
+        the boundary, so resuming always has a stable, phase-agnostic entry
+        point. Use the checkpoint's ``snapflow`` metadata to tell which phase a
+        given ``last.ckpt`` came from.
 
     Args:
         start_step: Optimizer step at which to activate SnapFlow. Mutually
@@ -326,6 +396,10 @@ class SnapFlowPhaseCallback(Callback):
             (``L_shortcut``).  Paper default: ``0.1``.
         num_inference_steps: Denoising steps at inference time.
             Set to ``1`` for the full single-step SnapFlow speedup.
+        checkpoint_prefix: Prefix applied to every ``ModelCheckpoint`` filename
+            template once SnapFlow activates, so phase-1 and phase-2
+            checkpoints are distinguishable on disk. Set to ``None`` to leave
+            filenames untouched.
 
     Example:
         >>> from physicalai.train.callbacks import SnapFlowPhaseCallback
@@ -344,6 +418,7 @@ class SnapFlowPhaseCallback(Callback):
         lambda_: float = 0.1,
         num_inference_steps: int = 1,
         start_epoch: int | None = None,
+        checkpoint_prefix: str | None = "snapflow-",
     ) -> None:
         """Store phase-transition hyperparameters.
 
@@ -354,6 +429,8 @@ class SnapFlowPhaseCallback(Callback):
             num_inference_steps: Inference denoising steps.  Use ``1`` for
                 1-NFE SnapFlow.
             start_epoch: Epoch at which SnapFlow distillation begins.
+            checkpoint_prefix: Prefix for ``ModelCheckpoint`` filename templates
+                from the boundary onwards, or ``None`` to leave them alone.
 
         Raises:
             ValueError: If neither or both of ``start_step`` and ``start_epoch``
@@ -376,23 +453,118 @@ class SnapFlowPhaseCallback(Callback):
         self.alpha = alpha
         self.lambda_ = lambda_
         self.num_inference_steps = num_inference_steps
+        self.checkpoint_prefix = checkpoint_prefix
         self._activated = False
+        self._activated_at_step: int | None = None
 
     def state_dict(self) -> dict[str, object]:
-        """Persist the activation flag so a resume does not re-trigger phase 2.
+        """Persist the activation state so a resume does not re-trigger phase 2.
 
         Returns:
             Callback state to embed in the checkpoint.
         """
-        return {"activated": self._activated}
+        return {"activated": self._activated, "activated_at_step": self._activated_at_step}
 
     def load_state_dict(self, state_dict: dict[str, object]) -> None:
-        """Restore the activation flag from a checkpoint.
+        """Restore the activation state from a checkpoint.
 
         Args:
             state_dict: State previously produced by :meth:`state_dict`.
         """
         self._activated = bool(state_dict.get("activated"))
+        activated_at_step = state_dict.get("activated_at_step")
+        self._activated_at_step = int(activated_at_step) if isinstance(activated_at_step, int) else None
+
+    def on_save_checkpoint(
+        self,
+        trainer: L.Trainer,  # noqa: ARG002
+        pl_module: L.LightningModule,  # noqa: ARG002
+        checkpoint: dict[str, Any],
+    ) -> None:
+        """Stamp the SnapFlow phase into every checkpoint this run writes.
+
+        Makes the phase machine-readable rather than relying on the filename
+        convention alone, so downstream tooling can tell a distilled checkpoint
+        from a flow-matching one without parsing names.
+
+        Args:
+            trainer: The active Lightning trainer (unused).
+            pl_module: The policy being trained (unused).
+            checkpoint: Checkpoint dict to augment in place.
+        """
+        checkpoint[SNAPFLOW_CHECKPOINT_KEY] = {
+            "enabled": self._activated,
+            "alpha": self.alpha,
+            "lambda_": self.lambda_,
+            "num_inference_steps": self.num_inference_steps,
+            "activated_at_step": self._activated_at_step,
+        }
+
+    def _prefix_checkpoint_filenames(self, trainer: L.Trainer) -> list[str]:
+        """Prefix every ``ModelCheckpoint`` filename template with the phase marker.
+
+        ``ModelCheckpoint.format_checkpoint_name`` reads ``self.filename`` at
+        save time, so rewriting the template mid-run only affects checkpoints
+        written from here on. Templates already carrying the prefix are skipped,
+        which keeps the rewrite idempotent when a post-activation checkpoint is
+        resumed.
+
+        Args:
+            trainer: The active Lightning trainer.
+
+        Returns:
+            The rewritten filename templates, for reporting in the banner.
+        """
+        if not self.checkpoint_prefix:
+            return []
+
+        renamed: list[str] = []
+        for callback in trainer.checkpoint_callbacks:
+            if not isinstance(callback, ModelCheckpoint):
+                continue
+            # Mirror Lightning's implicit default so an unset template keeps its
+            # stock "{epoch}-{step}" shape instead of silently changing.
+            template = callback.filename or f"{{epoch}}{callback.CHECKPOINT_JOIN_CHAR}{{step}}"
+            if template.startswith(self.checkpoint_prefix):
+                continue
+            callback.filename = f"{self.checkpoint_prefix}{template}"
+            renamed.append(callback.filename)
+        return renamed
+
+    def _banner(self, trainer: L.Trainer, pl_module: L.LightningModule, renamed: list[str]) -> str:
+        """Build the human-facing phase-transition banner.
+
+        Args:
+            trainer: The active Lightning trainer.
+            pl_module: The policy being trained.
+            renamed: Checkpoint filename templates rewritten at the boundary.
+
+        Returns:
+            Multi-line banner text.
+        """
+        trainable = sum(p.numel() for p in pl_module.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in pl_module.parameters())
+
+        rule = "=" * 78
+        lines = [
+            rule,
+            f"SnapFlow distillation ENABLED at step {trainer.global_step} (epoch {trainer.current_epoch})",
+            f"  alpha={self.alpha:.2f}  lambda_={self.lambda_:.2f}  num_inference_steps={self.num_inference_steps}",
+            f"  trainable params: {_format_param_count(trainable)} / {_format_param_count(total)} "
+            f"({100 * trainable / max(1, total):.1f}%) - VLM backbone is now frozen",
+            "  Optimizer and LR scheduler rebuilt; phase 2 restarts the warmup.",
+            "  Expect slower steps: the consistency branch runs 3 velocity passes per sample.",
+        ]
+        if getattr(getattr(pl_module, "config", None), "compile_model", False):
+            lines.append(
+                "  compile_model is on: the first phase-2 step pays a one-time torch.compile "
+                "recompile (minutes, not a hang).",
+            )
+        lines.extend(
+            f"  checkpoints from here on: '{template}.ckpt' ('last.ckpt' is unchanged)" for template in renamed
+        )
+        lines.append(rule)
+        return "\n".join(lines)
 
     def _activate(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
         """Flip the policy into SnapFlow mode and rebuild the optimizer.
@@ -405,12 +577,6 @@ class SnapFlowPhaseCallback(Callback):
             TypeError: If ``pl_module`` does not expose an ``enable_snapflow``
                 method (i.e. is not a SmolVLA or Pi05 policy).
         """
-        logger.info(
-            "SnapFlowPhaseCallback: phase boundary reached at step %d / epoch %d, "
-            "starting SnapFlow activation",
-            trainer.global_step,
-            trainer.current_epoch,
-        )
         if not hasattr(pl_module, "enable_snapflow"):
             msg = (
                 f"{type(pl_module).__name__} does not implement enable_snapflow(); "
@@ -419,15 +585,6 @@ class SnapFlowPhaseCallback(Callback):
             raise TypeError(msg)
         policy = cast("SnapFlowCapable", pl_module)
 
-        logger.info(
-            "SnapFlowPhaseCallback: activating SnapFlow distillation at step %d / epoch %d "
-            "(alpha=%.2f, lambda_=%.2f, num_inference_steps=%d)",
-            trainer.global_step,
-            trainer.current_epoch,
-            self.alpha,
-            self.lambda_,
-            self.num_inference_steps,
-        )
         policy.enable_snapflow(
             alpha=self.alpha,
             lambda_=self.lambda_,
@@ -437,15 +594,22 @@ class SnapFlowPhaseCallback(Callback):
         # starts with a fresh optimizer state (no stale momentum from phase 1).
         trainer.strategy.setup_optimizers(trainer)
         self._activated = True
+        self._activated_at_step = trainer.global_step
 
-        trainable = sum(p.numel() for p in pl_module.parameters() if p.requires_grad)
-        total = sum(p.numel() for p in pl_module.parameters())
-        logger.info(
-            "SnapFlowPhaseCallback: phase-2 trainable params %.1fM / %.1fM (%.1f%%)",
-            trainable / 1e6,
-            total / 1e6,
-            100 * trainable / max(1, total),
-        )
+        renamed = self._prefix_checkpoint_filenames(trainer)
+        _print_banner(trainer, self._banner(trainer, pl_module, renamed))
+
+    @staticmethod
+    def _log_phase(pl_module: L.LightningModule) -> None:
+        """Surface the active SnapFlow phase in the progress bar.
+
+        Logged only while phase 2 is running, so the key's presence in the bar
+        is the indicator and phase 1 stays uncluttered.
+
+        Args:
+            pl_module: The policy being trained.
+        """
+        pl_module.log(SNAPFLOW_PROGRESS_BAR_KEY, 1.0, prog_bar=True, on_step=True, on_epoch=False)
 
     def on_train_epoch_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
         """Activate SnapFlow at an epoch boundary when configured with ``start_epoch``.
@@ -465,7 +629,7 @@ class SnapFlowPhaseCallback(Callback):
         batch: object,  # noqa: ARG002
         batch_idx: int,  # noqa: ARG002
     ) -> None:
-        """Activate SnapFlow at a step boundary when configured with ``start_step``.
+        """Activate SnapFlow at a step boundary and keep the phase visible thereafter.
 
         Args:
             trainer: The active Lightning trainer.
@@ -473,6 +637,7 @@ class SnapFlowPhaseCallback(Callback):
             batch: Current batch (unused).
             batch_idx: Current batch index within the epoch (unused).
         """
-        if self._activated or self.start_step is None or trainer.global_step < self.start_step:
-            return
-        self._activate(trainer, pl_module)
+        if not self._activated and self.start_step is not None and trainer.global_step >= self.start_step:
+            self._activate(trainer, pl_module)
+        if self._activated:
+            self._log_phase(pl_module)
