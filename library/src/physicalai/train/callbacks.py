@@ -6,11 +6,13 @@
 import logging
 import time
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
-import lightning as L  # noqa: N812
+import lightning as L  # ruff: ignore[lowercase-imported-as-non-lowercase]
+import torch
 from lightning.pytorch.callbacks import Callback, ModelCheckpoint
-from lightning.pytorch.utilities import rank_zero_only
+from lightning.pytorch.utilities import rank_zero_only, rank_zero_warn
 
 from physicalai.train.utils import reformat_dataset_to_match_policy
 
@@ -259,7 +261,7 @@ class ProgressReportingCallback(Callback):
         outputs: object,
         _batch: object,
         batch_idx: int,
-        dataloader_idx: int = 0,  # noqa: ARG002  # Lightning hook signature; unused here.
+        dataloader_idx: int = 0,  # ruff: ignore[unused-method-argument]  # Lightning hook signature; unused here.
     ) -> None:
         """Report a throttled validation batch; honor cancellation."""
         current = batch_idx + 1
@@ -385,6 +387,35 @@ class SnapFlowPhaseCallback(Callback):
         point. Use the checkpoint's ``snapflow`` metadata to tell which phase a
         given ``last.ckpt`` came from.
 
+    Note:
+        SnapFlow's shortcut target is bootstrapped from the model's own
+        marginal-velocity predictions, so distilling an undertrained teacher
+        distills noise. By default (``restore_best_teacher=True``), the
+        callback restores the best-``val/loss`` weights from a monitored
+        :class:`~lightning.pytorch.callbacks.ModelCheckpoint` *before* calling
+        ``enable_snapflow()``, rather than distilling whatever the live
+        in-memory model happens to be at the boundary. This requires a
+        ``ModelCheckpoint(monitor=..., mode=...)`` among ``trainer.callbacks``;
+        an unmonitored ``ModelCheckpoint`` (``monitor=None``) is ignored even if
+        its ``best_model_path`` is populated, because ``best_model_path`` on an
+        unmonitored checkpoint just means "most recent", not "best". If no
+        monitored checkpoint is configured, or it has not saved yet, the
+        callback warns and continues on the live weights. Set
+        ``restore_best_teacher=False`` to always use the live weights and
+        silence the warning.
+
+    Note:
+        ``val/loss`` is not comparable across the phase boundary: it measures
+        full-denoising action MSE at ``num_inference_steps`` steps before
+        activation, and at the (typically much lower, e.g. 1-NFE) SnapFlow
+        ``num_inference_steps`` afterwards. By default
+        (``scope_best_to_phase=True``), the callback resets every monitored
+        ``ModelCheckpoint``'s best-tracking state at the boundary, so phase-2's
+        best checkpoint is ranked only against other phase-2 checkpoints. The
+        phase-1 best checkpoint file is preserved on disk (not deleted) as the
+        distillation teacher's record. ``last.ckpt`` is unaffected. Set
+        ``scope_best_to_phase=False`` to keep phase-1 scores in the running.
+
     Args:
         start_step: Optimizer step at which to activate SnapFlow. Mutually
             exclusive with ``start_epoch``.
@@ -400,6 +431,16 @@ class SnapFlowPhaseCallback(Callback):
             template once SnapFlow activates, so phase-1 and phase-2
             checkpoints are distinguishable on disk. Set to ``None`` to leave
             filenames untouched.
+        restore_best_teacher: If ``True`` (default), restore the best-``val/loss``
+            checkpoint from a monitored ``ModelCheckpoint`` before enabling
+            SnapFlow. If ``False``, distill from the live in-memory model.
+        best_teacher_monitor: Disambiguates which monitored ``ModelCheckpoint``
+            to restore from when more than one is configured. Required (and
+            only used) when ``restore_best_teacher`` is ``True`` and multiple
+            monitored checkpoints are present.
+        scope_best_to_phase: If ``True`` (default), reset every monitored
+            ``ModelCheckpoint``'s best-tracking state at the boundary, so
+            phase-2's best checkpoint is ranked only against phase-2 scores.
 
     Example:
         >>> from physicalai.train.callbacks import SnapFlowPhaseCallback
@@ -419,6 +460,10 @@ class SnapFlowPhaseCallback(Callback):
         num_inference_steps: int = 1,
         start_epoch: int | None = None,
         checkpoint_prefix: str | None = "snapflow-",
+        *,
+        restore_best_teacher: bool = True,
+        best_teacher_monitor: str | None = None,
+        scope_best_to_phase: bool = True,
     ) -> None:
         """Store phase-transition hyperparameters.
 
@@ -431,6 +476,13 @@ class SnapFlowPhaseCallback(Callback):
             start_epoch: Epoch at which SnapFlow distillation begins.
             checkpoint_prefix: Prefix for ``ModelCheckpoint`` filename templates
                 from the boundary onwards, or ``None`` to leave them alone.
+            restore_best_teacher: Restore the best-``val/loss`` checkpoint
+                before activating SnapFlow. Default: ``True``.
+            best_teacher_monitor: Monitor name to disambiguate between multiple
+                monitored ``ModelCheckpoint`` callbacks.
+            scope_best_to_phase: Reset best-checkpoint tracking at the boundary
+                so phase-2 checkpoints are ranked only against phase-2 scores.
+                Default: ``True``.
 
         Raises:
             ValueError: If neither or both of ``start_step`` and ``start_epoch``
@@ -454,8 +506,12 @@ class SnapFlowPhaseCallback(Callback):
         self.lambda_ = lambda_
         self.num_inference_steps = num_inference_steps
         self.checkpoint_prefix = checkpoint_prefix
+        self.restore_best_teacher = restore_best_teacher
+        self.best_teacher_monitor = best_teacher_monitor
+        self.scope_best_to_phase = scope_best_to_phase
         self._activated = False
         self._activated_at_step: int | None = None
+        self._restored_teacher_path: str | None = None
 
     def state_dict(self) -> dict[str, object]:
         """Persist the activation state so a resume does not re-trigger phase 2.
@@ -463,7 +519,11 @@ class SnapFlowPhaseCallback(Callback):
         Returns:
             Callback state to embed in the checkpoint.
         """
-        return {"activated": self._activated, "activated_at_step": self._activated_at_step}
+        return {
+            "activated": self._activated,
+            "activated_at_step": self._activated_at_step,
+            "restored_teacher_path": self._restored_teacher_path,
+        }
 
     def load_state_dict(self, state_dict: dict[str, object]) -> None:
         """Restore the activation state from a checkpoint.
@@ -474,11 +534,13 @@ class SnapFlowPhaseCallback(Callback):
         self._activated = bool(state_dict.get("activated"))
         activated_at_step = state_dict.get("activated_at_step")
         self._activated_at_step = int(activated_at_step) if isinstance(activated_at_step, int) else None
+        restored_teacher_path = state_dict.get("restored_teacher_path")
+        self._restored_teacher_path = restored_teacher_path if isinstance(restored_teacher_path, str) else None
 
     def on_save_checkpoint(
         self,
-        trainer: L.Trainer,  # noqa: ARG002
-        pl_module: L.LightningModule,  # noqa: ARG002
+        trainer: L.Trainer,  # ruff: ignore[unused-method-argument]
+        pl_module: L.LightningModule,  # ruff: ignore[unused-method-argument]
         checkpoint: dict[str, Any],
     ) -> None:
         """Stamp the SnapFlow phase into every checkpoint this run writes.
@@ -531,13 +593,140 @@ class SnapFlowPhaseCallback(Callback):
             renamed.append(callback.filename)
         return renamed
 
-    def _banner(self, trainer: L.Trainer, pl_module: L.LightningModule, renamed: list[str]) -> str:
+    def _resolve_monitored_checkpoint(self, trainer: L.Trainer) -> ModelCheckpoint | None:
+        """Find the monitored ``ModelCheckpoint`` to restore the best teacher from.
+
+        Unmonitored ``ModelCheckpoint`` callbacks (``monitor=None``) are
+        deliberately excluded: Lightning still populates their
+        ``best_model_path`` with the most recently saved file, which means
+        "latest", not "best", and using it here would silently reintroduce the
+        exact bug this feature fixes.
+
+        Args:
+            trainer: The active Lightning trainer.
+
+        Returns:
+            The monitored ``ModelCheckpoint`` to use, or ``None`` if none is
+            configured.
+
+        Raises:
+            ValueError: If more than one monitored ``ModelCheckpoint`` is
+                configured and ``best_teacher_monitor`` does not disambiguate
+                between them.
+        """
+        monitored = [
+            callback
+            for callback in trainer.checkpoint_callbacks
+            if isinstance(callback, ModelCheckpoint) and callback.monitor is not None
+        ]
+        if self.best_teacher_monitor is not None:
+            monitored = [callback for callback in monitored if callback.monitor == self.best_teacher_monitor]
+        if not monitored:
+            return None
+        if len(monitored) > 1:
+            monitors = [callback.monitor for callback in monitored]
+            msg = (
+                "SnapFlowPhaseCallback found multiple monitored ModelCheckpoint callbacks "
+                f"({monitors}); set best_teacher_monitor to disambiguate which one to restore "
+                "the best teacher from."
+            )
+            raise ValueError(msg)
+        return monitored[0]
+
+    def _restore_best_teacher(self, trainer: L.Trainer, pl_module: L.LightningModule) -> str | None:
+        """Load the best-``val/loss`` checkpoint into ``pl_module`` before distillation.
+
+        Args:
+            trainer: The active Lightning trainer.
+            pl_module: The policy being trained; its weights are replaced in place.
+
+        Returns:
+            The restored checkpoint path, or ``None`` if nothing was restored
+            (no monitored checkpoint configured, or it has not saved yet).
+
+        Raises:
+            IsADirectoryError: If the resolved ``best_model_path`` is a
+                directory (a sharded FSDP/DeepSpeed checkpoint), which this
+                path cannot load.
+        """
+        ckpt_cb = self._resolve_monitored_checkpoint(trainer)
+        if ckpt_cb is None:
+            rank_zero_warn(
+                "SnapFlowPhaseCallback: restore_best_teacher=True but no monitored ModelCheckpoint "
+                "(ModelCheckpoint(monitor=..., mode=...)) was found among trainer.callbacks; "
+                "distilling from the live in-memory model instead. Add a monitored ModelCheckpoint "
+                "(e.g. monitor='val/loss', mode='min') to warm-start phase 2 from the best checkpoint, "
+                "or pass restore_best_teacher=False to silence this warning.",
+            )
+            return None
+        best_path = ckpt_cb.best_model_path
+        if not best_path:
+            rank_zero_warn(
+                f"SnapFlowPhaseCallback: monitored ModelCheckpoint(monitor={ckpt_cb.monitor!r}) has not "
+                "saved a best checkpoint yet (best_model_path is empty); distilling from the live "
+                "in-memory model instead.",
+            )
+            return None
+        if Path(best_path).is_dir():
+            msg = (
+                f"SnapFlowPhaseCallback cannot restore best_model_path={best_path!r}: it is a directory "
+                "(a sharded FSDP/DeepSpeed checkpoint), which this feature does not support. Pass "
+                "restore_best_teacher=False and handle the warm-start manually."
+            )
+            raise IsADirectoryError(msg)
+
+        trainer.strategy.barrier()
+        checkpoint = torch.load(best_path, map_location="cpu", weights_only=False)
+        pl_module.load_state_dict(checkpoint["state_dict"], strict=True)
+        return best_path
+
+    @staticmethod
+    def _reset_best_tracking(trainer: L.Trainer) -> list[str]:
+        """Reset every monitored ``ModelCheckpoint``'s best-tracking state.
+
+        ``val/loss`` is not comparable across the phase boundary (different
+        ``num_inference_steps``), so phase-1 scores must not keep phase-2
+        checkpoints from ever being recognized as "best". ``last_model_path``
+        is left untouched: ``last.ckpt`` stays the stable, phase-agnostic
+        resume point. Already-saved phase-1 checkpoint files are not deleted.
+
+        Args:
+            trainer: The active Lightning trainer.
+
+        Returns:
+            The monitor names of the ``ModelCheckpoint`` callbacks that were reset.
+        """
+        reset: list[str] = []
+        for callback in trainer.checkpoint_callbacks:
+            if not isinstance(callback, ModelCheckpoint) or callback.monitor is None:
+                continue
+            torch_inf = torch.tensor(torch.inf)
+            callback.kth_value = torch_inf if callback.mode == "min" else -torch_inf
+            callback.current_score = None
+            callback.best_k_models = {}
+            callback.kth_best_model_path = ""
+            callback.best_model_score = None
+            callback.best_model_path = ""
+            reset.append(callback.monitor)
+        return reset
+
+    def _banner(
+        self,
+        trainer: L.Trainer,
+        pl_module: L.LightningModule,
+        renamed: list[str],
+        restored_teacher_path: str | None,
+        reset_monitors: list[str],
+    ) -> str:
         """Build the human-facing phase-transition banner.
 
         Args:
             trainer: The active Lightning trainer.
             pl_module: The policy being trained.
             renamed: Checkpoint filename templates rewritten at the boundary.
+            restored_teacher_path: The checkpoint restored as the distillation
+                teacher, or ``None`` if the live in-memory model was used.
+            reset_monitors: Monitor names whose best-tracking state was reset.
 
         Returns:
             Multi-line banner text.
@@ -550,11 +739,24 @@ class SnapFlowPhaseCallback(Callback):
             rule,
             f"SnapFlow distillation ENABLED at step {trainer.global_step} (epoch {trainer.current_epoch})",
             f"  alpha={self.alpha:.2f}  lambda_={self.lambda_:.2f}  num_inference_steps={self.num_inference_steps}",
-            f"  trainable params: {_format_param_count(trainable)} / {_format_param_count(total)} "
-            f"({100 * trainable / max(1, total):.1f}%) - VLM backbone is now frozen",
+            (
+                f"  trainable params: {_format_param_count(trainable)} / {_format_param_count(total)} "
+                f"({100 * trainable / max(1, total):.1f}%) - VLM backbone is now frozen"
+            ),
             "  Optimizer and LR scheduler rebuilt; phase 2 restarts the warmup.",
             "  Expect slower steps: the consistency branch runs 3 velocity passes per sample.",
         ]
+        if restored_teacher_path is not None:
+            lines.append(f"  Distillation teacher: restored best checkpoint '{restored_teacher_path}'.")
+        elif self.restore_best_teacher:
+            lines.append("  Distillation teacher: live in-memory model (no monitored checkpoint found).")
+        else:
+            lines.append("  Distillation teacher: live in-memory model (restore_best_teacher=False).")
+        if reset_monitors:
+            lines.append(
+                f"  Best-checkpoint tracking reset for monitor(s) {reset_monitors}: "
+                "val/loss is not comparable across num_inference_steps.",
+            )
         if getattr(getattr(pl_module, "config", None), "compile_model", False):
             lines.append(
                 "  compile_model is on: the first phase-2 step pays a one-time torch.compile "
@@ -585,6 +787,9 @@ class SnapFlowPhaseCallback(Callback):
             raise TypeError(msg)
         policy = cast("SnapFlowCapable", pl_module)
 
+        restored_teacher_path = self._restore_best_teacher(trainer, pl_module) if self.restore_best_teacher else None
+        self._restored_teacher_path = restored_teacher_path
+
         policy.enable_snapflow(
             alpha=self.alpha,
             lambda_=self.lambda_,
@@ -596,8 +801,9 @@ class SnapFlowPhaseCallback(Callback):
         self._activated = True
         self._activated_at_step = trainer.global_step
 
+        reset_monitors = self._reset_best_tracking(trainer) if self.scope_best_to_phase else []
         renamed = self._prefix_checkpoint_filenames(trainer)
-        _print_banner(trainer, self._banner(trainer, pl_module, renamed))
+        _print_banner(trainer, self._banner(trainer, pl_module, renamed, restored_teacher_path, reset_monitors))
 
     @staticmethod
     def _log_phase(pl_module: L.LightningModule) -> None:
@@ -626,8 +832,8 @@ class SnapFlowPhaseCallback(Callback):
         self,
         trainer: L.Trainer,
         pl_module: L.LightningModule,
-        batch: object,  # noqa: ARG002
-        batch_idx: int,  # noqa: ARG002
+        batch: object,  # ruff: ignore[unused-method-argument]
+        batch_idx: int,  # ruff: ignore[unused-method-argument]
     ) -> None:
         """Activate SnapFlow at a step boundary and keep the phase visible thereafter.
 

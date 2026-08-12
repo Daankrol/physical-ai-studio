@@ -90,6 +90,45 @@ data:
     val_split: 0.1
     val_split_seed: 42
     val_batch_size: 16
+    image_transforms:
+      class_path: physicalai.transforms.RandomChoice
+      init_args:
+        n_subset: 3
+        random_order: false
+        transforms:
+          - class_path: torchvision.transforms.v2.ColorJitter
+            init_args:
+              brightness:
+                - 0.8
+                - 1.2
+          - class_path: torchvision.transforms.v2.ColorJitter
+            init_args:
+              contrast:
+                - 0.8
+                - 1.2
+          - class_path: torchvision.transforms.v2.ColorJitter
+            init_args:
+              saturation:
+                - 0.5
+                - 1.5
+          - class_path: torchvision.transforms.v2.ColorJitter
+            init_args:
+              hue:
+                - -0.05
+                - 0.05
+          - class_path: physicalai.transforms.RandomSharpness
+            init_args:
+              sharpness:
+                - 0.5
+                - 1.5
+          - class_path: torchvision.transforms.v2.RandomAffine
+            init_args:
+              degrees:
+                - -5.0
+                - 5.0
+              translate:
+                - 0.05
+                - 0.05
 
 trainer:
   # Total budget = phase 1 (epochs 0-4) + phase 2 (epochs 5-7).
@@ -107,21 +146,20 @@ trainer:
         alpha: 0.5 # FM-loss weight (paper)
         lambda_: 0.1 # shortcut-loss scale (paper)
         num_inference_steps: 1 # 1-NFE inference
-    # Keep every staged checkpoint from both phases so you can compare how much
-    # finetuning and how much distillation each contributed. From the boundary
-    # onwards the callback prefixes this template with "snapflow-", so phase-2
-    # checkpoints are "snapflow-epoch012.ckpt". "last.ckpt" keeps its name.
+    # Monitored -> best_model_path restores the best phase-1 teacher before
+    # SnapFlow activates, then gets reset to track phase-2's own best (see
+    # snapflow_distillation.md). save_top_k=3 keeps the 3 best per phase.
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        every_n_epochs: 2
-        save_top_k: -1
-        save_last: True
+        monitor: val/loss
+        mode: min
+        save_top_k: 1
         filename: "epoch{epoch:03d}"
         auto_insert_metric_name: false
-        dirpath: /mnt/data/experiments/snapflow-multi-object
+        dirpath: /mnt/data/experiments/snapflow-multi-object-augment-best-ckpt
   logger:
     class_path: lightning.pytorch.loggers.WandbLogger
     init_args:
       project: "physicalai_snapflow"
-      name: "pi05_finetune_and_distill_no_augment"
+      name: "pi05_finetune_and_snapflow_augment_best_ckpt"
       log_model: false

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import lightning as L
 import pytest
+import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
 
 from physicalai.train.callbacks import (
@@ -26,7 +27,7 @@ def _loss(value: float) -> MagicMock:
 
 
 def _trainer(
-    *, global_step: int, max_steps: int, estimated_steps: int | None = None, epoch: int = 0
+    *, global_step: int, max_steps: int, estimated_steps: int | None = None, epoch: int = 0,
 ) -> MagicMock:
     trainer = MagicMock(spec=L.Trainer)
     trainer.global_step = global_step
@@ -298,7 +299,11 @@ class TestSnapFlowPhaseCallback:
         cb = SnapFlowPhaseCallback(start_step=100)
         policy = self._policy()
         cb.on_train_batch_start(_trainer(global_step=100, max_steps=200), policy, None, 0)
-        assert cb.state_dict() == {"activated": True, "activated_at_step": 100}
+        assert cb.state_dict() == {
+            "activated": True,
+            "activated_at_step": 100,
+            "restored_teacher_path": None,
+        }
 
         resumed = SnapFlowPhaseCallback(start_step=100)
         resumed.load_state_dict(cb.state_dict())
@@ -308,9 +313,17 @@ class TestSnapFlowPhaseCallback:
 
     def test_fresh_callback_reports_not_activated(self) -> None:
         cb = SnapFlowPhaseCallback(start_epoch=5)
-        assert cb.state_dict() == {"activated": False, "activated_at_step": None}
+        assert cb.state_dict() == {
+            "activated": False,
+            "activated_at_step": None,
+            "restored_teacher_path": None,
+        }
         cb.load_state_dict({})
-        assert cb.state_dict() == {"activated": False, "activated_at_step": None}
+        assert cb.state_dict() == {
+            "activated": False,
+            "activated_at_step": None,
+            "restored_teacher_path": None,
+        }
 
     def test_phase_metric_absent_before_activation_and_present_after(self) -> None:
         """The metric's presence in the progress bar is itself the phase indicator."""
@@ -423,3 +436,213 @@ class TestSnapFlowPhaseCallback:
 
         banner = trainer.progress_bar_callback.print.call_args[0][0]
         assert "compile_model is on" in banner
+
+
+class TestSnapFlowPhaseCallbackBestCheckpoint:
+    """Tests for restore-best-teacher and phase-scoped best-tracking behavior."""
+
+    @staticmethod
+    def _policy(*, compile_model: bool = False) -> MagicMock:
+        policy = MagicMock(spec=["enable_snapflow", "parameters", "log", "config", "load_state_dict"])
+        policy.parameters.return_value = []
+        policy.config = SimpleNamespace(compile_model=compile_model)
+        return policy
+
+    @staticmethod
+    def _monitored_checkpoint(
+        *,
+        monitor: str = "val/loss",
+        mode: str = "min",
+        best_model_path: str = "/ckpt/phase1-best.ckpt",
+    ) -> MagicMock:
+        """A stand-in monitored ModelCheckpoint with a populated best_model_path."""
+        ckpt = MagicMock(spec=ModelCheckpoint)
+        ckpt.monitor = monitor
+        ckpt.mode = mode
+        ckpt.best_model_path = best_model_path
+        ckpt.last_model_path = "/ckpt/last.ckpt"
+        ckpt.filename = "epoch{epoch:03d}"
+        return ckpt
+
+    def test_restores_best_teacher_before_enabling_snapflow(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loaded = {}
+
+        def fake_load(path, map_location=None, weights_only=None):  # ruff: ignore[missing-type-function-argument, unused-function-argument]
+            loaded["path"] = path
+            return {"state_dict": {"fake": "weights"}}
+
+        monkeypatch.setattr("physicalai.train.callbacks.torch.load", fake_load)
+
+        cb = SnapFlowPhaseCallback(start_step=100)
+        ckpt_cb = self._monitored_checkpoint()
+        policy = self._policy()
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [ckpt_cb]
+
+        call_order: list[str] = []
+        policy.load_state_dict.side_effect = lambda *a, **k: call_order.append("load_state_dict")  # ruff: ignore[unused-lambda-argument]
+        policy.enable_snapflow.side_effect = lambda *a, **k: call_order.append("enable_snapflow")  # ruff: ignore[unused-lambda-argument]
+
+        cb.on_train_batch_start(trainer, policy, None, 0)
+
+        assert loaded["path"] == "/ckpt/phase1-best.ckpt"
+        policy.load_state_dict.assert_called_once_with({"fake": "weights"}, strict=True)
+        assert call_order == ["load_state_dict", "enable_snapflow"]
+        assert cb.state_dict()["restored_teacher_path"] == "/ckpt/phase1-best.ckpt"
+
+    def test_warns_and_continues_when_no_monitored_checkpoint(self) -> None:
+        cb = SnapFlowPhaseCallback(start_step=100)
+        policy = self._policy()
+        # Only an unmonitored ModelCheckpoint present.
+        unmonitored = ModelCheckpoint()
+        unmonitored.best_model_path = "/ckpt/most-recent.ckpt"  # populated but meaningless: monitor=None
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [unmonitored]
+
+        with pytest.warns(UserWarning, match="no monitored ModelCheckpoint"):
+            cb.on_train_batch_start(trainer, policy, None, 0)
+
+        policy.load_state_dict.assert_not_called()
+        policy.enable_snapflow.assert_called_once()
+        assert cb.state_dict()["restored_teacher_path"] is None
+
+    def test_warns_when_monitored_checkpoint_has_not_saved_yet(self) -> None:
+        cb = SnapFlowPhaseCallback(start_step=100)
+        policy = self._policy()
+        ckpt_cb = self._monitored_checkpoint(best_model_path="")
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [ckpt_cb]
+
+        with pytest.warns(UserWarning, match="has not saved a best checkpoint"):
+            cb.on_train_batch_start(trainer, policy, None, 0)
+
+        policy.load_state_dict.assert_not_called()
+
+    def test_restore_best_teacher_can_be_disabled(self) -> None:
+        cb = SnapFlowPhaseCallback(start_step=100, restore_best_teacher=False)
+        policy = self._policy()
+        ckpt_cb = self._monitored_checkpoint()
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [ckpt_cb]
+
+        cb.on_train_batch_start(trainer, policy, None, 0)
+
+        policy.load_state_dict.assert_not_called()
+        assert cb.state_dict()["restored_teacher_path"] is None
+
+    def test_multiple_monitored_checkpoints_require_disambiguation(self) -> None:
+        cb = SnapFlowPhaseCallback(start_step=100)
+        policy = self._policy()
+        ckpt_a = self._monitored_checkpoint(monitor="val/loss", best_model_path="/ckpt/a.ckpt")
+        ckpt_b = self._monitored_checkpoint(monitor="val/other", best_model_path="/ckpt/b.ckpt")
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [ckpt_a, ckpt_b]
+
+        with pytest.raises(ValueError, match="multiple monitored ModelCheckpoint"):
+            cb.on_train_batch_start(trainer, policy, None, 0)
+
+    def test_best_teacher_monitor_disambiguates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "physicalai.train.callbacks.torch.load",
+            lambda *a, **k: {"state_dict": {}},  # ruff: ignore[unused-lambda-argument]
+        )
+        cb = SnapFlowPhaseCallback(start_step=100, best_teacher_monitor="val/other")
+        policy = self._policy()
+        ckpt_a = self._monitored_checkpoint(monitor="val/loss", best_model_path="/ckpt/a.ckpt")
+        ckpt_b = self._monitored_checkpoint(monitor="val/other", best_model_path="/ckpt/b.ckpt")
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [ckpt_a, ckpt_b]
+
+        cb.on_train_batch_start(trainer, policy, None, 0)
+
+        assert cb.state_dict()["restored_teacher_path"] == "/ckpt/b.ckpt"
+
+    def test_directory_best_model_path_raises(self, tmp_path) -> None:  # ruff: ignore[missing-type-function-argument]
+        cb = SnapFlowPhaseCallback(start_step=100)
+        policy = self._policy()
+        ckpt_cb = self._monitored_checkpoint(best_model_path=str(tmp_path))
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [ckpt_cb]
+
+        with pytest.raises(IsADirectoryError, match="sharded FSDP/DeepSpeed"):
+            cb.on_train_batch_start(trainer, policy, None, 0)
+
+    def test_reset_clears_best_tracking_but_preserves_last(self) -> None:
+        cb = SnapFlowPhaseCallback(start_step=100, restore_best_teacher=False)
+        policy = self._policy()
+        ckpt_cb = ModelCheckpoint(monitor="val/loss", mode="min")
+        ckpt_cb.best_model_score = torch.tensor(0.1)
+        ckpt_cb.best_model_path = "/ckpt/phase1-best.ckpt"
+        ckpt_cb.best_k_models = {"/ckpt/phase1-best.ckpt": torch.tensor(0.1)}
+        ckpt_cb.kth_best_model_path = "/ckpt/phase1-best.ckpt"
+        ckpt_cb.kth_value = torch.tensor(0.1)
+        ckpt_cb.current_score = torch.tensor(0.1)
+        ckpt_cb.last_model_path = "/ckpt/last.ckpt"
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [ckpt_cb]
+
+        cb.on_train_batch_start(trainer, policy, None, 0)
+
+        assert ckpt_cb.best_model_path == ""
+        assert ckpt_cb.best_model_score is None
+        assert ckpt_cb.best_k_models == {}
+        assert ckpt_cb.kth_best_model_path == ""
+        assert ckpt_cb.current_score is None
+        assert ckpt_cb.kth_value == torch.tensor(torch.inf)
+        # last.ckpt is the stable phase-agnostic resume point; must be untouched.
+        assert ckpt_cb.last_model_path == "/ckpt/last.ckpt"
+
+    def test_scope_best_to_phase_can_be_disabled(self) -> None:
+        cb = SnapFlowPhaseCallback(start_step=100, restore_best_teacher=False, scope_best_to_phase=False)
+        policy = self._policy()
+        ckpt_cb = ModelCheckpoint(monitor="val/loss", mode="min")
+        ckpt_cb.best_model_path = "/ckpt/phase1-best.ckpt"
+        ckpt_cb.best_model_score = torch.tensor(0.1)
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [ckpt_cb]
+
+        cb.on_train_batch_start(trainer, policy, None, 0)
+
+        assert ckpt_cb.best_model_path == "/ckpt/phase1-best.ckpt"
+        assert ckpt_cb.best_model_score == torch.tensor(0.1)
+
+    def test_restore_happens_before_reset_so_phase1_best_is_still_visible(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The restore must read best_model_path before the reset clears it."""
+        monkeypatch.setattr(
+            "physicalai.train.callbacks.torch.load",
+            lambda *a, **k: {"state_dict": {}},  # ruff: ignore[unused-lambda-argument]
+        )
+        cb = SnapFlowPhaseCallback(start_step=100)
+        policy = self._policy()
+        ckpt_cb = ModelCheckpoint(monitor="val/loss", mode="min")
+        ckpt_cb.best_model_path = "/ckpt/phase1-best.ckpt"
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [ckpt_cb]
+
+        cb.on_train_batch_start(trainer, policy, None, 0)
+
+        assert cb.state_dict()["restored_teacher_path"] == "/ckpt/phase1-best.ckpt"
+        assert ckpt_cb.best_model_path == ""  # reset afterward
+
+    def test_banner_reports_restored_teacher_and_reset_monitors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "physicalai.train.callbacks.torch.load",
+            lambda *a, **k: {"state_dict": {}},  # ruff: ignore[unused-lambda-argument]
+        )
+        cb = SnapFlowPhaseCallback(start_step=100)
+        policy = self._policy()
+        ckpt_cb = self._monitored_checkpoint()
+        trainer = _trainer(global_step=100, max_steps=200)
+        trainer.checkpoint_callbacks = [ckpt_cb]
+
+        cb.on_train_batch_start(trainer, policy, None, 0)
+
+        banner = trainer.progress_bar_callback.print.call_args[0][0]
+        assert "restored best checkpoint '/ckpt/phase1-best.ckpt'" in banner
+        assert "Best-checkpoint tracking reset for monitor(s)" in banner

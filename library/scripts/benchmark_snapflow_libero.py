@@ -169,7 +169,7 @@ def train_phase2() -> Path:
     """Distill the phase-1 teacher into a 1-NFE SnapFlow model.
 
     Returns:
-        Path to the final checkpoint.
+        Path to the best (lowest ``val/loss``) checkpoint seen during distillation.
     """
     save_dir = OUTPUT_DIR / "phase2_snapflow"
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -201,6 +201,17 @@ def train_phase2() -> Path:
         save_last=True,
         auto_insert_metric_name=False,
     )
+    # Separate best-val-loss tracker: distillation loss can wobble near the end of
+    # the budget, so benchmarking should use the lowest-val/loss checkpoint rather
+    # than whatever happens to be last.
+    best_ckpt_cb = ModelCheckpoint(
+        dirpath=str(save_dir),
+        filename="snapflow-best",
+        monitor="val/loss",
+        mode="min",
+        save_top_k=1,
+        auto_insert_metric_name=False,
+    )
     datamodule = LeRobotDataModule(
         repo_id=DATASET,
         train_batch_size=BATCH_SIZE,
@@ -211,7 +222,7 @@ def train_phase2() -> Path:
         val_batch_size=BATCH_SIZE,
     )
     logger_ = _make_logger(save_dir)
-    callbacks: list = [ckpt_cb]
+    callbacks: list = [ckpt_cb, best_ckpt_cb]
     if logger_ is not None:
         callbacks.append(LearningRateMonitor(logging_interval="step"))
     try:
@@ -228,8 +239,16 @@ def train_phase2() -> Path:
             check_val_every_n_epoch=None,
         ).fit(model=policy, datamodule=datamodule)
 
-        ckpt = Path(ckpt_cb.last_model_path or ckpt_cb.best_model_path)
-        print(f"Phase-2 checkpoint: {ckpt}", flush=True)
+        if best_ckpt_cb.best_model_path:
+            ckpt = Path(best_ckpt_cb.best_model_path)
+            print(
+                f"Phase-2 best checkpoint (val/loss={best_ckpt_cb.best_model_score:.4f}): {ckpt}",
+                flush=True,
+            )
+        else:
+            # VAL_SPLIT == 0 (no val/loss logged) -> nothing to rank, fall back to last.
+            ckpt = Path(ckpt_cb.last_model_path or ckpt_cb.best_model_path)
+            print(f"Phase-2 checkpoint (no val/loss available; using last): {ckpt}", flush=True)
         return ckpt
     finally:
         if logger_ is not None:

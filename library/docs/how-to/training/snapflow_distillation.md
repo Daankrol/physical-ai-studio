@@ -80,17 +80,21 @@ trainer:
         alpha: 0.5
         lambda_: 0.1
         num_inference_steps: 1
+    # monitor set -> best_model_path also feeds SnapFlowPhaseCallback's default
+    # restore_best_teacher. See "Which checkpoint phase 2 distills from" below.
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        every_n_epochs: 2
-        save_top_k: -1 # keep every staged checkpoint
-        save_last: true
+        monitor: val/loss
+        mode: min
+        save_top_k: 3 # keep the 3 best of each phase (6 files total)
         filename: "epoch{epoch:03d}"
         auto_insert_metric_name: false
 ```
 
 Note the YAML key is `lambda_`, with a trailing underscore (`lambda` is a Python
-keyword).
+keyword). `every_n_epochs` is left at its default of `1` (matching
+`check_val_every_n_epoch: 1`) so `monitor` sees every epoch — coarsening it
+would let the true best epoch slip through.
 
 At the boundary the callback:
 
@@ -119,7 +123,7 @@ SnapFlow distillation ENABLED at step 30000 (epoch 10)
   trainable params: 311.9M / 3138.4M (9.9%) - VLM backbone is now frozen
   Optimizer and LR scheduler rebuilt; phase 2 restarts the warmup.
   Expect slower steps: the consistency branch runs 3 velocity passes per sample.
-  checkpoints from here on: 'snapflow-epoch{epoch:03d}.ckpt' ('last.ckpt' is unchanged)
+  checkpoints from here on: 'snapflow-epoch{epoch:03d}.ckpt'
 ==============================================================================
 ```
 
@@ -134,14 +138,15 @@ Epoch 10/13 ━━━━━━━━━╺━━━━━━ 812/1875 train/loss
 staged run is unambiguous on disk:
 
 ```text
-epoch008.ckpt            <- phase 1, flow matching
-snapflow-epoch012.ckpt   <- phase 2, distilled
-last.ckpt                <- always the newest, whichever phase
+epoch008.ckpt            <- phase 1, top-3 best-val-loss
+epoch009.ckpt            <- phase 1, top-3 best-val-loss
+epoch010.ckpt            <- phase 1, top-3 best-val-loss (the true best)
+snapflow-epoch012.ckpt   <- phase 2, top-3 best-val-loss (1-NFE), distilled
+snapflow-epoch013.ckpt   <- phase 2, top-3 best-val-loss (1-NFE), distilled
 ```
 
-`last.ckpt` keeps its stock name on purpose, so resuming always has a stable
-entry point. Change the prefix with `checkpoint_prefix: "distilled-"`, or set it
-to `null` to leave filenames alone. Every checkpoint also carries the phase in
+Change the prefix with `checkpoint_prefix: "distilled-"`, or set it to `null`
+to leave filenames alone. Every checkpoint also carries the phase in
 machine-readable form:
 
 ```python
@@ -151,6 +156,36 @@ ckpt = torch.load("snapflow-epoch012.ckpt", weights_only=False)
 print(ckpt["snapflow"])
 # {'enabled': True, 'alpha': 0.5, 'lambda_': 0.1,
 #  'num_inference_steps': 1, 'activated_at_step': 30000}
+```
+
+### Which checkpoint phase 2 distills from
+
+SnapFlow's shortcut target is bootstrapped from the model's own velocity
+predictions, so distilling an undertrained phase-1 model distills noise.
+
+By default (`restore_best_teacher: true`), at the boundary the callback loads
+the best-`val/loss` weights from a monitored `ModelCheckpoint`
+(`monitor is not None` — an unmonitored one is ignored, since its
+`best_model_path` just means "latest") **before** calling `enable_snapflow()`.
+If none is configured or it hasn't saved yet, it warns and falls back to the
+live model. Set `restore_best_teacher: false` to always use the live model;
+set `best_teacher_monitor` if more than one monitored checkpoint exists.
+
+`val/loss` is also not comparable across the boundary: `compute_val_loss` runs
+the full denoising loop, so its step count drops from `num_inference_steps`
+to SnapFlow's (typically 1-NFE) count the instant the objective changes.
+Ranking phase-2 checkpoints against phase-1 scores would almost always favor
+an un-distilled checkpoint. So, by default (`scope_best_to_phase: true`), the
+callback also resets the monitored checkpoint's tracking state at the
+boundary, so it tracks phase-2's own best from a clean slate — nothing on
+disk is deleted by the reset. Set `scope_best_to_phase: false` to keep phase-1
+scores in the running (not recommended).
+
+The banner reports both actions:
+
+```text
+  Distillation teacher: restored best checkpoint '/mnt/data/experiments/snapflow-multi-object-augment/epoch010.ckpt'.
+  Best-checkpoint tracking reset for monitor(s) ['val/loss']: val/loss is not comparable across num_inference_steps.
 ```
 
 **The first phase-2 step is slow.** Two independent reasons:
@@ -239,12 +274,24 @@ Two things to be aware of:
 
 ## Option 3 — Python API
 
+Prefer warm-starting phase 2 from the **best** phase-1 checkpoint (lowest
+`val/loss`), not just whatever happens to be `last.ckpt`. Add a
+`monitor="val/loss", mode="min"` `ModelCheckpoint` to the phase-1 run and use
+its `best_model_path`:
+
+```python
+from lightning.pytorch.callbacks import ModelCheckpoint
+
+best_ckpt_cb = ModelCheckpoint(monitor="val/loss", mode="min", save_top_k=1)
+Trainer(max_epochs=10, callbacks=[best_ckpt_cb]).fit(phase1_policy, datamodule=datamodule)
+```
+
 ```python
 from physicalai.policies import Pi05
 from physicalai.train import Trainer
 
 policy = Pi05.load_from_checkpoint(
-    "experiments/phase1/last.ckpt",
+    best_ckpt_cb.best_model_path,  # or any known-good checkpoint path
     map_location="cpu",
     snapflow_enabled=True,
     snapflow_alpha=0.5,
@@ -274,6 +321,9 @@ policy.enable_snapflow(alpha=0.5, lambda_=0.1, num_inference_steps=1)
 | `lambda_`                | `0.1`                    | Shortcut-loss scale, balances the two gradient magnitudes.             |
 | `num_inference_steps`    | `1`                      | `1` gives the full SnapFlow speedup; raise it for intermediate modes.  |
 | `checkpoint_prefix`      | `"snapflow-"`            | Marks phase-2 checkpoints on disk. `null` disables the rewrite.        |
+| `restore_best_teacher`   | `true`                   | Restore the monitored `ModelCheckpoint`'s best-val-loss weights before enabling SnapFlow, instead of distilling the live model. |
+| `best_teacher_monitor`   | `None`                   | Disambiguates which monitored `ModelCheckpoint` to restore from when more than one is configured. |
+| `scope_best_to_phase`    | `true`                   | Reset best-checkpoint tracking at the boundary, since `val/loss` is not comparable across `num_inference_steps`. |
 | Phase-1 budget           | 5-10 epochs              | Fewer for a warm-started VLA than for from-scratch training.           |
 | Phase-2 budget           | ~3-5 epochs (~30k steps) | Short because the target-time embedding is zero-initialised.           |
 | `scheduler_warmup_steps` | ~5% of total steps       | No fractional option exists; compute it from your dataset (below).     |
@@ -304,30 +354,33 @@ step N / epoch M` appeared, followed by the phase-2 trainable-parameter
   count. That count should be roughly 10% of total parameters.
 - `train/loss` shifts level at the boundary — expected, the objective changed.
   It should settle rather than diverge.
-- `val/loss` (full-denoising action MSE) does not regress. Because the
-  target-time embedding is zero-initialised, phase 2 starts at teacher parity;
-  a large immediate jump means something is misconfigured.
+- `val/loss` shifts level at the boundary too — expected, since its step count
+  drops from `num_inference_steps` to SnapFlow's (typically 1-NFE) count the
+  instant the objective changes (see "Which checkpoint phase 2 distills from").
+  Within phase 2 it should trend down or hold steady; a steady climb means
+  something is misconfigured.
 - Every VLM parameter reports `requires_grad == False`:
 
   ```python
   frozen = [n for n, p in policy.named_parameters() if not p.requires_grad]
   ```
 
-- A 1-step benchmark matches or beats the multi-step teacher:
+- A 1-step benchmark matches or beats the multi-step teacher. Prefer phase 2's
+  best checkpoint (`ckpt_cb.best_model_path`), not just the last epoch saved:
 
   ```bash
   physicalai benchmark --config configs/benchmark/libero.yaml \
-      --ckpt_path experiments/.../last.ckpt
+      --ckpt_path experiments/.../snapflow-epoch013.ckpt
   ```
 
 ## Exporting the distilled policy
 
 The SnapFlow checkpoint exports like any other policy. The exported artifact
 carries the 1-NFE sampling path, which is where the latency win materialises for
-Runtime:
+Runtime. As with benchmarking, prefer phase 2's best checkpoint:
 
 ```bash
-physicalai export --ckpt_path experiments/.../last.ckpt --backend openvino
+physicalai export --ckpt_path experiments/.../snapflow-epoch013.ckpt --backend openvino
 ```
 
 See [Export and deploy](../export/export_inference.md).
