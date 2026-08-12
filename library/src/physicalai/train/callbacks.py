@@ -676,7 +676,11 @@ class SnapFlowPhaseCallback(Callback):
             raise IsADirectoryError(msg)
 
         trainer.strategy.barrier()
-        checkpoint = torch.load(best_path, map_location="cpu", weights_only=False)
+        # weights_only=False: Lightning checkpoints bundle hparams/callback state beyond
+        # tensors, which the restricted unpickler rejects; this loads a checkpoint written
+        # by this same trainer run, not untrusted input.
+        # nosemgrep: trailofbits.python.pickles-in-pytorch.pickles-in-pytorch
+        checkpoint = torch.load(best_path, map_location="cpu", weights_only=False)  # nosec B614
         pl_module.load_state_dict(checkpoint["state_dict"], strict=True)
         return best_path
 
