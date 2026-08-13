@@ -167,6 +167,15 @@ override-dependencies = [
     "diffusers>=0.38.0",
 ]
 
+# opencv-python and opencv-python-headless both install into the same `cv2/`
+# site-packages directory. lerobot/physicalai pin opencv-python-headless while
+# robosuite/hf-libero/gym-pusht pin opencv-python; if both get resolved, their
+# files interleave and produce a broken, partially initialized `cv2` module
+# (e.g. AttributeError: partially initialized module 'cv2' has no attribute
+# 'gapi_wip_gst_GStreamerPipeline'). Exclude the GUI variant so only the
+# headless build is installed; it provides the same API surface needed here.
+exclude-dependencies = ["opencv-python"]
+
 
 conflicts = [
     [{ extra = "cpu" }, { extra = "cu128" }, { extra = "xpu" }],
