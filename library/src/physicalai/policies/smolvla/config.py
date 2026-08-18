@@ -17,13 +17,15 @@ Example (API):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from physicalai.training_config import Config
+from physicalai.config import Config
+
+from physicalai.policies.mixins import SnapFlowConfigMixin
 
 
 @dataclass(frozen=True)
-class SmolVLAConfig(Config):
+class SmolVLAConfig(SnapFlowConfigMixin, Config):
     """Configuration for SmolVLA flow matching model.
 
     Attributes:
@@ -34,8 +36,11 @@ class SmolVLAConfig(Config):
         max_action_dim: Maximum dimension for action vectors; shorter vectors will be padded. Defaults to 32.
         resize_imgs_with_padding: Target size (height, width) for image preprocessing with padding.
             Defaults to (512, 512).
-        empty_cameras: Number of empty camera images to add. Used by smolvla_aloha_sim for adding empty wrist cameras.
-            Defaults to 0.
+        image_key_reorder_map: Optional mapping from dataset camera keys to policy camera indices.
+            This is applied in preprocessing before image stacking. Defaults to {}.
+        num_cameras: Total number of camera slots expected by the policy. Slots not covered by the batch
+            image keys (or by ``image_key_reorder_map``) are filled with masked empty cameras. Values <= 0
+            keep only the batch cameras. Defaults to 0.
         adapt_to_pi_aloha: Whether to convert joint and gripper values from standard Aloha space to pi internal
             runtime space. Defaults to False.
         tokenizer_max_length: Maximum length for tokenizer output. Defaults to 48.
@@ -68,16 +73,9 @@ class SmolVLAConfig(Config):
         max_period: Maximum period for sine-cosine positional encoding of timesteps. Defaults to 4.0.
         use_random_input_noise: Whether to use random noise as the initial input for the denoising process
             during inference. If False, zeros are used instead. Defaults to True.
-        snapflow_enabled: Enable SnapFlow self-distillation training mode for 1-NFE inference.
-            When True, training mixes standard flow-matching with consistency objectives.
-            See: arxiv.org/abs/2604.05656. Defaults to False.
-        snapflow_alpha: Mixing ratio between FM and consistency objectives. ``alpha`` fraction of samples
-            use standard flow-matching loss, ``1-alpha`` use the two-step Euler shortcut consistency loss.
-            Must be in [0, 1]. Defaults to 0.5.
-        snapflow_lambda: Weight for the consistency (shortcut) loss component. Balances gradient magnitudes
-            between FM and consistency objectives. Defaults to 1.0.
-        snapflow_num_inference_steps: Number of denoising steps at inference when SnapFlow is enabled.
-            Set to 1 for single-step (1-NFE) generation. Defaults to 1.
+
+    See :class:`~physicalai.policies.mixins.SnapFlowConfigMixin` for the
+    inherited ``snapflow_*`` attributes.
     """
 
     n_obs_steps: int = 1
@@ -89,7 +87,9 @@ class SmolVLAConfig(Config):
 
     resize_imgs_with_padding: tuple[int, int] = (512, 512)
 
-    empty_cameras: int = 0
+    image_key_reorder_map: dict[str, int] = field(default_factory=dict)
+
+    num_cameras: int = 0
 
     adapt_to_pi_aloha: bool = False
 
@@ -138,12 +138,6 @@ class SmolVLAConfig(Config):
 
     compile_model: bool = False
 
-    # SnapFlow self-distillation (arxiv.org/abs/2604.05656)
-    snapflow_enabled: bool = False
-    snapflow_alpha: float = 0.5
-    snapflow_lambda: float = 1.0
-    snapflow_num_inference_steps: int = 1
-
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization.
 
@@ -151,7 +145,8 @@ class SmolVLAConfig(Config):
         as the chunk size represents the upper bound for action steps per model invocation.
 
         Raises:
-            ValueError: If n_action_steps is greater than chunk_size.
+            ValueError: If n_action_steps is greater than chunk_size, or if a
+                SnapFlow flag falls outside its valid range.
         """
         if self.n_action_steps > self.chunk_size:
             msg = (
@@ -160,9 +155,4 @@ class SmolVLAConfig(Config):
             )
             raise ValueError(msg)
 
-        if not 0.0 <= self.snapflow_alpha <= 1.0:
-            msg = f"snapflow_alpha must be in [0, 1], got {self.snapflow_alpha}"
-            raise ValueError(msg)
-        if self.snapflow_num_inference_steps < 1:
-            msg = f"snapflow_num_inference_steps must be >= 1, got {self.snapflow_num_inference_steps}"
-            raise ValueError(msg)
+        self._validate_snapflow()

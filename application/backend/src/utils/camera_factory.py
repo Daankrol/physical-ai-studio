@@ -12,28 +12,29 @@ from loguru import logger
 from physicalai.capture import CameraType, ColorMode, SharedCamera
 
 if TYPE_CHECKING:
-    from physicalai.config import ComponentConfig
-
     from schemas.project_camera import Camera
 
-MIGRATED_DRIVERS: frozenset[str] = frozenset({"usb_camera", "realsense", "basler"})
+MIGRATED_DRIVERS: frozenset[str] = frozenset({"usb_camera", "realsense", "basler", "ipcam"})
 
 DRIVER_KEY_MAP: dict[str, str] = {
     "uvc": "usb_camera",
     "realsense": "realsense",
     "basler": "basler",
+    "ipcam": "ipcam",
 }
 
 _DRIVER_TO_CAMERA_TYPE: dict[str, CameraType] = {
     "usb_camera": CameraType.UVC,
     "realsense": CameraType.REALSENSE,
     "basler": CameraType.BASLER,
+    "ipcam": CameraType.IP,
 }
 
 _DRIVER_TO_CLASS_PATH: dict[str, str] = {
     "usb_camera": "physicalai.capture.UVCCamera",
     "realsense": "physicalai.capture.RealSenseCamera",
     "basler": "physicalai.capture.BaslerCamera",
+    "ipcam": "physicalai.capture.IPCamera",
 }
 
 # Per-driver kwargs that are safe to pass through to the nested camera recipe.
@@ -41,10 +42,11 @@ _ALLOWED_KWARGS: dict[str, frozenset[str]] = {
     "usb_camera": frozenset({"width", "height", "fps"}),
     "realsense": frozenset({"width", "height", "fps"}),
     "basler": frozenset({"width", "height", "fps"}),
+    "ipcam": frozenset({"width", "height", "fps", "url"}),
 }
 
 
-def _camera_component_config(config: Camera) -> ComponentConfig:
+def _camera_component_config(config: Camera) -> dict[str, Any]:
     class_path = _DRIVER_TO_CLASS_PATH[config.driver]
     allowed = _ALLOWED_KWARGS.get(config.driver, frozenset())
 
@@ -57,7 +59,7 @@ def _camera_component_config(config: Camera) -> ComponentConfig:
         if fingerprint.startswith("/dev/video") and ":" in fingerprint:
             fingerprint = fingerprint.split(":")[0]
         init_args["device"] = fingerprint
-    else:
+    elif config.driver != "ipcam":
         init_args["serial_number"] = config.fingerprint
 
     return {"class_path": class_path, "init_args": init_args}

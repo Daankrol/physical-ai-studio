@@ -4,7 +4,7 @@
 """Shared LoRA/DoRA configuration fields for Studio policy configs.
 
 Any policy ``Config`` dataclass that wants LoRA support mixes in
-:class:`PeftConfigMixin` alongside :class:`physicalai.training_config.Config`, e.g.::
+:class:`PeftConfigMixin` alongside :class:`physicalai.config.Config`, e.g.::
 
     @dataclass(frozen=True)
     class MyPolicyConfig(PeftConfigMixin, Config):

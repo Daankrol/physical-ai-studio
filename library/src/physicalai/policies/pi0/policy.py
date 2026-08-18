@@ -14,13 +14,13 @@ from os import PathLike
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
+from physicalai.config.mixin import FromConfig
 
 from physicalai.export import ExportBackend
 from physicalai.export.mixin_policy import ExportablePolicyMixin
 from physicalai.policies.base import Policy
 from physicalai.policies.peft import PeftPolicyMixin, is_lora_injected
 from physicalai.train.utils import reformat_dataset_to_match_policy
-from physicalai.training_config.mixin import FromConfig
 
 from .config import Pi0Config
 from .model import GemmaVariant, Pi0Model
@@ -324,7 +324,7 @@ class Pi0(PeftPolicyMixin, ExportablePolicyMixin, Policy, FromConfig):
 
         reformat_dataset_to_match_policy(self, datamodule)
 
-    def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
+    def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
         """Forward pass through the model.
 
         Processes the input batch and either trains the model or predicts actions

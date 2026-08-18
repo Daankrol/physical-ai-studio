@@ -7,17 +7,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable  # noqa: TC003
 from typing import Any
 
 import lightning
 import torch
-from lightning.pytorch.callbacks import BatchSizeFinder
-from lightning.pytorch.loggers import Logger
+from lightning.pytorch.callbacks import BatchSizeFinder, LearningRateMonitor
+from lightning.pytorch.loggers import Logger  # noqa: TC002
 from lightning.pytorch.strategies import DDPStrategy
+from physicalai.config.loading import instantiate_obj_from_dict
 
 from physicalai.train.callbacks import PolicyDatasetInteraction
-from physicalai.training_config.instantiate import instantiate_obj_from_dict
 
 
 class Trainer(lightning.Trainer):
@@ -25,6 +25,7 @@ class Trainer(lightning.Trainer):
 
     This subclasses Lightning's Trainer to add:
     - Automatic PolicyDatasetInteraction callback injection
+    - Automatic LearningRateMonitor callback injection (per-step logging)
     - Better default directory structure (experiments/ instead of current directory)
     - Optional experiment naming for better organization
 
@@ -78,7 +79,7 @@ class Trainer(lightning.Trainer):
         num_nodes: int = 1,
         precision: Any = None,
         # Logging & Checkpointing
-        logger: Logger | Iterable[Logger] | bool | None = None,  # Keep Lightning's default (None = auto-create TensorBoardLogger)
+        logger: Logger | Iterable[Logger] | bool | None = None,  # Keep Lightning's default (None = auto TB logger)
         callbacks: list | Any | None = None,
         default_root_dir: str | Any | None = "experiments",  # Changed from None to "experiments"
         enable_checkpointing: bool | None = None,
@@ -145,7 +146,8 @@ class Trainer(lightning.Trainer):
             max_epochs: Maximum number of epochs to train
             logger: Logger instance. None (default) creates TensorBoardLogger automatically.
                    False disables logging. Or pass custom logger instance.
-            callbacks: List of callbacks. PolicyDatasetInteraction is auto-added.
+            callbacks: List of callbacks. PolicyDatasetInteraction is auto-added, and a
+                LearningRateMonitor logging per step is added unless one is already provided.
             num_sanity_val_steps: Number of validation sanity steps (default: 0)
             devices: Number/list of devices to use
             precision: Training precision ('32', '16', 'bf16', etc.)
@@ -182,6 +184,11 @@ class Trainer(lightning.Trainer):
                 normalized_callbacks.append(callback)
 
         callbacks = [*normalized_callbacks, PolicyDatasetInteraction()]
+
+        # LearningRateMonitor raises if the trainer has no logger, so skip it when logging is disabled.
+        logging_enabled = logger is not False and not barebones
+        if logging_enabled and not any(isinstance(callback, LearningRateMonitor) for callback in callbacks):
+            callbacks.append(LearningRateMonitor(logging_interval="step"))
 
         if auto_scale_batch_size:
             callbacks.append(BatchSizeFinder(mode="power"))

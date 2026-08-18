@@ -20,10 +20,11 @@ import pytest
 from loguru import logger
 
 from schemas.dataset import Snapshot
-from schemas.job import TrainJobPayload
+from schemas.job import TrainingDevice, TrainJobPayload
 from schemas.model import Model
 from services.training_backends._transfer_progress import TransferProgressLogger, format_bytes, format_throughput
 from services.training_backends.base import TrainingContext
+from services.training_backends.local import build_spec
 from services.training_backends.remote import SNAPSHOT_UPLOAD_PROGRESS, TRAINING_PROGRESS_END, RemoteTrainingError
 
 if TYPE_CHECKING:
@@ -210,7 +211,13 @@ def _settings() -> MagicMock:
     return settings
 
 
-def _context(tmp_path: Path, *, should_stop: bool = False, remote_job_id: UUID | None = None) -> TrainingContext:
+def _context(
+    tmp_path: Path,
+    *,
+    should_stop: bool = False,
+    remote_job_id: UUID | None = None,
+    should_cancel_job: bool = False,
+) -> TrainingContext:
     snap = tmp_path / "snap"
     snap.mkdir()
     # A file in the snapshot dir gives the ZIP archive real bytes to stream.
@@ -240,6 +247,7 @@ def _context(tmp_path: Path, *, should_stop: bool = False, remote_job_id: UUID |
         progress=MagicMock(),
         should_stop=lambda: should_stop,
         remote_job_id=remote_job_id,
+        should_cancel_job=lambda: should_cancel_job,
     )
 
 
@@ -248,6 +256,24 @@ def _backend(settings: MagicMock):
 
     with patch(f"{REMOTE}.get_settings", return_value=settings):
         return RemoteTrainingBackend("https://trainer.test")
+
+
+async def _submitted_body(settings: MagicMock, context: TrainingContext) -> dict:
+    """Run a job to completion and return the body it POSTed to /jobs."""
+    controller = _Controller(states=[{"status": "completed", "progress": 100}])
+    with (
+        patch(f"{REMOTE}.get_settings", return_value=settings),
+        patch(f"{REMOTE}.httpx.AsyncClient", lambda **kw: _FakeClient(controller, **kw)),
+        patch(f"{REMOTE}.SafeZipArchive", return_value=MagicMock()),
+        patch(f"{REMOTE}._EVENT_WAIT_TIMEOUT_S", 0.01),
+    ):
+        await _backend(settings).train(context)
+
+    return next(
+        body
+        for url, body in zip(controller.posted_urls, controller.posted_bodies, strict=False)
+        if url.endswith("/jobs") and body is not None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -614,24 +640,38 @@ class TestHttpDatasetTransfer:
         settings = _settings()
         context = _context(tmp_path)
 
-        controller = _Controller(states=[{"status": "completed", "progress": 100}])
-        with (
-            patch(f"{REMOTE}.get_settings", return_value=settings),
-            patch(f"{REMOTE}.httpx.AsyncClient", lambda **kw: _FakeClient(controller, **kw)),
-            patch(f"{REMOTE}.SafeZipArchive", return_value=MagicMock()),
-            patch(f"{REMOTE}._EVENT_WAIT_TIMEOUT_S", 0.01),
-        ):
-            backend = _backend(settings)
-            await backend.train(context)
+        body = await _submitted_body(settings, context)
 
-        body = next(
-            body
-            for url, body in zip(controller.posted_urls, controller.posted_bodies, strict=False)
-            if url.endswith("/jobs") and body is not None
-        )
         assert body["dataset_transfer"] == "http"
         assert "repo_id" not in body
         assert "revision" not in body
+
+    @pytest.mark.anyio
+    async def test_submit_body_carries_the_shared_training_spec(self, tmp_path):
+        """The remote job trains from the same spec a local run would execute."""
+        settings = _settings()
+        context = _context(tmp_path)
+        context.payload = context.payload.model_copy(update={"max_epochs": 5, "batch_size": 16})
+
+        body = await _submitted_body(settings, context)
+
+        assert body["spec"] == build_spec(context).model_dump(mode="json") | {
+            "device_type": None,
+            "device_index": None,
+        }
+        assert (body["spec"]["policy"], body["spec"]["max_epochs"], body["spec"]["batch_size"]) == ("act", 5, 16)
+
+    @pytest.mark.anyio
+    async def test_submit_body_omits_the_studios_device_selection(self, tmp_path):
+        """A device index names hardware on this host, not on the trainer's."""
+        settings = _settings()
+        context = _context(tmp_path)
+        context.payload = context.payload.model_copy(update={"device": TrainingDevice(type="cuda", index=1)})
+
+        body = await _submitted_body(settings, context)
+
+        assert body["spec"]["device_type"] is None
+        assert body["spec"]["device_index"] is None
 
     @pytest.mark.anyio
     async def test_http_persists_remote_job_id_after_upload(self, tmp_path):
@@ -855,8 +895,38 @@ class TestModelDownloadCancellation:
 
         assert controller.cancelled is False
 
+    @pytest.mark.anyio
+    async def test_user_cancel_racing_shutdown_still_cancels_remote_job(self, tmp_path):
+        """A user cancel that overlaps a concurrent app shutdown must still cancel, not suspend.
 
-class TestSnapshotUploadHeartbeat:
+        Regression guard: stopping a job and then stopping the backend "soon
+        after" can make ``should_suspend`` true (app shutting down) at the same
+        moment the user's own interrupt made ``should_stop`` true. Suspend must
+        not win here, or the "canceled" job is left running on the trainer and
+        gets silently reattached to on the next startup.
+        """
+        from services.training_backends.base import TrainingCanceledError
+
+        settings = _settings()
+        context = _context(tmp_path, should_stop=True, should_cancel_job=True)
+        # A shutdown is *also* in flight at the same moment, but the user's own
+        # cancel of this specific job must take priority.
+        context.should_suspend = lambda: True
+        controller = _Controller(states=[])
+        controller.artifact_chunks = [b"a" * 500, b"b" * 500]
+        controller.artifact_headers = {"content-length": "1000"}
+        stream_timeout = httpx.Timeout(5.0)
+
+        with (
+            patch(f"{REMOTE}.get_settings", return_value=settings),
+            patch(f"{REMOTE}.httpx.AsyncClient", lambda **kw: _FakeClient(controller, **kw)),
+        ):
+            backend = _backend(settings)
+            with pytest.raises(TrainingCanceledError):
+                await backend._stream_archive(context, controller.remote_job_id, tmp_path / "model.zip", stream_timeout)
+
+        assert controller.cancelled is True
+
     """The HTTP upload loop emits throttled byte heartbeats for large snapshots."""
 
     @pytest.mark.anyio

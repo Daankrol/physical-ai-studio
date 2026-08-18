@@ -29,6 +29,7 @@ from physicalai.export.backends import (
     TorchExportParameters,
 )
 from physicalai.policies.base import Policy
+from physicalai.policies.mixins import SnapFlowPolicyMixin
 from physicalai.policies.peft import PeftPolicyMixin, is_lora_injected
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 from physicalai.train.utils import reformat_dataset_to_match_policy
@@ -48,7 +49,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class Pi05(PeftPolicyMixin, ExportablePolicyMixin, Policy):
+class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
     """Pi05 Policy - Physical Intelligence's flow matching VLA model.
 
     Lightning wrapper for training and inference with Pi05 model.
@@ -544,8 +545,8 @@ class Pi05(PeftPolicyMixin, ExportablePolicyMixin, Policy):
             if detected is not None:
                 hf_config["normalization_mode"] = detected
 
-        # from_dict skips unknown keys and coerces lists→tuples via type hints
-        config = Pi05Config.from_dict(hf_config)
+        # strict=False: ignore legacy config.json keys not present in Pi05Config
+        config = Pi05Config.from_dict(hf_config, strict=False)
 
         # --- build dataset_stats from HF artefacts ---
         dataset_stats = _extract_dataset_stats(hf_config, preprocessor_file, preprocessor_dir)
@@ -613,7 +614,7 @@ class Pi05(PeftPolicyMixin, ExportablePolicyMixin, Policy):
         if self.model is not None:
             self.model.set_dataset_stats(dataset_stats)
 
-    def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
+    def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
         """Forward pass through the model.
 
         Training mode: returns flow matching (loss, loss_dict) with gradients.
@@ -633,7 +634,7 @@ class Pi05(PeftPolicyMixin, ExportablePolicyMixin, Policy):
             return self.model(processed_batch)
         return self.predict_action_chunk(batch)
 
-    def compute_val_loss(self, batch: Observation) -> tuple[torch.Tensor, dict[str, float]]:
+    def compute_val_loss(self, batch: Observation) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
         """Compute action prediction MSE on a batch (for validation).
 
         Runs the full denoising loop and compares predicted actions to
@@ -688,6 +689,26 @@ class Pi05(PeftPolicyMixin, ExportablePolicyMixin, Policy):
         loss, loss_dict = self(batch)
         self.log("train/loss", loss_dict["loss"], prog_bar=True)
         return loss
+
+    @property
+    def inner_model(self) -> Pi05Model:
+        """The unwrapped Pi05 flow-matching module.
+
+        Raises:
+            RuntimeError: If accessed before ``setup()`` has initialized the model.
+        """
+        if self.model is None:
+            msg = "inner_model accessed before the model was initialized (setup() has not run yet)."
+            raise RuntimeError(msg)
+        return self.model
+
+    def freeze_vlm(self) -> None:
+        """Freeze PaliGemma so only the action expert and target-time embedding train."""
+        inner = self.inner_model
+        object.__setattr__(self.config, "train_expert_only", True)  # noqa: PLC2801
+        inner.paligemma_with_expert.train_expert_only = True
+        inner.paligemma_with_expert._set_requires_grad()  # noqa: SLF001
+        inner.train()
 
     def configure_optimizers(self) -> dict[str, Any]:
         """Configure optimizer and scheduler.
