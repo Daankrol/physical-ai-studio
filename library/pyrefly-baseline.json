@@ -1883,18 +1883,6 @@
       "severity": "error"
     },
     {
-      "line": 40,
-      "column": 9,
-      "stop_line": 40,
-      "stop_column": 52,
-      "path": "src/physicalai/policies/pi0/components/lora.py",
-      "code": -2,
-      "name": "missing-import",
-      "description": "Cannot find module `peft`\n  Looked in these locations (from config in `/home/mark/projects/geti/geti-action/library/pyproject.toml`):\n  Search path (from config file): [\"/home/mark/projects/geti/geti-action/library/src\"]\n  Import root (inferred from project layout): \"/home/mark/projects/geti/geti-action/library/src\"\n  Site package path queried from interpreter: [\"/home/mark/projects/geti/geti-action/library/.venv/lib/python3.12/site-packages\", \"/home/mark/projects/geti/geti-action/library/src\", \"/home/mark/projects/geti/geti-action/library/.venv/lib/python3.12/site-packages/rerun_sdk\"]",
-      "concise_description": "Cannot find module `peft`",
-      "severity": "error"
-    },
-    {
       "line": 14,
       "column": 5,
       "stop_line": 14,
