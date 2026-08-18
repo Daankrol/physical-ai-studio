@@ -5,11 +5,12 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-import torch
+from typing import TYPE_CHECKING, Any
 
 from physicalai.data.observation import EXTRA
+
+if TYPE_CHECKING:
+    import torch
 
 
 def in_episode_bound(batch: dict[str, Any], exempt_idx: torch.Tensor | None = None) -> torch.Tensor | None:
