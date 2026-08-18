@@ -8,12 +8,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import ClassVar, Literal, cast
 
+from physicalai.policies.peft import PeftConfigMixin
 from physicalai.training_config import Config
 
 
-@dataclass
-class Pi0Config(Config):
-    """Configuration for Pi0/Pi0.5 flow matching model."""
+@dataclass(frozen=True)
+class Pi0Config(PeftConfigMixin, Config):
+    """Configuration for Pi0/Pi0.5 flow matching model.
+
+    LoRA/DoRA fine-tuning fields (``lora_*``) are provided by
+    :class:`physicalai.policies.peft.PeftConfigMixin` and disabled by default
+    (``lora_enabled=False``). When enabled, the default LoRA target modules (used when
+    ``lora_target_modules`` is ``None``) come from ``Pi0Model.get_default_peft_targets()``:
+    the action expert's ``q_proj``/``v_proj`` attention projections plus the
+    action/state/time projection heads. This excludes the PaliGemma VLM/vision backbone;
+    pass an explicit ``lora_target_modules`` to target those instead.
+    """
 
     DEFAULT_MAX_TOKEN_LEN_PI0: ClassVar[int] = 48
     DEFAULT_MAX_TOKEN_LEN_PI05: ClassVar[int] = 200
@@ -48,13 +58,6 @@ class Pi0Config(Config):
     tune_action_expert: bool = True
     tune_vision_encoder: bool = False
 
-    lora_rank: int = 0
-    lora_alpha: int = 16
-    lora_dropout: float = 0.1
-    lora_target_modules: tuple[str, ...] = field(
-        default_factory=lambda: ("q_proj", "v_proj", "k_proj", "o_proj"),
-    )
-
     gradient_checkpointing: bool = False
 
     compile_model: bool = False
@@ -69,8 +72,10 @@ class Pi0Config(Config):
     def __post_init__(self) -> None:
         """Validate and apply default values."""  # noqa: DOC501
         if self.max_token_len is self._AUTO_MAX_TOKEN_LEN or self.max_token_len is None:
-            self.max_token_len = (
-                self.DEFAULT_MAX_TOKEN_LEN_PI05 if self.variant == "pi05" else self.DEFAULT_MAX_TOKEN_LEN_PI0
+            object.__setattr__(
+                self,
+                "max_token_len",
+                self.DEFAULT_MAX_TOKEN_LEN_PI05 if self.variant == "pi05" else self.DEFAULT_MAX_TOKEN_LEN_PI0,
             )
 
         if self.variant not in {"pi0", "pi05"}:
@@ -92,6 +97,8 @@ class Pi0Config(Config):
             msg = f"n_action_steps must be <= chunk_size. Got {self.n_action_steps} and {self.chunk_size}."
             raise ValueError(msg)
 
+        super().__post_init__()
+
     @property
     def is_pi05(self) -> bool:
         """Return True if using Pi0.5 variant."""
@@ -107,13 +114,8 @@ class Pi0Config(Config):
         """Return True if using AdaRMSNorm (Pi0.5)."""
         return self.is_pi05
 
-    @property
-    def use_lora(self) -> bool:
-        """Return True if LoRA is enabled."""
-        return self.lora_rank > 0
 
-
-@dataclass
+@dataclass(frozen=True)
 class Pi05Config(Pi0Config):
     """Configuration for Pi0.5 flow matching model.
 
