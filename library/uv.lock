@@ -85,12 +85,13 @@ conflicts = [[
 ]]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-08-11T11:23:32.728480804Z"
 exclude-newer-span = "P7D"
 
 [manifest]
 overrides = [
     { name = "diffusers", specifier = ">=0.38.0" },
+    { name = "opencv-python", marker = "sys_platform == 'never'" },
     { name = "pytest", specifier = ">=9.0.3" },
 ]
 
@@ -1480,7 +1481,7 @@ version = "0.1.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "gymnasium" },
-    { name = "opencv-python" },
+    { name = "opencv-python", marker = "sys_platform == 'never' or (extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-cu128') or (extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-xpu') or (extra == 'extra-16-physicalai-train-cu128' and extra == 'extra-16-physicalai-train-xpu') or (extra == 'extra-16-physicalai-train-executorch' and extra == 'extra-16-physicalai-train-xpu') or (extra == 'extra-16-physicalai-train-executorch-openvino' and extra == 'extra-16-physicalai-train-xpu')" },
     { name = "pygame" },
     { name = "pymunk" },
     { name = "scikit-image" },
@@ -1580,7 +1581,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "mujoco" },
     { name = "numpy" },
-    { name = "opencv-python" },
+    { name = "opencv-python", marker = "sys_platform == 'never' or (extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-cu128') or (extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-xpu') or (extra == 'extra-16-physicalai-train-cu128' and extra == 'extra-16-physicalai-train-xpu') or (extra == 'extra-16-physicalai-train-executorch' and extra == 'extra-16-physicalai-train-xpu') or (extra == 'extra-16-physicalai-train-executorch-openvino' and extra == 'extra-16-physicalai-train-xpu')" },
     { name = "robomimic" },
     { name = "robosuite" },
     { name = "thop" },
@@ -3470,7 +3471,7 @@ name = "opencv-python"
 version = "5.0.0.93"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy" },
+    { name = "numpy", marker = "(platform_machine != 'AMD64' and platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'linux') or (platform_machine != 'arm64' and sys_platform == 'darwin') or (platform_machine == 'AMD64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-cu128') or (platform_machine == 'AMD64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'AMD64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-cu128' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'AMD64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-executorch' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'AMD64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-executorch-openvino' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-cu128') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-cu128' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-executorch' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-executorch-openvino' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'arm64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-cu128') or (platform_machine == 'arm64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'arm64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-cu128' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'arm64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-executorch' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'arm64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-executorch-openvino' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-cu128') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-cu128' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-executorch' and extra == 'extra-16-physicalai-train-xpu') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-16-physicalai-train-executorch-openvino' and extra == 'extra-16-physicalai-train-xpu') or (sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'darwin' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-cu128') or (sys_platform == 'darwin' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-xpu') or (sys_platform == 'darwin' and extra == 'extra-16-physicalai-train-cu128' and extra == 'extra-16-physicalai-train-xpu') or (sys_platform == 'darwin' and extra == 'extra-16-physicalai-train-executorch' and extra == 'extra-16-physicalai-train-xpu') or (sys_platform == 'darwin' and extra == 'extra-16-physicalai-train-executorch-openvino' and extra == 'extra-16-physicalai-train-xpu') or (sys_platform == 'emscripten' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-cu128') or (sys_platform == 'emscripten' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-xpu') or (sys_platform == 'emscripten' and extra == 'extra-16-physicalai-train-cu128' and extra == 'extra-16-physicalai-train-xpu') or (sys_platform == 'emscripten' and extra == 'extra-16-physicalai-train-executorch' and extra == 'extra-16-physicalai-train-xpu') or (sys_platform == 'emscripten' and extra == 'extra-16-physicalai-train-executorch-openvino' and extra == 'extra-16-physicalai-train-xpu') or (sys_platform == 'win32' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-cu128') or (sys_platform == 'win32' and extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-xpu') or (sys_platform == 'win32' and extra == 'extra-16-physicalai-train-cu128' and extra == 'extra-16-physicalai-train-xpu') or (sys_platform == 'win32' and extra == 'extra-16-physicalai-train-executorch' and extra == 'extra-16-physicalai-train-xpu') or (sys_platform == 'win32' and extra == 'extra-16-physicalai-train-executorch-openvino' and extra == 'extra-16-physicalai-train-xpu')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/79/4c/a438d23e09ce2033c09f7b784ad2fbdb0adf529e434101ed28f142226f98/opencv_python-5.0.0.93.tar.gz", hash = "sha256:66aac3e5b5faa48d4025816592f3af19e4bfc2c68dec067bae2dbb4ca10aa9e2", size = 81802749, upload-time = "2026-07-02T06:59:53.815Z" }
 wheels = [
@@ -3626,7 +3627,7 @@ wheels = [
 
 [[package]]
 name = "peft"
-version = "0.19.1"
+version = "0.20.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "accelerate" },
@@ -3644,9 +3645,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "transformers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/86/cf/037f1e3d5186496c05513a6754639e2dab3038a05f384284d49a9bd06a2d/peft-0.19.1.tar.gz", hash = "sha256:0d97542fe96dcdaa20d3b81c06f26f988618f416a73544ab23c3618ccb674a40", size = 763738, upload-time = "2026-04-16T15:46:45.105Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b4/08/02541a2c29be7c78698f73d438bc0e733b214f3f35ec5db79fca8da8fc61/peft-0.20.0.tar.gz", hash = "sha256:4769c8093a4ca145fd6fb3fd4dd50449675f5fe46434ad1e98b285a132d4b1d0", size = 880503, upload-time = "2026-07-28T13:46:01.85Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e8/b6/f54d676ed93cc2dd2234c3b172ea9c8c3d7d29361e66b1b23dec57a67465/peft-0.19.1-py3-none-any.whl", hash = "sha256:2113f72a81621b5913ef28f9022204c742df111890c5f49d812716a4a301e356", size = 680692, upload-time = "2026-04-16T15:46:42.886Z" },
+    { url = "https://files.pythonhosted.org/packages/28/79/13bcabb8048126422d5c4b880575d40886c726f354db88cfeed4325525bb/peft-0.20.0-py3-none-any.whl", hash = "sha256:0fbba16ffebfad3de96e06f2da6860fd860292324b85b6141909fa1e26ea9233", size = 775777, upload-time = "2026-07-28T13:45:59.809Z" },
 ]
 
 [[package]]
@@ -3687,6 +3688,7 @@ dependencies = [
     { name = "onnxscript" },
     { name = "openvino" },
     { name = "openvino-tokenizers" },
+    { name = "peft" },
     { name = "physicalai" },
     { name = "pillow" },
     { name = "pydantic" },
@@ -3815,6 +3817,7 @@ requires-dist = [
     { name = "onnxscript" },
     { name = "openvino", specifier = ">=2026.0" },
     { name = "openvino-tokenizers", specifier = ">=2026.0" },
+    { name = "peft", specifier = ">=0.20.0" },
     { name = "peft", marker = "extra == 'groot'", specifier = ">=0.13.0,<1.0.0" },
     { name = "peft", marker = "extra == 'pi0'", specifier = ">=0.13.0,<1.0.0" },
     { name = "physicalai", git = "https://github.com/openvinotoolkit/physicalai.git?rev=3e163cfebc5f0fe6d97a6e792b4b0a55614d9a44" },
@@ -4784,7 +4787,7 @@ dependencies = [
     { name = "mujoco" },
     { name = "numba" },
     { name = "numpy" },
-    { name = "opencv-python" },
+    { name = "opencv-python", marker = "sys_platform == 'never' or (extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-cu128') or (extra == 'extra-16-physicalai-train-cpu' and extra == 'extra-16-physicalai-train-xpu') or (extra == 'extra-16-physicalai-train-cu128' and extra == 'extra-16-physicalai-train-xpu') or (extra == 'extra-16-physicalai-train-executorch' and extra == 'extra-16-physicalai-train-xpu') or (extra == 'extra-16-physicalai-train-executorch-openvino' and extra == 'extra-16-physicalai-train-xpu')" },
     { name = "pillow" },
     { name = "scipy" },
 ]
