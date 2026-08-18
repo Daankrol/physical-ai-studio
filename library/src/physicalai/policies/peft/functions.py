@@ -14,7 +14,8 @@ state-dict key names (targeted ``nn.Linear`` submodules simply become
   fast path), since ``BaseTunerLayer`` proxies ``.weight`` to the base layer.
 - ``torch.jit`` / ``torch.onnx`` / ``torch.export`` tracing of the plain module tree.
 
-Only LoRA is supported for now; DoRA can be added later via ``LoraConfig(use_dora=True)``.
+DoRA (Weight-Decomposed Low-Rank Adaptation) is also supported via
+``LoraConfig(use_dora=True)``; see ``build_lora_config``'s ``use_dora`` argument.
 """
 
 from __future__ import annotations
