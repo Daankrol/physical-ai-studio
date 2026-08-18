@@ -20,7 +20,7 @@ from torch import nn
 from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.observation import ACTION, EXTRA, IMAGES, STATE
 from physicalai.policies.base import Model
-from physicalai.policies.common import SnapFlowModelMixin
+from physicalai.policies.mixins import SnapFlowModelMixin
 
 if TYPE_CHECKING:
     from collections.abc import Callable

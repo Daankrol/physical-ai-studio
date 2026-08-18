@@ -1,8 +1,8 @@
 # SmolVLA SnapFlow Phase-2 Distillation Configuration
 #
 # Use this config for the second phase of SnapFlow two-phase training when you
-# want two explicit runs — for example to distill from a checkpoint you already
-# have, or to give phase 2 its own optimizer state and LR horizon.
+# want two explicit runs — for example to distill from a checkpoint you
+# already have (a published checkpoint, or a phase-1 run from elsewhere).
 #
 # Two-phase recipe (two explicit CLI runs):
 #
@@ -18,6 +18,9 @@
 # Note that `--fit.ckpt_path` is a full Lightning *resume*: it restores the
 # global step, optimizer state, and LR schedule from phase 1. Set
 # `--trainer.max_steps` to the combined phase-1 + phase-2 budget accordingly.
+# This does NOT give phase 2 its own optimizer state or LR horizon — if you
+# need that, warm-start from phase-1 weights only via the Python API instead
+# (see `Policy.load_from_checkpoint` in docs/how-to/training/snapflow_distillation.md).
 #
 # Single-run alternative (recommended):
 #   Add SnapFlowPhaseCallback to smolvla.yaml trainer.callbacks with a

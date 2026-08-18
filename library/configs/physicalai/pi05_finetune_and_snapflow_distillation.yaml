@@ -156,7 +156,7 @@ trainer:
         save_top_k: 1
         filename: "epoch{epoch:03d}"
         auto_insert_metric_name: false
-        dirpath: /mnt/data/experiments/snapflow-multi-object-augment-best-ckpt
+        dirpath: ./experiments/snapflow-multi-object-augment-best-ckpt
   logger:
     class_path: lightning.pytorch.loggers.WandbLogger
     init_args:

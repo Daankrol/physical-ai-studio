@@ -21,11 +21,11 @@ from typing import Literal
 
 from physicalai.config import Config
 
-from physicalai.policies.common import SnapFlowConfigFields
+from physicalai.policies.mixins import SnapFlowConfigMixin
 
 
 @dataclass(frozen=True)
-class Pi05Config(SnapFlowConfigFields, Config):
+class Pi05Config(SnapFlowConfigMixin, Config):
     """Configuration for Pi05 flow matching model.
 
     Attributes:
@@ -71,7 +71,7 @@ class Pi05Config(SnapFlowConfigFields, Config):
         use_random_input_noise: Whether to use random noise as the initial input for the denoising process
             during inference. If False, zeros are used instead. Defaults to False.
 
-    See :class:`~physicalai.policies.common.SnapFlowConfigFields` for the
+    See :class:`~physicalai.policies.mixins.SnapFlowConfigMixin` for the
     inherited ``snapflow_*`` attributes.
     """
 

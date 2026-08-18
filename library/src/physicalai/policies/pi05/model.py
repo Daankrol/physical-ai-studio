@@ -20,7 +20,7 @@ from transformers.cache_utils import DynamicCache
 from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.observation import ACTION, IMAGES
 from physicalai.policies.base import Model
-from physicalai.policies.common import SnapFlowModelMixin
+from physicalai.policies.mixins import SnapFlowModelMixin
 
 from .pi_gemma import (
     PaliGemmaForConditionalGenerationWithPiGemma,

@@ -21,11 +21,11 @@ from dataclasses import dataclass, field
 
 from physicalai.config import Config
 
-from physicalai.policies.common import SnapFlowConfigFields
+from physicalai.policies.mixins import SnapFlowConfigMixin
 
 
 @dataclass(frozen=True)
-class SmolVLAConfig(SnapFlowConfigFields, Config):
+class SmolVLAConfig(SnapFlowConfigMixin, Config):
     """Configuration for SmolVLA flow matching model.
 
     Attributes:
@@ -74,7 +74,7 @@ class SmolVLAConfig(SnapFlowConfigFields, Config):
         use_random_input_noise: Whether to use random noise as the initial input for the denoising process
             during inference. If False, zeros are used instead. Defaults to True.
 
-    See :class:`~physicalai.policies.common.SnapFlowConfigFields` for the
+    See :class:`~physicalai.policies.mixins.SnapFlowConfigMixin` for the
     inherited ``snapflow_*`` attributes.
     """
 

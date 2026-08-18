@@ -14,7 +14,7 @@ model. What this module owns is the surface that was otherwise duplicated
 verbatim between :class:`~physicalai.policies.Pi05` and
 :class:`~physicalai.policies.SmolVLA`:
 
-- :class:`SnapFlowConfigFields` — the four config flags and their validation.
+- :class:`SnapFlowConfigMixin` — the four config flags and their validation.
 - :class:`SnapFlowPolicyMixin` — the ``enable_snapflow()`` phase-2 entry point
   used by :class:`~physicalai.train.callbacks.SnapFlowPhaseCallback`.
 - :class:`SnapFlowModelMixin` — the mixed FM/consistency-distillation training
@@ -51,7 +51,7 @@ SNAPFLOW_DEFAULT_NUM_INFERENCE_STEPS = 1
 
 
 @dataclass(frozen=True)
-class SnapFlowConfigFields:
+class SnapFlowConfigMixin:
     """SnapFlow self-distillation flags shared by flow-matching policy configs.
 
     Mix into a policy config ahead of :class:`~physicalai.config.Config` and call
@@ -72,9 +72,9 @@ class SnapFlowConfigFields:
     Example:
         >>> from dataclasses import dataclass
         >>> from physicalai.config import Config
-        >>> from physicalai.policies.common import SnapFlowConfigFields
+        >>> from physicalai.policies.mixins import SnapFlowConfigMixin
         >>> @dataclass(frozen=True)
-        ... class MyConfig(SnapFlowConfigFields, Config):
+        ... class MyConfig(SnapFlowConfigMixin, Config):
         ...     hidden_dim: int = 256
         ...
         ...     def __post_init__(self) -> None:
@@ -123,7 +123,7 @@ class SnapFlowPolicyMixin:
 
     Attributes:
         config: The policy's frozen config dataclass, which must mix in
-            :class:`SnapFlowConfigFields` and carry a ``train_expert_only`` flag.
+            :class:`SnapFlowConfigMixin` and carry a ``train_expert_only`` flag.
         _set_hparam_keys: Policy hook that re-syncs checkpoint hparams from
             ``config``.
 
@@ -255,7 +255,7 @@ class SnapFlowModelMixin:
     This mixin does not define ``__init__`` (mixing into an ``nn.Module``
     subclass makes constructor chaining brittle). Call
     :meth:`init_snapflow_state` explicitly at the end of the host model's own
-    ``__init__``, mirroring how :class:`SnapFlowConfigFields` expects
+    ``__init__``, mirroring how :class:`SnapFlowConfigMixin` expects
     ``_validate_snapflow()`` to be called from ``__post_init__``.
 
     A host model must additionally provide:
@@ -296,7 +296,7 @@ class SnapFlowModelMixin:
 
         Call once from the host model's ``__init__``, after ``super().__init__()``.
         Values are expected to already be validated (config-level validation is
-        done by :meth:`SnapFlowConfigFields._validate_snapflow`).
+        done by :meth:`SnapFlowConfigMixin._validate_snapflow`).
 
         Args:
             enabled: Whether SnapFlow self-distillation is active.

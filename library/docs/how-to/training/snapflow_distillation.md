@@ -232,14 +232,18 @@ warmup. The cosine decay horizon, however, is derived from
 `Trainer.estimated_stepping_batches`, which reports the _total_ run budget
 rather than the phase-2 remainder. Phase 2 therefore decays more slowly than a
 standalone phase-2 run would. If you need an exact phase-2 decay horizon, use
-Option 2.
+Option 3 (Python API), which warm-starts phase 2 from the phase-1 weights only
+and constructs a fresh `Trainer` — Option 2's `--fit.ckpt_path` is a full
+resume and has the same combined-horizon behavior as Option 1.
 
 ---
 
 ## Option 2 — Two explicit runs
 
-Use this when you want phase 2 to have its own LR horizon, or when you are
-distilling from a checkpoint you already have.
+Use this when you are distilling from a checkpoint you already have (for
+example a published checkpoint, or a phase-1 run from a separate machine or
+job). Note that `--fit.ckpt_path` is a full Lightning resume, so this does
+**not** give phase 2 an independent LR horizon — see the caveat below.
 
 ```bash
 # Phase 1 — standard flow-matching training
@@ -268,7 +272,13 @@ Two things to be aware of:
   `--test.ckpt_path`, `--predict.ckpt_path`).
 - `--fit.ckpt_path` is a full Lightning **resume**: it restores the global step,
   optimizer state, and LR schedule from phase 1. Set `--trainer.max_steps` to
-  the _combined_ phase-1 + phase-2 budget, not the phase-2 budget alone.
+  the _combined_ phase-1 + phase-2 budget, not the phase-2 budget alone. This
+  means Option 2 does **not** give phase 2 an independent LR horizon either —
+  the LR schedule still spans both phases, exactly like Option 1's
+  single-run caveat above. There is currently no supported way to warm-start
+  phase 2 from a checkpoint's weights only (a fresh optimizer/LR schedule);
+  doing so would require loading just the `state_dict` manually instead of
+  passing `--fit.ckpt_path` (see Option 3 below).
 
 ---
 

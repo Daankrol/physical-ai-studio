@@ -80,7 +80,7 @@ class SnapFlowCapable(Protocol):
     """A policy that can switch into SnapFlow self-distillation.
 
     Satisfied by any policy mixing in
-    :class:`~physicalai.policies.common.SnapFlowPolicyMixin`, which covers
+    :class:`~physicalai.policies.mixins.SnapFlowPolicyMixin`, which covers
     :class:`~physicalai.policies.Pi05` and
     :class:`~physicalai.policies.SmolVLA`.
 

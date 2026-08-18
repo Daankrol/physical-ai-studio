@@ -3,7 +3,7 @@
 
 """Unit tests for the shared SnapFlow policy and config surface.
 
-SnapFlow is implemented once in :mod:`physicalai.policies.common.snapflow` and
+SnapFlow is implemented once in :mod:`physicalai.policies.mixins.snapflow` and
 mixed into both Pi05 and SmolVLA. These tests cover the shared surface; the
 per-policy hooks are covered by asserting each policy binds the shared
 implementation.
@@ -18,7 +18,7 @@ import pytest
 import torch
 from physicalai.config import Config
 from physicalai.policies import Pi05, SmolVLA
-from physicalai.policies.common import SnapFlowConfigFields, SnapFlowPolicyMixin
+from physicalai.policies.mixins import SnapFlowConfigMixin, SnapFlowPolicyMixin
 from physicalai.policies.pi05 import Pi05Config
 from physicalai.policies.smolvla import SmolVLAConfig
 
@@ -35,7 +35,7 @@ _SNAPFLOW_FIELDS = (
 # ============================================================================ #
 
 
-class TestSnapFlowConfigFields:
+class TestSnapFlowConfigMixin:
     """Both policy configs inherit the same SnapFlow flags and validation."""
 
     @pytest.mark.parametrize("config_cls", [Pi05Config, SmolVLAConfig])
@@ -78,7 +78,7 @@ class TestSnapFlowConfigFields:
 
 
 @dataclass(frozen=True)
-class _StubConfig(SnapFlowConfigFields, Config):
+class _StubConfig(SnapFlowConfigMixin, Config):
     """Minimal frozen config carrying the flags the mixin mutates."""
 
     train_expert_only: bool = False
