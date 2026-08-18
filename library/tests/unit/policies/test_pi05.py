@@ -1326,3 +1326,390 @@ class TestEmbedPrefix:
         _, _, att_masks = model.embed_prefix(images, img_masks, tokens, masks)
 
         assert not att_masks.any(), "All prefix attention masks should be False"
+
+
+# ============================================================================ #
+# LoRA (PEFT) Configuration Tests                                              #
+# ============================================================================ #
+
+
+class TestPi05LoRAConfig:
+    """Tests for Pi05Config LoRA fields and validation."""
+
+    def test_lora_disabled_by_default(self) -> None:
+        """Test LoRA is disabled by default."""
+        config = Pi05Config()
+        assert config.lora_enabled is False
+        assert config.use_lora is False
+        # Rank/alpha still have sensible defaults even when disabled.
+        assert config.lora_rank == 32
+
+    def test_use_lora_true_when_enabled(self) -> None:
+        """Test use_lora mirrors lora_enabled."""
+        config = Pi05Config(lora_enabled=True)
+        assert config.use_lora is True
+
+    def test_lora_default_values(self) -> None:
+        """Test default LoRA hyperparameters are sensible without any tuning."""
+        config = Pi05Config(lora_enabled=True)
+        assert config.lora_rank == 32
+        assert config.lora_alpha is None
+        assert config.effective_lora_alpha == 32
+        assert config.lora_dropout == 0.05
+        assert config.lora_target_modules is None
+        assert config.lora_adapter_dtype == "float32"
+        assert config.lora_use_dora is False
+
+    def test_effective_lora_alpha_resolves_to_rank(self) -> None:
+        """Test effective_lora_alpha defaults to lora_rank (scaling=1.0) when alpha is None."""
+        config = Pi05Config(lora_enabled=True, lora_rank=64)
+        assert config.lora_alpha is None
+        assert config.effective_lora_alpha == 64
+
+    def test_effective_lora_alpha_respects_explicit_value(self) -> None:
+        """Test effective_lora_alpha uses the explicit lora_alpha when set."""
+        config = Pi05Config(lora_enabled=True, lora_rank=64, lora_alpha=128)
+        assert config.effective_lora_alpha == 128
+
+    def test_lora_rank_negative_rejected(self) -> None:
+        """Test negative lora_rank is rejected."""
+        with pytest.raises(ValueError, match="lora_rank"):
+            Pi05Config(lora_rank=-1)
+
+    def test_lora_enabled_requires_positive_rank(self) -> None:
+        """Test lora_enabled=True with lora_rank=0 is rejected."""
+        with pytest.raises(ValueError, match="lora_rank"):
+            Pi05Config(lora_enabled=True, lora_rank=0)
+
+    def test_lora_alpha_must_be_positive_when_enabled(self) -> None:
+        """Test lora_alpha must be > 0 when LoRA is enabled."""
+        with pytest.raises(ValueError, match="lora_alpha"):
+            Pi05Config(lora_enabled=True, lora_rank=8, lora_alpha=0)
+
+    def test_lora_dropout_out_of_range_rejected(self) -> None:
+        """Test lora_dropout must be in [0, 1)."""
+        with pytest.raises(ValueError, match="lora_dropout"):
+            Pi05Config(lora_dropout=1.0)
+        with pytest.raises(ValueError, match="lora_dropout"):
+            Pi05Config(lora_dropout=-0.1)
+
+    def test_lora_adapter_dtype_validation(self) -> None:
+        """Test lora_adapter_dtype must be 'float32' or 'auto'."""
+        with pytest.raises(ValueError, match="Invalid lora_adapter_dtype"):
+            Pi05Config(lora_adapter_dtype="bfloat16")
+
+    def test_lora_target_modules_custom(self) -> None:
+        """Test custom lora_target_modules is stored as-is."""
+        config = Pi05Config(lora_enabled=True, lora_target_modules=("q_proj", "v_proj"))
+        assert config.lora_target_modules == ("q_proj", "v_proj")
+
+    def test_lora_use_dora_default_false(self) -> None:
+        """Test lora_use_dora defaults to False."""
+        config = Pi05Config(lora_enabled=True)
+        assert config.lora_use_dora is False
+
+    def test_lora_use_dora_enabled(self) -> None:
+        """Test lora_use_dora can be enabled."""
+        config = Pi05Config(lora_enabled=True, lora_use_dora=True)
+        assert config.lora_use_dora is True
+
+    def test_lora_serialization_roundtrip(self) -> None:
+        """Test LoRA fields survive to_dict/from_dict roundtrip."""
+        config = Pi05Config(
+            lora_enabled=True,
+            lora_rank=32,
+            lora_alpha=64,
+            lora_dropout=0.1,
+            lora_use_dora=True,
+        )
+        restored = Pi05Config.from_dict(config.to_dict())
+        assert restored.lora_enabled is True
+        assert restored.lora_rank == 32
+        assert restored.lora_alpha == 64
+        assert restored.lora_dropout == 0.1
+        assert restored.lora_use_dora is True
+        assert restored.use_lora is True
+
+
+class TestPi05LoRAIntegration:
+    """Full Pi05 + LoRA integration tests.
+
+    These construct a real (small-variant) Pi05Model, so they are marked slow. Tests for
+    the shared, policy-agnostic LoRA/DoRA helpers themselves live in
+    ``tests/unit/policies/test_peft.py``.
+    """
+
+    @staticmethod
+    def _stats() -> dict:
+        return {
+            "observation.state": {
+                "name": "observation.state",
+                "shape": (8,),
+                "mean": [0.0] * 8,
+                "std": [1.0] * 8,
+                "q01": [-1.0] * 8,
+                "q99": [1.0] * 8,
+            },
+            "action": {
+                "name": "action",
+                "shape": (7,),
+                "mean": [0.0] * 7,
+                "std": [1.0] * 7,
+                "q01": [-1.0] * 7,
+                "q99": [1.0] * 7,
+            },
+        }
+
+    @pytest.mark.slow
+    def test_lora_injection_reduces_trainable_params(self) -> None:
+        """Test enabling LoRA drastically reduces the number of trainable parameters."""
+        policy = Pi05(
+            dataset_stats=self._stats(),
+            paligemma_variant="gemma_300m",
+            action_expert_variant="gemma_300m",
+            lora_enabled=True,
+            lora_rank=4,
+            lora_alpha=8,
+        )
+        assert policy.config.use_lora
+        from physicalai.policies.peft import is_lora_injected
+
+        assert is_lora_injected(policy.model)
+
+        trainable = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in policy.parameters())
+        assert 0 < trainable < total
+        assert trainable / total < 0.01, "LoRA should train well under 1% of parameters"
+
+    @pytest.mark.slow
+    def test_lora_adapters_default_to_float32_under_bfloat16_base(self) -> None:
+        """Test LoRA adapter parameters are fp32 even when the base model is bf16."""
+        policy = Pi05(
+            dataset_stats=self._stats(),
+            paligemma_variant="gemma_300m",
+            action_expert_variant="gemma_300m",
+            dtype="bfloat16",
+            lora_enabled=True,
+            lora_rank=4,
+            lora_alpha=8,
+        )
+        lora_dtypes = {p.dtype for n, p in policy.named_parameters() if "lora_" in n}
+        assert lora_dtypes == {torch.float32}
+
+    @pytest.mark.slow
+    def test_lora_adapter_dtype_auto_inherits_base_dtype(self) -> None:
+        """Test lora_adapter_dtype='auto' lets adapters inherit the base layer's dtype."""
+        policy = Pi05(
+            dataset_stats=self._stats(),
+            paligemma_variant="gemma_300m",
+            action_expert_variant="gemma_300m",
+            dtype="bfloat16",
+            lora_enabled=True,
+            lora_rank=4,
+            lora_alpha=8,
+            lora_adapter_dtype="auto",
+        )
+        lora_dtypes = {p.dtype for n, p in policy.named_parameters() if "lora_" in n}
+        assert torch.bfloat16 in lora_dtypes
+
+    @pytest.mark.slow
+    def test_dora_injection_on_full_model(self) -> None:
+        """Test lora_use_dora=True injects DoRA adapters (magnitude vector) on Pi05Model."""
+        policy = Pi05(
+            dataset_stats=self._stats(),
+            paligemma_variant="gemma_300m",
+            action_expert_variant="gemma_300m",
+            lora_enabled=True,
+            lora_rank=4,
+            lora_alpha=8,
+            lora_use_dora=True,
+        )
+        assert policy.config.lora_use_dora is True
+        from physicalai.policies.peft import is_lora_injected
+
+        assert is_lora_injected(policy.model)
+        param_names = {n for n, _ in policy.named_parameters()}
+        assert any("lora_magnitude_vector" in n for n in param_names)
+
+        trainable = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in policy.parameters())
+        assert 0 < trainable < total
+
+    @pytest.mark.slow
+    def test_merge_dora_before_export_preserves_predictions(self) -> None:
+        """Test that merging DoRA adapters (like LoRA) preserves model predictions."""
+        import copy
+
+        from physicalai.data import Observation
+        from physicalai.policies.peft import is_lora_injected, merge_lora_
+
+        policy = Pi05(
+            dataset_stats=self._stats(),
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            dtype="float32",
+            lora_enabled=True,
+            lora_rank=4,
+            lora_alpha=8,
+            lora_use_dora=True,
+            n_action_steps=5,
+            chunk_size=5,
+            gradient_checkpointing=False,
+            use_random_input_noise=False,
+        )
+        policy.eval()
+
+        obs = Observation(
+            state=torch.randn(2, 8),
+            images={"0": torch.rand(2, 3, 224, 224)},
+            task=["do a thing", "do another thing"],
+        )
+        with torch.no_grad():
+            action_before = policy(obs)
+
+        original_model = policy.model
+        merged_model = copy.deepcopy(original_model)
+        merge_lora_(merged_model)
+        assert not is_lora_injected(merged_model)
+
+        policy.model = merged_model
+        with torch.no_grad():
+            action_after = policy(obs)
+        policy.model = original_model
+
+        torch.testing.assert_close(action_before, action_after, atol=1e-3, rtol=1e-3)
+        assert is_lora_injected(policy.model)
+
+    @pytest.mark.slow
+    def test_forward_backward_with_lora(self) -> None:
+        """Test a full forward+backward pass with LoRA injected produces gradients.
+
+        Uses gemma_2b for the VLM backbone because the vision-to-text projection
+        dimension (2048) is only compatible with the gemma_2b text config; the
+        gemma_300m variant is reserved for construction-only tests above.
+        """
+        from physicalai.data import Observation
+
+        policy = Pi05(
+            dataset_stats=self._stats(),
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            dtype="bfloat16",
+            lora_enabled=True,
+            lora_rank=4,
+            lora_alpha=8,
+            n_action_steps=5,
+            chunk_size=5,
+            gradient_checkpointing=False,
+        )
+        obs = Observation(
+            state=torch.randn(2, 8),
+            images={"0": torch.rand(2, 3, 224, 224)},
+            task=["do a thing", "do another thing"],
+            action=torch.randn(2, 5, 7),
+        )
+        loss, loss_dict = policy(obs)
+        assert torch.isfinite(loss)
+        loss.backward()
+
+        lora_params = [(n, p) for n, p in policy.named_parameters() if "lora_" in n]
+        assert len(lora_params) > 0
+        assert all(p.grad is not None for _, p in lora_params), "All LoRA params should receive gradients"
+
+    @pytest.mark.slow
+    def test_merge_before_export_preserves_predictions(self) -> None:
+        """Test that Pi05.export's merge-before-export leaves self.model untouched.
+
+        and produces predictions matching the pre-merge model on a disposable copy.
+        """
+        import copy
+
+        from physicalai.data import Observation
+        from physicalai.policies.peft import is_lora_injected, merge_lora_
+
+        policy = Pi05(
+            dataset_stats=self._stats(),
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            dtype="float32",
+            lora_enabled=True,
+            lora_rank=4,
+            lora_alpha=8,
+            n_action_steps=5,
+            chunk_size=5,
+            gradient_checkpointing=False,
+            use_random_input_noise=False,
+        )
+        policy.eval()
+
+        obs = Observation(
+            state=torch.randn(2, 8),
+            images={"0": torch.rand(2, 3, 224, 224)},
+            task=["do a thing", "do another thing"],
+        )
+        with torch.no_grad():
+            action_before = policy(obs)
+
+        original_model = policy.model
+        merged_model = copy.deepcopy(original_model)
+        merge_lora_(merged_model)
+        assert not is_lora_injected(merged_model)
+
+        policy.model = merged_model
+        with torch.no_grad():
+            action_after = policy(obs)
+        policy.model = original_model
+
+        torch.testing.assert_close(action_before, action_after, atol=1e-3, rtol=1e-3)
+        # The live training model must be untouched (still has LoRA injected).
+        assert is_lora_injected(policy.model)
+
+    @pytest.mark.slow
+    def test_checkpoint_roundtrip_preserves_lora_weights(self) -> None:
+        """Test LoRA adapter weights survive a Lightning checkpoint save/load cycle."""
+        policy = Pi05(
+            dataset_stats=self._stats(),
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            dtype="float32",
+            lora_enabled=True,
+            lora_rank=4,
+            lora_alpha=8,
+            n_action_steps=5,
+            chunk_size=5,
+            gradient_checkpointing=False,
+        )
+
+        # Perturb one LoRA param so a stale/zero-init restore would be detectable.
+        with torch.no_grad():
+            for _, p in policy.named_parameters():
+                if p.requires_grad:
+                    p.add_(1.0)
+                    break
+
+        checkpoint = {
+            "state_dict": policy.state_dict(),
+            "hyper_parameters": dict(policy.hparams),
+            "pytorch-lightning_version": "2.0.0",
+            "epoch": 0,
+            "global_step": 0,
+        }
+
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ckpt_path = Path(tmp_dir) / "pi05_lora.ckpt"
+            torch.save(checkpoint, ckpt_path)
+            restored = Pi05.load_from_checkpoint(str(ckpt_path))
+
+        assert restored.config.use_lora
+        from physicalai.policies.peft import is_lora_injected
+
+        assert is_lora_injected(restored.model)
+
+        orig_sd = policy.state_dict()
+        restored_sd = restored.state_dict()
+        assert set(orig_sd.keys()) == set(restored_sd.keys())
+        for key, value in orig_sd.items():
+            torch.testing.assert_close(value.float(), restored_sd[key].float(), atol=1e-5, rtol=1e-5)

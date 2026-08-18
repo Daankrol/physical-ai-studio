@@ -7,11 +7,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 import lightning
 import torch
 from lightning.pytorch.callbacks import BatchSizeFinder
+from lightning.pytorch.loggers import Logger
 from lightning.pytorch.strategies import DDPStrategy
 
 from physicalai.train.callbacks import PolicyDatasetInteraction
@@ -76,7 +78,7 @@ class Trainer(lightning.Trainer):
         num_nodes: int = 1,
         precision: Any = None,
         # Logging & Checkpointing
-        logger: Any = None,  # Keep Lightning's default (None = auto-create TensorBoardLogger)
+        logger: Logger | Iterable[Logger] | bool | None = None,  # Keep Lightning's default (None = auto-create TensorBoardLogger)
         callbacks: list | Any | None = None,
         default_root_dir: str | Any | None = "experiments",  # Changed from None to "experiments"
         enable_checkpointing: bool | None = None,

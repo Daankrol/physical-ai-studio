@@ -19,11 +19,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from physicalai.policies.peft import PeftConfigMixin
 from physicalai.training_config import Config
 
 
 @dataclass(frozen=True)
-class Pi05Config(Config):
+class Pi05Config(PeftConfigMixin, Config):
     """Configuration for Pi05 flow matching model.
 
     Attributes:
@@ -49,7 +50,15 @@ class Pi05Config(Config):
         compile_model: Whether to use torch.compile. Defaults to False.
         compile_mode: Torch compile mode. Defaults to "max-autotune".
         freeze_vision_encoder: Whether to freeze vision encoder during training. Defaults to False.
-        train_expert_only: Whether to train only the action expert. Defaults to True.
+        train_expert_only: Whether to train only the action expert. Defaults to False.
+        lora_*: LoRA/DoRA fine-tuning fields, see
+            ``physicalai.policies.peft.PeftConfigMixin``. The default LoRA target modules
+            (when ``lora_target_modules`` is ``None``) come from
+            ``Pi05Model.get_default_peft_targets()``: the action expert's ``q_proj``/
+            ``v_proj`` attention projections plus the action/time projection heads
+            (``action_in_proj``, ``action_out_proj``, ``time_mlp_in``, ``time_mlp_out``).
+            This excludes the SnapFlow-only ``target_time_mlp_*`` heads and the PaliGemma
+            VLM backbone; pass an explicit ``lora_target_modules`` to target those.
         normalization_mode: Normalization method for state/action features.
             ``"QUANTILES"`` maps data to [-1, 1] using the 1st and 99th percentiles,
             which is robust to outliers. ``"MEAN_STD"`` uses zero-mean unit-variance
@@ -161,3 +170,5 @@ class Pi05Config(Config):
         if self.snapflow_num_inference_steps < 1:
             msg = f"snapflow_num_inference_steps must be >= 1, got {self.snapflow_num_inference_steps}"
             raise ValueError(msg)
+
+        super().__post_init__()

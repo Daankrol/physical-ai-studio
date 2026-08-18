@@ -20,6 +20,7 @@ from transformers.cache_utils import DynamicCache
 from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.observation import ACTION, IMAGES
 from physicalai.policies.base import Model
+from physicalai.policies.peft import PeftModelMixin
 
 from .pi_gemma import (
     PaliGemmaForConditionalGenerationWithPiGemma,
@@ -536,12 +537,30 @@ class PaliGemmaWithExpertModel(nn.Module):
         return [prefix_output, suffix_output], prefix_past_key_values
 
 
-class Pi05Model(Model):
+class Pi05Model(PeftModelMixin, Model):
     """Core Pi05 PyTorch model for flow matching VLA.
 
     This is the nn.Module that contains the actual model logic,
     separated from the Lightning wrapper.
     """
+
+    @classmethod
+    def get_default_peft_targets(cls) -> str:
+        """Return the default LoRA target modules for Pi05.
+
+        Targets the action expert's attention projections plus the action/time projection
+        heads, ported from LeRobot's `Pi05.get_default_peft_targets()` regex and adapted to
+        `Pi05Model`'s (non-"model."-prefixed, no `state_proj`) naming. Excludes the
+        SnapFlow-only `target_time_mlp_*` heads and the PaliGemma VLM/vision backbone.
+
+        Returns:
+            A regex string matching the default LoRA-adapted submodule names.
+        """
+        return (
+            r"(.*\.gemma_expert\..*\.self_attn\.(q|v)_proj|"
+            r"(action_in_proj|action_out_proj|time_mlp_in|time_mlp_out))"
+        )
+
 
     def __init__(  # noqa: PLR0913
         self,
