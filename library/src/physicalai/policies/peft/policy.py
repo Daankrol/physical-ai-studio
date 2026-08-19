@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         config: PeftConfigMixin
         model: _PeftCapableModel | None
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,4 +97,3 @@ class PeftPolicyMixin:
         merged_model = copy.deepcopy(self_.model)
         merge_lora_(merged_model)
         return merged_model
-

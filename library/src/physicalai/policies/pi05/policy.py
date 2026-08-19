@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-from os import PathLike
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -42,6 +41,8 @@ from .pretrained_utils import extract_dataset_stats as _extract_dataset_stats
 from .pretrained_utils import fix_state_dict_keys as _fix_state_dict_keys
 
 if TYPE_CHECKING:
+    from os import PathLike
+
     from physicalai.data import Observation
 
     from .preprocessor import Pi05Postprocessor, Pi05Preprocessor

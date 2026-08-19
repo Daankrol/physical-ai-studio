@@ -10,13 +10,11 @@ from __future__ import annotations
 
 import logging
 import math
-from os import PathLike
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 from physicalai.config.mixin import FromConfig
 
-from physicalai.export import ExportBackend
 from physicalai.export.mixin_policy import ExportablePolicyMixin
 from physicalai.policies.base import Policy
 from physicalai.policies.peft import PeftPolicyMixin, is_lora_injected
@@ -26,7 +24,10 @@ from .config import Pi0Config
 from .model import GemmaVariant, Pi0Model
 
 if TYPE_CHECKING:
+    from os import PathLike
+
     from physicalai.data import Observation
+    from physicalai.export import ExportBackend
     from physicalai.gyms import Gym
 
     from .preprocessor import Pi0Postprocessor, Pi0Preprocessor

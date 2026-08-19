@@ -562,7 +562,6 @@ class Pi05Model(PeftModelMixin, SnapFlowModelMixin, Model):
             r"(action_in_proj|action_out_proj|time_mlp_in|time_mlp_out))"
         )
 
-
     def __init__(  # noqa: PLR0913
         self,
         dataset_stats: dict[str, dict[str, list[float] | str | tuple[int, ...]]],

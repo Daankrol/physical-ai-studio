@@ -23,8 +23,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Literal
 
-import torch
 import peft
+import torch
 from peft.tuners.tuners_utils import BaseTunerLayer
 
 if TYPE_CHECKING:
@@ -32,15 +32,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 def build_lora_config(
     *,
     rank: int,
     alpha: int,
     dropout: float,
     target_modules: str | list[str] | tuple[str, ...],
-    init_lora_weights: bool | Literal['gaussian', 'eva', 'olora', 'pissa', 'pissa_niter_[number of iters]', 'corda', 'loftq', 'orthogonal', 'mica'] = True,
+    init_lora_weights: bool
+    | Literal[
+        "gaussian",
+        "eva",
+        "olora",
+        "pissa",
+        "pissa_niter_[number of iters]",
+        "corda",
+        "loftq",
+        "orthogonal",
+        "mica",
+    ] = True,
     use_dora: bool = False,
- ) -> peft.LoraConfig:
+) -> peft.LoraConfig:
     """Build a ``peft.LoraConfig`` for injection into a model.
 
     Args:
@@ -96,7 +108,6 @@ def inject_lora(
     Raises:
         RuntimeError: If no target modules matched (target_modules matched nothing).
     """
-
     # Freeze all existing parameters; only newly injected adapter params should train.
     for param in module.parameters():
         param.requires_grad = False
@@ -141,7 +152,6 @@ def is_lora_injected(module: nn.Module) -> bool:
     Returns:
         True if LoRA (or another PEFT method) has been injected into ``module``.
     """
-
     return any(isinstance(m, BaseTunerLayer) for m in module.modules())
 
 

@@ -49,7 +49,6 @@ model:
     gradient_checkpointing: false
     compile_model: true
 
-
     # LoRA (Low-Rank Adaptation) fine-tuning.
     lora_enabled: true
     lora_rank: 64
