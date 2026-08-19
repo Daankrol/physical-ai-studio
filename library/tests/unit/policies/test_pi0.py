@@ -361,9 +361,21 @@ class TestPi0LoRAIntegration:
         Keeps ``vocab_size`` real (tokenizer output ids must stay in range) and keeps
         ``head_dim``/``num_key_value_heads`` consistent between the VLM backbone and the
         action expert, since ``PaliGemmaWithExpert.forward`` shares KV cache state
-        between them.
+        between them. Also replaces the tokenizer with a tiny, fully offline stand-in --
+        ``Pi0Preprocessor.tokenizer`` otherwise downloads the real (gated) PaliGemma
+        tokenizer from HuggingFace, which requires network access and an auth token.
         """
-        from transformers import GemmaConfig, PaliGemmaConfig, PaliGemmaForConditionalGeneration, SiglipVisionConfig
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from tokenizers.pre_tokenizers import Whitespace
+        from transformers import (
+            AutoTokenizer,
+            GemmaConfig,
+            PaliGemmaConfig,
+            PaliGemmaForConditionalGeneration,
+            PreTrainedTokenizerFast,
+            SiglipVisionConfig,
+        )
 
         import physicalai.policies.pi0.components.gemma as gemma_mod
 
@@ -413,6 +425,13 @@ class TestPi0LoRAIntegration:
             "from_pretrained",
             classmethod(_fake_from_pretrained),
         )
+
+        def _fake_tokenizer_from_pretrained(*args: object, **kwargs: object) -> PreTrainedTokenizerFast:  # noqa: ARG001
+            backend = Tokenizer(WordLevel(vocab={"[UNK]": 0, "[PAD]": 1}, unk_token="[UNK]"))
+            backend.pre_tokenizer = Whitespace()
+            return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="[UNK]", pad_token="[PAD]")
+
+        monkeypatch.setattr(AutoTokenizer, "from_pretrained", staticmethod(_fake_tokenizer_from_pretrained))
 
     @staticmethod
     def _stats() -> dict:
