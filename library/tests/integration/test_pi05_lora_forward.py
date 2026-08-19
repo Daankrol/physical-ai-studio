@@ -213,10 +213,10 @@ class TestPi05LoRAForward:
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             ckpt_path = Path(tmp_dir) / "pi05_lora.ckpt"
+            # Test-local Lightning checkpoint written and read back within the same tmpdir;
+            # not untrusted input. safetensors is not an option since load_from_checkpoint
+            # requires a pickle checkpoint.
             # nosemgrep: trailofbits.python.pickles-in-pytorch.pickles-in-pytorch
-            # reason: test-local Lightning checkpoint written and read back within the same
-            # tmpdir; not untrusted input. safetensors is not an option since
-            # load_from_checkpoint requires a pickle checkpoint.
             torch.save(checkpoint, ckpt_path)
             restored = Pi05.load_from_checkpoint(str(ckpt_path))
 
