@@ -1432,12 +1432,56 @@ class TestPi05LoRAConfig:
 
 
 class TestPi05LoRAIntegration:
-    """Full Pi05 + LoRA integration tests.
+    """Construction-only Pi05 + LoRA integration tests.
 
-    These construct a real (small-variant) Pi05Model, so they are marked slow. Tests for
-    the shared, policy-agnostic LoRA/DoRA helpers themselves live in
+    These construct a real Pi05Model, but both the VLM backbone and action expert use
+    a tiny stand-in config (see ``_patch_tiny_gemma_config`` below) so they run in
+    seconds without ever calling ``forward``. Forward-pass tests for LoRA (merge/export
+    equivalence, backward gradients, checkpoint roundtrip) require a real gemma_2b-sized
+    backbone -- see ``tests/integration/test_pi05_lora_forward.py`` -- because
+    ``PaliGemmaWithExpertModel`` hardcodes ``vision_config.projection_dim = 2048``
+    regardless of variant, so those cannot be shrunk without a production code change.
+
+    Tests for the shared, policy-agnostic LoRA/DoRA helpers themselves live in
     ``tests/unit/policies/test_peft.py``.
     """
+
+    @pytest.fixture(autouse=True)
+    def _patch_tiny_gemma_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Shrink the VLM backbone and action expert to a tiny, uniform config.
+
+        Also shrinks the vision tower, which otherwise defaults to the full SigLIP-so400m
+        size (``hidden_size=1152``, 27 layers) regardless of ``paligemma_variant``.
+        """
+        import physicalai.policies.pi05.model as pi05_model_mod
+
+        tiny = pi05_model_mod.GemmaVariantConfig(
+            width=64,
+            depth=2,
+            mlp_dim=128,
+            num_heads=1,
+            num_kv_heads=1,
+            head_dim=64,
+        )
+        monkeypatch.setattr(pi05_model_mod, "get_gemma_config", lambda variant: tiny)  # noqa: ARG005
+
+        orig_config_mapping_getitem = pi05_model_mod.CONFIG_MAPPING.__getitem__
+
+        def _tiny_paligemma_factory() -> object:
+            cfg = orig_config_mapping_getitem("paligemma")()
+            cfg.vision_config.hidden_size = 32
+            cfg.vision_config.intermediate_size = 64
+            cfg.vision_config.num_hidden_layers = 1
+            cfg.vision_config.num_attention_heads = 1
+            return cfg
+
+        class _TinyConfigMapping(dict):
+            def __getitem__(self, key: str) -> object:
+                if key == "paligemma":
+                    return _tiny_paligemma_factory
+                return orig_config_mapping_getitem(key)
+
+        monkeypatch.setattr(pi05_model_mod, "CONFIG_MAPPING", _TinyConfigMapping())
 
     @staticmethod
     def _stats() -> dict:
@@ -1460,7 +1504,6 @@ class TestPi05LoRAIntegration:
             },
         }
 
-    @pytest.mark.slow
     def test_lora_injection_reduces_trainable_params(self) -> None:
         """Test enabling LoRA drastically reduces the number of trainable parameters."""
         policy = Pi05(
@@ -1481,7 +1524,6 @@ class TestPi05LoRAIntegration:
         assert 0 < trainable < total
         assert trainable / total < 0.01, "LoRA should train well under 1% of parameters"
 
-    @pytest.mark.slow
     def test_lora_adapters_default_to_float32_under_bfloat16_base(self) -> None:
         """Test LoRA adapter parameters are fp32 even when the base model is bf16."""
         policy = Pi05(
@@ -1496,7 +1538,6 @@ class TestPi05LoRAIntegration:
         lora_dtypes = {p.dtype for n, p in policy.named_parameters() if "lora_" in n}
         assert lora_dtypes == {torch.float32}
 
-    @pytest.mark.slow
     def test_lora_adapter_dtype_auto_inherits_base_dtype(self) -> None:
         """Test lora_adapter_dtype='auto' lets adapters inherit the base layer's dtype."""
         policy = Pi05(
@@ -1512,7 +1553,6 @@ class TestPi05LoRAIntegration:
         lora_dtypes = {p.dtype for n, p in policy.named_parameters() if "lora_" in n}
         assert torch.bfloat16 in lora_dtypes
 
-    @pytest.mark.slow
     def test_dora_injection_on_full_model(self) -> None:
         """Test lora_use_dora=True injects DoRA adapters (magnitude vector) on Pi05Model."""
         policy = Pi05(
@@ -1535,181 +1575,3 @@ class TestPi05LoRAIntegration:
         total = sum(p.numel() for p in policy.parameters())
         assert 0 < trainable < total
 
-    @pytest.mark.slow
-    def test_merge_dora_before_export_preserves_predictions(self) -> None:
-        """Test that merging DoRA adapters (like LoRA) preserves model predictions."""
-        import copy
-
-        from physicalai.data import Observation
-        from physicalai.policies.peft import is_lora_injected, merge_lora_
-
-        policy = Pi05(
-            dataset_stats=self._stats(),
-            paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m",
-            dtype="float32",
-            lora_enabled=True,
-            lora_rank=4,
-            lora_alpha=8,
-            lora_use_dora=True,
-            n_action_steps=5,
-            chunk_size=5,
-            gradient_checkpointing=False,
-            use_random_input_noise=False,
-        )
-        policy.eval()
-
-        obs = Observation(
-            state=torch.randn(2, 8),
-            images={"0": torch.rand(2, 3, 224, 224)},
-            task=["do a thing", "do another thing"],
-        )
-        with torch.no_grad():
-            action_before = policy(obs)
-
-        original_model = policy.model
-        merged_model = copy.deepcopy(original_model)
-        merge_lora_(merged_model)
-        assert not is_lora_injected(merged_model)
-
-        policy.model = merged_model
-        with torch.no_grad():
-            action_after = policy(obs)
-        policy.model = original_model
-
-        torch.testing.assert_close(action_before, action_after, atol=1e-3, rtol=1e-3)
-        assert is_lora_injected(policy.model)
-
-    @pytest.mark.slow
-    def test_forward_backward_with_lora(self) -> None:
-        """Test a full forward+backward pass with LoRA injected produces gradients.
-
-        Uses gemma_2b for the VLM backbone because the vision-to-text projection
-        dimension (2048) is only compatible with the gemma_2b text config; the
-        gemma_300m variant is reserved for construction-only tests above.
-        """
-        from physicalai.data import Observation
-
-        policy = Pi05(
-            dataset_stats=self._stats(),
-            paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m",
-            dtype="bfloat16",
-            lora_enabled=True,
-            lora_rank=4,
-            lora_alpha=8,
-            n_action_steps=5,
-            chunk_size=5,
-            gradient_checkpointing=False,
-        )
-        obs = Observation(
-            state=torch.randn(2, 8),
-            images={"0": torch.rand(2, 3, 224, 224)},
-            task=["do a thing", "do another thing"],
-            action=torch.randn(2, 5, 7),
-        )
-        loss, loss_dict = policy(obs)
-        assert torch.isfinite(loss)
-        loss.backward()
-
-        lora_params = [(n, p) for n, p in policy.named_parameters() if "lora_" in n]
-        assert len(lora_params) > 0
-        assert all(p.grad is not None for _, p in lora_params), "All LoRA params should receive gradients"
-
-    @pytest.mark.slow
-    def test_merge_before_export_preserves_predictions(self) -> None:
-        """Test that Pi05.export's merge-before-export leaves self.model untouched.
-
-        and produces predictions matching the pre-merge model on a disposable copy.
-        """
-        import copy
-
-        from physicalai.data import Observation
-        from physicalai.policies.peft import is_lora_injected, merge_lora_
-
-        policy = Pi05(
-            dataset_stats=self._stats(),
-            paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m",
-            dtype="float32",
-            lora_enabled=True,
-            lora_rank=4,
-            lora_alpha=8,
-            n_action_steps=5,
-            chunk_size=5,
-            gradient_checkpointing=False,
-            use_random_input_noise=False,
-        )
-        policy.eval()
-
-        obs = Observation(
-            state=torch.randn(2, 8),
-            images={"0": torch.rand(2, 3, 224, 224)},
-            task=["do a thing", "do another thing"],
-        )
-        with torch.no_grad():
-            action_before = policy(obs)
-
-        original_model = policy.model
-        merged_model = copy.deepcopy(original_model)
-        merge_lora_(merged_model)
-        assert not is_lora_injected(merged_model)
-
-        policy.model = merged_model
-        with torch.no_grad():
-            action_after = policy(obs)
-        policy.model = original_model
-
-        torch.testing.assert_close(action_before, action_after, atol=1e-3, rtol=1e-3)
-        # The live training model must be untouched (still has LoRA injected).
-        assert is_lora_injected(policy.model)
-
-    @pytest.mark.slow
-    def test_checkpoint_roundtrip_preserves_lora_weights(self) -> None:
-        """Test LoRA adapter weights survive a Lightning checkpoint save/load cycle."""
-        policy = Pi05(
-            dataset_stats=self._stats(),
-            paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m",
-            dtype="float32",
-            lora_enabled=True,
-            lora_rank=4,
-            lora_alpha=8,
-            n_action_steps=5,
-            chunk_size=5,
-            gradient_checkpointing=False,
-        )
-
-        # Perturb one LoRA param so a stale/zero-init restore would be detectable.
-        with torch.no_grad():
-            for _, p in policy.named_parameters():
-                if p.requires_grad:
-                    p.add_(1.0)
-                    break
-
-        checkpoint = {
-            "state_dict": policy.state_dict(),
-            "hyper_parameters": dict(policy.hparams),
-            "pytorch-lightning_version": "2.0.0",
-            "epoch": 0,
-            "global_step": 0,
-        }
-
-        import tempfile
-        from pathlib import Path
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            ckpt_path = Path(tmp_dir) / "pi05_lora.ckpt"
-            torch.save(checkpoint, ckpt_path)
-            restored = Pi05.load_from_checkpoint(str(ckpt_path))
-
-        assert restored.config.use_lora
-        from physicalai.policies.peft import is_lora_injected
-
-        assert is_lora_injected(restored.model)
-
-        orig_sd = policy.state_dict()
-        restored_sd = restored.state_dict()
-        assert set(orig_sd.keys()) == set(restored_sd.keys())
-        for key, value in orig_sd.items():
-            torch.testing.assert_close(value.float(), restored_sd[key].float(), atol=1e-5, rtol=1e-5)

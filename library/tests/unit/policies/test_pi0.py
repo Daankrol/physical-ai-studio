@@ -346,9 +346,73 @@ class TestGetPolicy:
 class TestPi0LoRAIntegration:
     """Full Pi0/Pi0.5 + LoRA integration tests.
 
-    These construct a real (small-variant) Pi0Model (downloading/loading the PaliGemma
-    backbone), so they are marked slow.
+    These construct a real Pi0Model, but the PaliGemma backbone is replaced with a
+    tiny, randomly-initialized stand-in (see ``_patch_tiny_paligemma`` below) so no
+    HuggingFace download happens and peak memory stays in the low GBs. The stand-in
+    preserves ``head_dim``/``num_key_value_heads``/depth compatibility with the action
+    expert so the shared-KV-cache attention path in ``PaliGemmaWithExpert.forward``
+    still exercises real code, just at a much smaller scale.
     """
+
+    @pytest.fixture(autouse=True)
+    def _patch_tiny_paligemma(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Replace the real ~3B-param PaliGemma backbone with a tiny stand-in.
+
+        Keeps ``vocab_size`` real (tokenizer output ids must stay in range) and keeps
+        ``head_dim``/``num_key_value_heads`` consistent between the VLM backbone and the
+        action expert, since ``PaliGemmaWithExpert.forward`` shares KV cache state
+        between them.
+        """
+        from transformers import GemmaConfig, PaliGemmaConfig, PaliGemmaForConditionalGeneration, SiglipVisionConfig
+
+        import physicalai.policies.pi0.components.gemma as gemma_mod
+
+        tiny = gemma_mod._GemmaConfig(  # noqa: SLF001
+            vocab_size=257152,
+            width=64,
+            depth=2,
+            mlp_dim=128,
+            num_heads=1,
+            num_kv_heads=1,
+            head_dim=64,
+        )
+        monkeypatch.setitem(gemma_mod._GEMMA_CONFIGS, "gemma_300m", tiny)
+        monkeypatch.setitem(gemma_mod._GEMMA_CONFIGS, "gemma_2b", tiny)
+
+        def _fake_from_pretrained(
+            cls: type,
+            model_id: str,  # noqa: ARG001
+            *,
+            dtype: torch.dtype | None = None,
+            revision: str | None = None,  # noqa: ARG001
+            **kwargs: object,  # noqa: ARG001
+        ) -> PaliGemmaForConditionalGeneration:
+            vision_config = SiglipVisionConfig(
+                hidden_size=32,
+                intermediate_size=64,
+                num_hidden_layers=1,
+                num_attention_heads=1,
+                image_size=224,
+                patch_size=14,
+            )
+            text_config = GemmaConfig(
+                vocab_size=257152,
+                hidden_size=64,
+                intermediate_size=128,
+                num_hidden_layers=2,
+                num_attention_heads=1,
+                num_key_value_heads=1,
+                head_dim=64,
+            )
+            config = PaliGemmaConfig(vision_config=vision_config, text_config=text_config, projection_dim=64)
+            model = cls(config)
+            return model.to(dtype) if dtype is not None else model
+
+        monkeypatch.setattr(
+            PaliGemmaForConditionalGeneration,
+            "from_pretrained",
+            classmethod(_fake_from_pretrained),
+        )
 
     @staticmethod
     def _stats() -> dict:
@@ -357,7 +421,6 @@ class TestPi0LoRAIntegration:
             "action": {"mean": [0.0] * 8, "std": [1.0] * 8, "shape": (8,)},
         }
 
-    @pytest.mark.slow
     def test_lora_injection_reduces_trainable_params(self) -> None:
         """Test enabling LoRA drastically reduces the number of trainable parameters."""
         from physicalai.policies.peft import is_lora_injected
@@ -381,7 +444,6 @@ class TestPi0LoRAIntegration:
         assert 0 < trainable < total
         assert trainable / total < 0.01, "LoRA should train well under 1% of parameters"
 
-    @pytest.mark.slow
     def test_lora_disabled_does_not_inject(self) -> None:
         """Test that with lora_enabled=False (the default), no adapters are injected."""
         from physicalai.policies.peft import is_lora_injected
@@ -401,7 +463,6 @@ class TestPi0LoRAIntegration:
         total = sum(p.numel() for p in policy.parameters())
         assert trainable == total or trainable > 0  # tune_action_expert defaults to True
 
-    @pytest.mark.slow
     def test_lora_works_on_pi05_variant(self) -> None:
         """Test LoRA injection also works via the Pi05 convenience alias."""
         from physicalai.policies.peft import is_lora_injected
@@ -420,7 +481,6 @@ class TestPi0LoRAIntegration:
         assert policy.config.variant == "pi05"
         assert is_lora_injected(policy.model)
 
-    @pytest.mark.slow
     def test_dora_injection(self) -> None:
         """Test lora_use_dora=True injects DoRA adapters (magnitude vector) on Pi0Model."""
         from physicalai.policies.peft import is_lora_injected
@@ -441,7 +501,6 @@ class TestPi0LoRAIntegration:
         param_names = {n for n, _ in policy.named_parameters()}
         assert any("lora_magnitude_vector" in n for n in param_names)
 
-    @pytest.mark.slow
     def test_merge_lora_before_export_preserves_predictions(self) -> None:
         """Test that Pi0.export's merge-before-export leaves self.model untouched.
 
@@ -491,7 +550,6 @@ class TestPi0LoRAIntegration:
         # The live training model must be untouched (still has LoRA injected).
         assert is_lora_injected(policy.model)
 
-    @pytest.mark.slow
     def test_checkpoint_roundtrip_preserves_lora_weights(self) -> None:
         """Test LoRA adapter weights survive a Lightning checkpoint save/load cycle."""
         import tempfile
@@ -530,6 +588,10 @@ class TestPi0LoRAIntegration:
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             ckpt_path = Path(tmp_dir) / "pi0_lora.ckpt"
+            # nosemgrep: trailofbits.python.pickles-in-pytorch.pickles-in-pytorch
+            # reason: test-local Lightning checkpoint written and read back within the same
+            # tmpdir; not untrusted input. safetensors is not an option since
+            # load_from_checkpoint requires a pickle checkpoint.
             torch.save(checkpoint, ckpt_path)
             restored = Pi0.load_from_checkpoint(str(ckpt_path))
 
