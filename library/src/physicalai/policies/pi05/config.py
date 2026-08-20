@@ -17,12 +17,12 @@ Example (API):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 from physicalai.config import Config
 
 from physicalai.policies.mixins import SnapFlowConfigMixin
-from physicalai.policies.peft import PeftConfigMixin
+from physicalai.policies.mixins.peft import PeftConfigMixin
 
 
 @dataclass(frozen=True)
@@ -54,7 +54,7 @@ class Pi05Config(PeftConfigMixin, SnapFlowConfigMixin, Config):
         freeze_vision_encoder: Whether to freeze vision encoder during training. Defaults to False.
         train_expert_only: Whether to train only the action expert. Defaults to False.
         lora_*: LoRA/DoRA fine-tuning fields, see
-            ``physicalai.policies.peft.PeftConfigMixin``. The default LoRA target modules
+            ``physicalai.policies.mixins.peft.PeftConfigMixin``. The default LoRA target modules
             (when ``lora_target_modules`` is ``None``) come from
             ``Pi05Model.get_default_peft_targets()``: full attention (``q``/``k``/``v``/
             ``o_proj``) and MLP (``gate``/``up``/``down_proj``) on *both* the action expert
@@ -63,6 +63,7 @@ class Pi05Config(PeftConfigMixin, SnapFlowConfigMixin, Config):
             This excludes the SnapFlow-only ``target_time_mlp_*`` heads and the vision
             tower (SigLIP backbone); pass an explicit ``lora_target_modules`` to target
             those.
+
         normalization_mode: Normalization method for state/action features.
             ``"QUANTILES"`` maps data to [-1, 1] using the 1st and 99th percentiles,
             which is robust to outliers. ``"MEAN_STD"`` uses zero-mean unit-variance
@@ -81,6 +82,15 @@ class Pi05Config(PeftConfigMixin, SnapFlowConfigMixin, Config):
         scheduler_decay_lr: Final learning rate after decay. Defaults to 2.5e-6.
         use_random_input_noise: Whether to use random noise as the initial input for the denoising process
             during inference. If False, zeros are used instead. Defaults to False.
+
+    Note:
+        ``freeze_vision_encoder``/``train_expert_only`` are mutually exclusive with
+        ``lora_enabled=True`` at their non-default values: LoRA injection freezes all base
+        parameters after these flags are applied, so combining them with LoRA raises a
+        ``ValueError`` in ``__post_init__``. Note also that if you bypass this check (e.g.
+        by calling ``freeze_vlm()`` after construction), ``train_expert_only=True`` forces
+        ``paligemma.eval()`` on every subsequent ``train()`` call, which silently disables
+        dropout inside any LoRA adapters injected into the PaliGemma language model.
 
     See :class:`~physicalai.policies.mixins.SnapFlowConfigMixin` for the
     inherited ``snapflow_*`` attributes.
@@ -117,6 +127,11 @@ class Pi05Config(PeftConfigMixin, SnapFlowConfigMixin, Config):
 
     freeze_vision_encoder: bool = False
     train_expert_only: bool = False
+
+    _PEFT_EXCLUSIVE_FLAGS: ClassVar[dict[str, object]] = {
+        "freeze_vision_encoder": False,
+        "train_expert_only": False,
+    }
 
     normalization_mode: Literal["MEAN_STD", "QUANTILES"] = "QUANTILES"
 

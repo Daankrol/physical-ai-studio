@@ -18,7 +18,7 @@ from torch import nn
 
 from physicalai.data.observation import ACTION, IMAGES, STATE, Observation
 from physicalai.policies.base import Model
-from physicalai.policies.peft import PeftModelMixin
+from physicalai.policies.mixins.peft import PeftModelMixin
 
 from .components.attention import make_attention_mask_2d, prepare_4d_attention_mask
 from .components.gemma import GemmaVariant, PaliGemmaWithExpert

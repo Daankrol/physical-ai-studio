@@ -34,7 +34,7 @@ from pathlib import Path
 import pytest
 import torch
 from physicalai.data import Observation
-from physicalai.policies.peft import is_lora_injected, merge_lora_
+from physicalai.policies.mixins.peft import is_lora_injected, merge_lora_
 from physicalai.policies.pi05 import Pi05
 
 

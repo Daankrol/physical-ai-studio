@@ -17,7 +17,7 @@ without disturbing dataclass field ordering in the concrete config.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,18 @@ class PeftConfigMixin:
             also tuning ``lora_rank``/``lora_alpha``. Requires ``peft`` to be installed and,
             in practice, a pretrained checkpoint to fine-tune from (LoRA on a randomly
             initialized model is not meaningful).
+
+            LoRA injection freezes *all* pre-existing model parameters and trains only the
+            newly created adapter weights (see ``physicalai.policies.mixins.peft.inject_lora``).
+            This happens after any policy-specific ``tune_*``/``freeze_*``/``train_expert_only``
+            flags have been applied, so those flags become inert once ``lora_enabled`` is True:
+            whichever submodules the LoRA target regex reaches will train via their adapters
+            regardless of a ``tune_*=False`` request, and submodules the regex does not reach
+            will not train at all even if a ``tune_*=True`` request asked for them. To avoid this
+            silently overriding your intent, concrete configs that declare
+            ``_PEFT_EXCLUSIVE_FLAGS`` will raise a ``ValueError`` in ``__post_init__`` if
+            ``lora_enabled=True`` is combined with a non-default value for one of those flags;
+            use ``lora_target_modules`` to control which submodules are adapted instead.
         lora_rank: LoRA rank (dimension of the low-rank decomposition). Only takes effect
             when ``lora_enabled`` is True. Higher rank means more trainable parameters and
             closer to full fine-tuning. Defaults to 32, a reasonable middle ground; a lighter
@@ -63,11 +75,23 @@ class PeftConfigMixin:
     lora_adapter_dtype: Literal["float32", "auto"] = "float32"
     lora_use_dora: bool = False
 
+    _PEFT_EXCLUSIVE_FLAGS: ClassVar[dict[str, object]] = {}
+    """Maps flag name -> default value for fields that ``inject_lora`` overrides.
+
+    Concrete configs should override this with their trainability flags (e.g.
+    ``tune_paligemma``/``tune_action_expert``/``tune_vision_encoder`` or
+    ``freeze_vision_encoder``/``train_expert_only``) so that ``__post_init__`` can reject
+    combining ``lora_enabled=True`` with a non-default value for one of them, since LoRA
+    injection freezes all base parameters and would otherwise silently override the flag.
+    """
+
     def __post_init__(self) -> None:
         """Validate LoRA configuration parameters.
 
         Raises:
-            ValueError: If any ``lora_*`` field is invalid.
+            ValueError: If any ``lora_*`` field is invalid, or if ``lora_enabled`` is
+                combined with a non-default value of a field listed in
+                ``_PEFT_EXCLUSIVE_FLAGS``.
         """
         super_post_init = getattr(super(), "__post_init__", None)
         if callable(super_post_init):
@@ -92,6 +116,23 @@ class PeftConfigMixin:
         if self.lora_adapter_dtype not in {"float32", "auto"}:
             msg = f"Invalid lora_adapter_dtype: {self.lora_adapter_dtype}"
             raise ValueError(msg)
+
+        if self.lora_enabled and self._PEFT_EXCLUSIVE_FLAGS:
+            conflicting = {
+                name: getattr(self, name)
+                for name, default in self._PEFT_EXCLUSIVE_FLAGS.items()
+                if getattr(self, name) != default
+            }
+            if conflicting:
+                msg = (
+                    f"lora_enabled=True is incompatible with non-default value(s) for "
+                    f"{sorted(conflicting)}: LoRA injection freezes all base parameters, "
+                    "so these flags would be silently overridden. Remove them (use their "
+                    "defaults) and control which submodules train via lora_target_modules "
+                    "instead. Got: "
+                    f"{', '.join(f'{name}={value!r}' for name, value in conflicting.items())}."
+                )
+                raise ValueError(msg)
 
     @property
     def use_lora(self) -> bool:

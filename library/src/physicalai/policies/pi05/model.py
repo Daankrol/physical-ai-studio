@@ -21,7 +21,7 @@ from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_P
 from physicalai.data.observation import ACTION, IMAGES
 from physicalai.policies.base import Model
 from physicalai.policies.mixins import SnapFlowModelMixin
-from physicalai.policies.peft import PeftModelMixin
+from physicalai.policies.mixins.peft import PeftModelMixin
 
 from .pi_gemma import (
     PaliGemmaForConditionalGenerationWithPiGemma,

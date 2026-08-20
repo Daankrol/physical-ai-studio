@@ -17,17 +17,14 @@ from physicalai.config.mixin import FromConfig
 
 from physicalai.export.mixin_policy import ExportablePolicyMixin
 from physicalai.policies.base import Policy
-from physicalai.policies.peft import PeftPolicyMixin, is_lora_injected
+from physicalai.policies.mixins.peft import PeftPolicyMixin
 from physicalai.train.utils import reformat_dataset_to_match_policy
 
 from .config import Pi0Config
 from .model import GemmaVariant, Pi0Model
 
 if TYPE_CHECKING:
-    from os import PathLike
-
     from physicalai.data import Observation
-    from physicalai.export import ExportBackend
     from physicalai.gyms import Gym
 
     from .preprocessor import Pi0Postprocessor, Pi0Preprocessor
@@ -75,7 +72,7 @@ class Pi0(PeftPolicyMixin, ExportablePolicyMixin, Policy, FromConfig):
         grad_clip_norm: Gradient clipping norm value. Default: 1.0.
         lora_enabled: Whether to enable LoRA/DoRA fine-tuning. Default: False. Disabled by
             default; requires a pretrained checkpoint to be meaningful. See
-            ``physicalai.policies.peft.PeftConfigMixin``.
+            ``physicalai.policies.mixins.peft.PeftConfigMixin``.
         lora_rank: LoRA rank. Default: 32.
         lora_alpha: LoRA alpha scaling factor. ``None`` resolves to ``lora_rank``. Default: None.
         lora_dropout: LoRA dropout probability. Default: 0.05.
@@ -468,40 +465,9 @@ class Pi0(PeftPolicyMixin, ExportablePolicyMixin, Policy, FromConfig):
                 gradient_clip_algorithm=gradient_clip_algorithm or "norm",
             )
 
-    def export(
-        self,
-        output_path: PathLike | str,
-        backend: ExportBackend | str,
-        input_sample: dict[str, torch.Tensor] | None = None,
-        **export_kwargs: dict,
-    ) -> None:
-        """Export the policy, merging any LoRA adapters into base weights first.
-
-        If LoRA is enabled, exporting is done on a disposable deep copy of ``self.model``
-        with adapters merged in-place via ``merge_lora_``, so the exported artifact has no
-        ``peft`` dependency and matches the plain (adapter-free) export contract consumed
-        by Runtime's ``InferenceModel``. The live training model (``self.model``) is left
-        untouched. Merging bfloat16-precision LoRA adapters into bfloat16 base weights is
-        lossy; this only affects the exported copy.
-
-        Args:
-            output_path: The file path where the exported model will be saved.
-            backend: The export backend to use.
-            input_sample: A sample input tensor dictionary for model tracing.
-            **export_kwargs: Additional keyword arguments forwarded to the backend export.
-        """
-        if not (self.config.use_lora and self.model is not None and is_lora_injected(self.model)):
-            super().export(output_path, backend, input_sample, **export_kwargs)
-            return
-
-        logger.info("Merging LoRA adapters into a copy of the model before export.")
-        original_model = self.model
-        merged_model = self._merged_lora_model_for_export()
-        self.model = cast("Pi0Model | None", merged_model)
-        try:
-            super().export(output_path, backend, input_sample, **export_kwargs)
-        finally:
-            self.model = original_model
+    # export() is provided by PeftPolicyMixin (merges LoRA adapters into a disposable
+    # copy of self.model before delegating to ExportablePolicyMixin.export() via
+    # cooperative super()); see physicalai.policies.mixins.peft.PeftPolicyMixin.export.
 
 
 class Pi05(Pi0):

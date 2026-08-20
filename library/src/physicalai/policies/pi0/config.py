@@ -10,7 +10,7 @@ from typing import ClassVar, Literal, cast
 
 from physicalai.config import Config
 
-from physicalai.policies.peft import PeftConfigMixin
+from physicalai.policies.mixins.peft import PeftConfigMixin
 
 
 @dataclass(frozen=True)
@@ -18,17 +18,29 @@ class Pi0Config(PeftConfigMixin, Config):
     """Configuration for Pi0/Pi0.5 flow matching model.
 
     LoRA/DoRA fine-tuning fields (``lora_*``) are provided by
-    :class:`physicalai.policies.peft.PeftConfigMixin` and disabled by default
+    :class:`physicalai.policies.mixins.peft.PeftConfigMixin` and disabled by default
     (``lora_enabled=False``). When enabled, the default LoRA target modules (used when
     ``lora_target_modules`` is ``None``) come from ``Pi0Model.get_default_peft_targets()``:
-    the action expert's ``q_proj``/``v_proj`` attention projections plus the
+    the     action expert's ``q_proj``/``v_proj`` attention projections plus the
     action/state/time projection heads. This excludes the PaliGemma VLM/vision backbone;
     pass an explicit ``lora_target_modules`` to target those instead.
+
+    ``tune_paligemma``/``tune_action_expert``/``tune_vision_encoder`` are mutually
+    exclusive with ``lora_enabled=True`` at their non-default values: LoRA injection
+    freezes all base parameters after these flags are applied, so combining them with
+    LoRA raises a ``ValueError`` in ``__post_init__`` rather than silently ignoring the
+    flags. Note the default LoRA targets never touch PaliGemma, so
+    ``tune_paligemma=True`` would otherwise be dropped entirely under LoRA.
     """
 
     DEFAULT_MAX_TOKEN_LEN_PI0: ClassVar[int] = 48
     DEFAULT_MAX_TOKEN_LEN_PI05: ClassVar[int] = 200
     _AUTO_MAX_TOKEN_LEN: ClassVar[object] = object()
+    _PEFT_EXCLUSIVE_FLAGS: ClassVar[dict[str, object]] = {
+        "tune_paligemma": False,
+        "tune_action_expert": True,
+        "tune_vision_encoder": False,
+    }
 
     variant: Literal["pi0", "pi05"] = "pi0"
 

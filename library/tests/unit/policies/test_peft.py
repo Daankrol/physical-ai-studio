@@ -12,10 +12,12 @@ a given policy is covered by that policy's own test module (e.g.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 import torch
 
-from physicalai.policies.peft import (
+from physicalai.policies.mixins.peft import (
     PeftConfigMixin,
     build_lora_config,
     inject_lora,
@@ -23,6 +25,9 @@ from physicalai.policies.peft import (
     log_trainable_parameters,
     merge_lora_,
 )
+
+if TYPE_CHECKING:
+    from physicalai.policies.mixins.peft import PeftPolicyMixin
 
 
 def _make_toy_module() -> torch.nn.Module:
@@ -119,7 +124,7 @@ class TestPeftConfigMixin:
 
 
 class TestPeftHelpers:
-    """Tests for the shared LoRA helpers in physicalai.policies.peft.functions."""
+    """Tests for the shared LoRA helpers in physicalai.policies.mixins.peft.functions."""
 
     def test_build_lora_config_basic_fields(self) -> None:
         """Test build_lora_config returns a usable LoraConfig object."""
@@ -282,3 +287,127 @@ class TestPeftHelpers:
             out_after = model(x)
 
         torch.testing.assert_close(out_before, out_after, atol=1e-4, rtol=1e-4)
+
+
+class _ToyPeftModel(torch.nn.Module):
+    """Toy model implementing the PeftModelMixin contract for host tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.q_proj = torch.nn.Linear(8, 8)
+        self.v_proj = torch.nn.Linear(8, 8)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.v_proj(self.q_proj(x))
+
+    @classmethod
+    def get_default_peft_targets(cls) -> str:
+        del cls
+        return r"(q|v)_proj"
+
+
+class _ExportRecorder:
+    """Records the model instance handed to export() by a host policy."""
+
+    def __init__(self) -> None:
+        self.exported_model: torch.nn.Module | None = None
+
+
+def _make_host_policy_class(recorder: _ExportRecorder) -> type:
+    from physicalai.policies.mixins.peft import PeftPolicyMixin
+
+    class _ExportableStub:
+        """Stand-in for ExportablePolicyMixin: terminal export() reading self.model."""
+
+        def export(self, output_path: object, backend_arg: object, input_sample: object = None, **kw: object) -> None:
+            recorder.exported_model = self.model  # type: ignore[attr-defined]
+            del output_path, backend_arg, input_sample, kw
+
+    class _HostPolicy(PeftPolicyMixin, _ExportableStub):
+        def __init__(self, *, use_lora: bool) -> None:
+            self.config = type("Cfg", (), {"use_lora": use_lora})()
+            self.model: torch.nn.Module | None = _ToyPeftModel()
+
+    return _HostPolicy
+
+
+class TestPeftPolicyMixinExport:
+    """Tests for PeftPolicyMixin.export()'s cooperative super() hoist."""
+
+    def test_export_without_lora_passes_through_unmodified_model(self) -> None:
+        """Test export() delegates directly to super().export() when LoRA is not enabled."""
+        recorder = _ExportRecorder()
+        host_cls = _make_host_policy_class(recorder)
+        host = host_cls(use_lora=False)
+        original_model = host.model
+
+        host.export("out", "torch")
+
+        assert recorder.exported_model is original_model
+        assert host.model is original_model
+
+    def test_export_with_injected_lora_swaps_in_merged_model_and_restores(self) -> None:
+        """Test export() swaps self.model to a merged copy for the call, then restores it."""
+        from physicalai.policies.mixins.peft import build_lora_config, inject_lora
+
+        recorder = _ExportRecorder()
+        host_cls = _make_host_policy_class(recorder)
+        host = host_cls(use_lora=True)
+        original_model = host.model
+
+        lora_config = build_lora_config(rank=4, alpha=8, dropout=0.0, target_modules=["q_proj", "v_proj"])
+        inject_lora(host.model, lora_config)
+
+        host.export("out", "torch")
+
+        assert recorder.exported_model is not None
+        assert recorder.exported_model is not original_model, "export() should use a disposable merged copy"
+        assert not is_lora_injected(recorder.exported_model)
+        assert host.model is original_model, "the live training model must be restored after export()"
+
+    def test_export_with_lora_enabled_but_not_injected_passes_through(self) -> None:
+        """Test export() falls back to the live model if LoRA is enabled but never injected."""
+        recorder = _ExportRecorder()
+        host_cls = _make_host_policy_class(recorder)
+        host = host_cls(use_lora=True)
+        original_model = host.model
+
+        host.export("out", "torch")
+
+        assert recorder.exported_model is original_model
+        assert host.model is original_model
+
+
+class TestPeftPolicyMixinOnFitStart:
+    """Tests for PeftPolicyMixin.on_fit_start()'s missing-injection guard."""
+
+    def _make_host(self, *, use_lora: bool, inject: bool) -> PeftPolicyMixin:
+        from physicalai.policies.mixins.peft import PeftPolicyMixin, build_lora_config, inject_lora
+
+        class _Host(PeftPolicyMixin):
+            def __init__(self) -> None:
+                self.config = type("Cfg", (), {"use_lora": use_lora})()
+                self.model: torch.nn.Module | None = _ToyPeftModel()
+
+        host = _Host()
+        if inject:
+            lora_config = build_lora_config(rank=4, alpha=8, dropout=0.0, target_modules=["q_proj", "v_proj"])
+            inject_lora(host.model, lora_config)
+        return host
+
+    def test_raises_when_lora_enabled_but_not_injected(self) -> None:
+        """Test on_fit_start raises if use_lora is True but no adapters were injected."""
+        host = self._make_host(use_lora=True, inject=False)
+        with pytest.raises(RuntimeError, match="_inject_lora"):
+            host.on_fit_start()
+
+    def test_passes_when_lora_enabled_and_injected(self) -> None:
+        """Test on_fit_start is a no-op if adapters were correctly injected."""
+        host = self._make_host(use_lora=True, inject=True)
+        host.on_fit_start()  # should not raise
+
+    def test_passes_when_lora_disabled(self) -> None:
+        """Test on_fit_start is a no-op if LoRA is disabled entirely."""
+        host = self._make_host(use_lora=False, inject=False)
+        host.on_fit_start()  # should not raise
+

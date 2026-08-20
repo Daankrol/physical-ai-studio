@@ -1430,8 +1430,27 @@ class TestPi05LoRAConfig:
         assert restored.lora_use_dora is True
         assert restored.use_lora is True
 
+    def test_lora_enabled_rejects_non_default_freeze_vision_encoder(self) -> None:
+        """Test lora_enabled=True with freeze_vision_encoder=True (non-default) is rejected."""
+        with pytest.raises(ValueError, match="freeze_vision_encoder"):
+            Pi05Config(lora_enabled=True, freeze_vision_encoder=True)
 
-class TestPi05LoRAIntegration:
+    def test_lora_enabled_rejects_non_default_train_expert_only(self) -> None:
+        """Test lora_enabled=True with train_expert_only=True (non-default) is rejected."""
+        with pytest.raises(ValueError, match="train_expert_only"):
+            Pi05Config(lora_enabled=True, train_expert_only=True)
+
+    def test_lora_enabled_allows_default_freeze_flags(self) -> None:
+        """Test lora_enabled=True with freeze flags at their defaults is allowed."""
+        config = Pi05Config(lora_enabled=True, freeze_vision_encoder=False, train_expert_only=False)
+        assert config.use_lora is True
+
+    def test_freeze_flags_allowed_when_lora_disabled(self) -> None:
+        """Test non-default freeze flags are fine when LoRA is disabled."""
+        config = Pi05Config(lora_enabled=False, train_expert_only=True)
+        assert config.train_expert_only is True
+
+
     """Construction-only Pi05 + LoRA integration tests.
 
     These construct a real Pi05Model, but both the VLM backbone and action expert use
@@ -1515,7 +1534,7 @@ class TestPi05LoRAIntegration:
             lora_alpha=8,
         )
         assert policy.config.use_lora
-        from physicalai.policies.peft import is_lora_injected
+        from physicalai.policies.mixins.peft import is_lora_injected
 
         assert is_lora_injected(policy.model)
 
@@ -1565,7 +1584,7 @@ class TestPi05LoRAIntegration:
             lora_use_dora=True,
         )
         assert policy.config.lora_use_dora is True
-        from physicalai.policies.peft import is_lora_injected
+        from physicalai.policies.mixins.peft import is_lora_injected
 
         assert is_lora_injected(policy.model)
         param_names = {n for n, _ in policy.named_parameters()}

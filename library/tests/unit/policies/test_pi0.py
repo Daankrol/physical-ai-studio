@@ -115,7 +115,7 @@ class TestPi0Config:
 
 
 class TestPi0LoRAConfig:
-    """Tests for Pi0Config LoRA fields (via physicalai.policies.peft.PeftConfigMixin)."""
+    """Tests for Pi0Config LoRA fields (via physicalai.policies.mixins.peft.PeftConfigMixin)."""
 
     def test_lora_disabled_by_default(self) -> None:
         """Test LoRA is disabled by default for Pi0/Pi0.5."""
@@ -188,6 +188,37 @@ class TestPi0LoRAConfig:
         assert config.is_pi05 is True
         assert config.use_lora is True
         assert config.lora_rank == 16
+
+    def test_lora_enabled_rejects_non_default_tune_paligemma(self) -> None:
+        """Test lora_enabled=True with tune_paligemma=True (non-default) is rejected."""
+        with pytest.raises(ValueError, match="tune_paligemma"):
+            Pi0Config(lora_enabled=True, tune_paligemma=True)
+
+    def test_lora_enabled_rejects_non_default_tune_action_expert(self) -> None:
+        """Test lora_enabled=True with tune_action_expert=False (non-default) is rejected."""
+        with pytest.raises(ValueError, match="tune_action_expert"):
+            Pi0Config(lora_enabled=True, tune_action_expert=False)
+
+    def test_lora_enabled_rejects_non_default_tune_vision_encoder(self) -> None:
+        """Test lora_enabled=True with tune_vision_encoder=True (non-default) is rejected."""
+        with pytest.raises(ValueError, match="tune_vision_encoder"):
+            Pi0Config(lora_enabled=True, tune_vision_encoder=True)
+
+    def test_lora_enabled_allows_default_tune_flags(self) -> None:
+        """Test lora_enabled=True with all tune_* flags at their defaults is allowed."""
+        config = Pi0Config(
+            lora_enabled=True,
+            tune_paligemma=False,
+            tune_action_expert=True,
+            tune_vision_encoder=False,
+        )
+        assert config.use_lora is True
+
+    def test_tune_flags_allowed_when_lora_disabled(self) -> None:
+        """Test non-default tune_* flags are fine when LoRA is disabled."""
+        config = Pi0Config(lora_enabled=False, tune_paligemma=True, tune_action_expert=False)
+        assert config.tune_paligemma is True
+        assert config.tune_action_expert is False
 
 
 class TestPi0Policy:
@@ -442,7 +473,7 @@ class TestPi0LoRAIntegration:
 
     def test_lora_injection_reduces_trainable_params(self) -> None:
         """Test enabling LoRA drastically reduces the number of trainable parameters."""
-        from physicalai.policies.peft import is_lora_injected
+        from physicalai.policies.mixins.peft import is_lora_injected
 
         policy = Pi0(
             action_expert_variant="gemma_300m",
@@ -465,7 +496,7 @@ class TestPi0LoRAIntegration:
 
     def test_lora_disabled_does_not_inject(self) -> None:
         """Test that with lora_enabled=False (the default), no adapters are injected."""
-        from physicalai.policies.peft import is_lora_injected
+        from physicalai.policies.mixins.peft import is_lora_injected
 
         policy = Pi0(
             action_expert_variant="gemma_300m",
@@ -484,7 +515,7 @@ class TestPi0LoRAIntegration:
 
     def test_lora_works_on_pi05_variant(self) -> None:
         """Test LoRA injection also works via the Pi05 convenience alias."""
-        from physicalai.policies.peft import is_lora_injected
+        from physicalai.policies.mixins.peft import is_lora_injected
 
         policy = Pi05(
             action_expert_variant="gemma_300m",
@@ -502,7 +533,7 @@ class TestPi0LoRAIntegration:
 
     def test_dora_injection(self) -> None:
         """Test lora_use_dora=True injects DoRA adapters (magnitude vector) on Pi0Model."""
-        from physicalai.policies.peft import is_lora_injected
+        from physicalai.policies.mixins.peft import is_lora_injected
 
         policy = Pi0(
             action_expert_variant="gemma_300m",
@@ -528,7 +559,7 @@ class TestPi0LoRAIntegration:
         import copy
 
         from physicalai.data import Observation
-        from physicalai.policies.peft import is_lora_injected, merge_lora_
+        from physicalai.policies.mixins.peft import is_lora_injected, merge_lora_
 
         policy = Pi0(
             action_expert_variant="gemma_300m",
@@ -574,7 +605,7 @@ class TestPi0LoRAIntegration:
         import tempfile
         from pathlib import Path
 
-        from physicalai.policies.peft import is_lora_injected
+        from physicalai.policies.mixins.peft import is_lora_injected
 
         policy = Pi0(
             action_expert_variant="gemma_300m",
