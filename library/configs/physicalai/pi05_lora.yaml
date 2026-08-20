@@ -1,17 +1,29 @@
 # Pi05 Policy Training Configuration - LoRA Fine-Tuning
 #
 # Fine-tunes a pretrained Pi05 checkpoint with LoRA (Low-Rank Adaptation) instead of
-# full fine-tuning, following the recipe recommended by LeRobot's PEFT documentation:
-# https://huggingface.co/docs/lerobot/peft_training
+# full fine-tuning. Starts from LeRobot's PEFT recipe (https://huggingface.co/docs/lerobot/peft_training)
+# but widens target-module coverage based on two things LeRobot's own default doesn't do:
 #
-#   - rank=64, alpha=64 (scaling = alpha / rank = 1.0)
+#   - rank=32, alpha=32 (scaling = alpha / rank = 1.0). Rank was lowered from LeRobot's
+#     rank=64 suggestion because our default target-module set below is much wider than
+#     LeRobot's (full attention + MLP on two experts instead of q/v on one), so the same
+#     rank now covers far more matrices; drop further to 16 if you see overfitting on a
+#     small dataset, or raise back to 64 for more capacity if you have plenty of data.
 #   - learning rate scaled up ~10x versus full fine-tuning, since only a small fraction
 #     of parameters are being updated (LeRobot's docs: "The learning rate ... can usually
 #     be scaled by a factor of 10 compared to the learning rate used for full fine-tuning").
 #
-# Default LoRA target modules adapt the action expert's q/v attention projections plus
-# the action/time projection heads (see Pi05Config.lora_target_modules to customize).
-# The PaliGemma VLM backbone and vision tower are left frozen.
+# Default LoRA target modules (see Pi05Model.get_default_peft_targets, and
+# Pi05Config.lora_target_modules to override) adapt, on *both* the action expert and the
+# PaliGemma VLM's language model:
+#   - full attention: q/k/v/o_proj (LeRobot's own default only adapts q/v on the action
+#     expert alone, leaving the VLM frozen; the original LoRA paper's ablation (Hu et al.
+#     2021, Table 6) found adapting all four attention matrices at lower rank beats q/v
+#     alone at higher rank for the same parameter budget)
+#   - MLP: gate/up/down_proj (holds the bulk of a transformer block's parameters; q/v-only
+#     attention adaptation touches a disproportionately small slice of model capacity)
+#   - the always-trainable action/time projection heads
+# The vision tower (SigLIP backbone) is still left frozen by default.
 #
 # Usage:
 #   physicalai fit --config configs/physicalai/pi05_lora.yaml
@@ -51,8 +63,8 @@ model:
 
     # LoRA (Low-Rank Adaptation) fine-tuning.
     lora_enabled: true
-    lora_rank: 64
-    lora_alpha: 64
+    lora_rank: 32
+    lora_alpha: 32
     lora_dropout: 0.05
     # Set lora_use_dora: true to use DoRA (arxiv.org/abs/2402.09353) instead of plain LoRA;
     # slightly more compute/memory but typically improves quality at low ranks.

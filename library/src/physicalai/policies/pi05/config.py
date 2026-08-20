@@ -56,11 +56,13 @@ class Pi05Config(PeftConfigMixin, SnapFlowConfigMixin, Config):
         lora_*: LoRA/DoRA fine-tuning fields, see
             ``physicalai.policies.peft.PeftConfigMixin``. The default LoRA target modules
             (when ``lora_target_modules`` is ``None``) come from
-            ``Pi05Model.get_default_peft_targets()``: the action expert's ``q_proj``/
-            ``v_proj`` attention projections plus the action/time projection heads
+            ``Pi05Model.get_default_peft_targets()``: full attention (``q``/``k``/``v``/
+            ``o_proj``) and MLP (``gate``/``up``/``down_proj``) on *both* the action expert
+            and the PaliGemma VLM's language model, plus the action/time projection heads
             (``action_in_proj``, ``action_out_proj``, ``time_mlp_in``, ``time_mlp_out``).
-            This excludes the SnapFlow-only ``target_time_mlp_*`` heads and the PaliGemma
-            VLM backbone; pass an explicit ``lora_target_modules`` to target those.
+            This excludes the SnapFlow-only ``target_time_mlp_*`` heads and the vision
+            tower (SigLIP backbone); pass an explicit ``lora_target_modules`` to target
+            those.
         normalization_mode: Normalization method for state/action features.
             ``"QUANTILES"`` maps data to [-1, 1] using the 1st and 99th percentiles,
             which is robust to outliers. ``"MEAN_STD"`` uses zero-mean unit-variance
