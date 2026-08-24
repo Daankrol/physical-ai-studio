@@ -30,9 +30,10 @@ def _build_union(types: list[type]) -> Any:
 
 
 class RobotCatalogRegistry(RobotCatalogRegistryProtocol):
+    _robot_models: dict[str, type[BaseRobot]] = {}
+
     def __init__(self) -> None:
         self._definitions: dict[str, RobotCatalogDefinition] = {}
-        self._robot_models: dict[str, type[BaseRobot]] = {}
         self._robot_adapter: TypeAdapter | None = None
 
         for definition in so101.get_definitions() + widowxai.get_definitions():
@@ -52,7 +53,6 @@ class RobotCatalogRegistry(RobotCatalogRegistryProtocol):
             raise ValueError(f"Duplicate robot catalog registration for type: {definition.type}")
 
         self._definitions[definition.type] = definition
-        self._robot_models.pop(definition.type, None)
         self._robot_adapter = None
 
     @staticmethod
