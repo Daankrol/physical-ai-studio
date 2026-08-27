@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 import torch
-from physicalai.training_config import Config
+from physicalai.config import Config
 from physicalai.data.observation import IMAGES, STATE
 from physicalai.policies.pi05 import Pi05, Pi05Config, Pi05Model
 from physicalai.policies.pi05.pretrained_utils import (
@@ -1524,6 +1524,7 @@ class TestActionPaddingMask:
 
         from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
         from physicalai.data.observation import ACTION, EXTRA, IMAGES
+        from physicalai.policies.mixins import SnapFlowModelMixin
 
         velocity = torch.tensor([[[1.0, 1.0], [1.0, 1.0], [99.0, 99.0], [99.0, 99.0]]]).sqrt()
 
@@ -1545,6 +1546,7 @@ class TestActionPaddingMask:
             embed_prefix=lambda *_a, **_kw: (torch.zeros(1, 1, 1),) * 3,
             _predict_velocity=predict,
         )
+        stub.snapflow_mixed_loss = SnapFlowModelMixin.snapflow_mixed_loss.__get__(stub)
         batch: dict = {
             IMAGES: None,
             IMAGE_MASKS: None,

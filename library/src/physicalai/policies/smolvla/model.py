@@ -20,6 +20,7 @@ from torch import nn
 from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.observation import ACTION, IMAGES, STATE
 from physicalai.policies.base import Model, in_episode_bound, reduce_losses
+from physicalai.policies.mixins import SnapFlowModelMixin
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -637,7 +638,7 @@ def _pad_tensor(tensor: torch.Tensor, max_len: int, pad_value: float = 0) -> tor
     return padded_tensor
 
 
-class VLAFlowMatching(nn.Module):
+class VLAFlowMatching(SnapFlowModelMixin, nn.Module):
     """SmolVLA internal model.
 
     [Paper](https://arxiv.org/abs/2506.01844)
@@ -730,10 +731,12 @@ class VLAFlowMatching(nn.Module):
         self._min_period = min_period
         self._max_period = max_period
         self._use_random_input_noise = use_random_input_noise
-        self._snapflow_enabled = snapflow_enabled
-        self._snapflow_alpha = snapflow_alpha
-        self._snapflow_lambda = snapflow_lambda
-        self._snapflow_num_inference_steps = snapflow_num_inference_steps
+        self.init_snapflow_state(
+            enabled=snapflow_enabled,
+            alpha=snapflow_alpha,
+            lambda_=snapflow_lambda,
+            num_inference_steps=snapflow_num_inference_steps,
+        )
 
         self.vlm_with_expert = _SmolVLMWithExpertModel(
             model_id=vlm_model_name,
@@ -1116,7 +1119,7 @@ class VLAFlowMatching(nn.Module):
         v_t = self._predict_velocity(x_t, time, time, prefix_embs, prefix_pad_masks, prefix_att_masks)
         return F.mse_loss(u_t, v_t, reduction="none")
 
-    def forward(  # noqa: PLR0914
+    def forward(
         self,
         images: torch.Tensor,
         img_masks: torch.Tensor,
@@ -1164,82 +1167,23 @@ class VLAFlowMatching(nn.Module):
             state=state,
         )
 
-        bsize = actions.shape[0]
-        device = actions.device
-        fm_mask = torch.rand(bsize, device=device) < self._snapflow_alpha
-        fm_idx = fm_mask.nonzero(as_tuple=True)[0]
-        cd_idx = (~fm_mask).nonzero(as_tuple=True)[0]
+        time_expanded = time[:, None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
 
-        losses = torch.zeros(
-            bsize,
-            actions.shape[1],
-            actions.shape[2],
-            device=device,
-            dtype=actions.dtype,
+        # SmolVLA does not exempt consistency-distillation samples from the
+        # action-padding mask (unlike Pi05); the CD indices are discarded here.
+        losses, _cd_idx = self.snapflow_mixed_loss(
+            u_t=u_t,
+            x_t=x_t,
+            time=time,
+            actions=actions,
+            prefix_embs=prefix_embs,
+            prefix_pad_masks=prefix_pad_masks,
+            prefix_att_masks=prefix_att_masks,
+            sample_noise=self._sample_noise,
+            predict_velocity=self._predict_velocity,
         )
-
-        if fm_idx.numel() > 0:
-            fm_losses = self._forward_fm(
-                images,
-                img_masks,
-                lang_tokens,
-                lang_masks,
-                state,
-                actions[fm_idx],
-                noise[fm_idx],
-                time[fm_idx],
-                prefix_embs[fm_idx],
-                prefix_pad_masks[fm_idx],
-                prefix_att_masks[fm_idx],
-            )
-            losses[fm_idx] = fm_losses
-
-        if cd_idx.numel() > 0:
-            cd_actions_shape = (cd_idx.numel(), *actions.shape[1:])
-            x_1 = self._sample_noise(cd_actions_shape, device)
-            cd_prefix_embs = prefix_embs[cd_idx]
-            cd_prefix_pad_masks = prefix_pad_masks[cd_idx]
-            cd_prefix_att_masks = prefix_att_masks[cd_idx]
-            cd_bsize = cd_idx.numel()
-
-            with torch.no_grad():
-                t1 = torch.ones(cd_bsize, dtype=torch.float32, device=device)
-                v_1 = self._predict_velocity(
-                    x_1,
-                    t1,
-                    t1,
-                    cd_prefix_embs,
-                    cd_prefix_pad_masks,
-                    cd_prefix_att_masks,
-                )
-                x_half = x_1 - 0.5 * v_1
-                t_half = torch.full((cd_bsize,), 0.5, dtype=torch.float32, device=device)
-                v_half = self._predict_velocity(
-                    x_half,
-                    t_half,
-                    t_half,
-                    cd_prefix_embs,
-                    cd_prefix_pad_masks,
-                    cd_prefix_att_masks,
-                )
-                v_target = 0.5 * (v_1 + v_half)
-
-            t_zero = torch.zeros(cd_bsize, dtype=torch.float32, device=device)
-            t1 = torch.ones(cd_bsize, dtype=torch.float32, device=device)
-            v_pred = self._predict_velocity(
-                x_1,
-                t1,
-                t_zero,
-                cd_prefix_embs,
-                cd_prefix_pad_masks,
-                cd_prefix_att_masks,
-            )
-            losses[cd_idx] = self._snapflow_lambda * F.mse_loss(
-                v_pred,
-                v_target.detach(),
-                reduction="none",
-            )
-
         return losses
 
     def sample_actions(  # noqa: PLR0914
@@ -1296,16 +1240,14 @@ class VLAFlowMatching(nn.Module):
             use_cache=self._use_cache,
             fill_kv_cache=True,
         )
-        num_steps = self._snapflow_num_inference_steps if self._snapflow_enabled else self._num_steps
+        num_steps = self.snapflow_num_inference_steps(self._num_steps)
         dt = -1.0 / num_steps
 
         x_t = noise.clone()
         for step in range(num_steps):
             time = 1.0 + step * dt
             time_tensor = torch.tensor(time, dtype=torch.float32, device=device).expand(bsize)
-            target_time = (
-                torch.zeros(bsize, dtype=torch.float32, device=device) if self._snapflow_enabled else time_tensor
-            )
+            target_time = self.snapflow_target_time(bsize, time_tensor, device)
 
             v_t = self.denoise_step(
                 x_t=x_t,
@@ -1554,16 +1496,19 @@ class _SmolVLMWithExpertModel(nn.Module):
         return self
 
     def embed_image(self, image: torch.Tensor) -> torch.Tensor:
-        patch_attention_mask = None
-        # Get sequence from the vision encoder
-        image_hidden_states = (
-            self.get_vlm_model()
-            .vision_model(
-                pixel_values=image.to(dtype=self.get_vlm_model().vision_model.dtype),
-                patch_attention_mask=patch_attention_mask,
-            )
-            .last_hidden_state
+        vision_model = self.get_vlm_model().vision_model
+        pixel_values = image.to(dtype=vision_model.dtype)
+        batch_size, _, height, width = pixel_values.shape
+        patch_attention_mask = torch.ones(
+            (batch_size, height // vision_model.patch_size, width // vision_model.patch_size),
+            dtype=torch.bool,
+            device=pixel_values.device,
         )
+        # The vision transformer forward is inlined because every patch is valid here, so its
+        # bidirectional mask is a no-op, while building it from traced shapes breaks torch.jit.trace.
+        hidden_states = vision_model.embeddings(pixel_values=pixel_values, patch_attention_mask=patch_attention_mask)
+        hidden_states = vision_model.encoder(inputs_embeds=hidden_states, attention_mask=None).last_hidden_state
+        image_hidden_states = vision_model.post_layernorm(hidden_states)
         # Modality projection & resampling
         return self.get_vlm_model().connector(image_hidden_states)
 

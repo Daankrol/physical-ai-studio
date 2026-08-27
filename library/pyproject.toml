@@ -36,8 +36,8 @@ dependencies = [
     "gym-pusht>=0.1.5",
     "pymunk>=6.6.0,<7.0.0",
     "onnx",
-    "openvino>=2026.0",
-    "openvino_tokenizers>=2026.0",
+    "openvino>=2026.3",
+    "openvino_tokenizers>=2026.3",
     "onnxscript",
     "jsonargparse[signatures]>=4.27.0", # This could be extra
     "pydantic",                         # This could be extra
@@ -54,7 +54,6 @@ cu128 = ["torch", "torchvision"]
 xpu = [
     "torch",
     "torchvision",
-    "pytorch-triton-xpu ; sys_platform == 'linux' or sys_platform == 'win32'",
 ]
 # Testing dependencies
 tests = [
@@ -196,7 +195,7 @@ explicit = false
 
 # PyTorch sources configuration
 [tool.uv.sources]
-physicalai = { git = "https://github.com/openvinotoolkit/physicalai.git", rev = "3e163cfebc5f0fe6d97a6e792b4b0a55614d9a44" }
+physicalai = { git = "https://github.com/openvinotoolkit/physicalai.git", rev = "9be95d88d5b9f8342f6952d8ec288fb108fa416e" }
 torch = [
     { index = "pytorch-cpu", extra = "cpu" },
     { index = "pytorch-cu128", extra = "cu128" },
@@ -208,7 +207,6 @@ torchvision = [
     { index = "pytorch-xpu", extra = "xpu" },
 ]
 
-pytorch-triton-xpu = [{ index = "pytorch-xpu", extra = "xpu" }]
 triton-xpu = { index = "pytorch-xpu" }
 
 

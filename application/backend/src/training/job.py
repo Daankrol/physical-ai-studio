@@ -4,7 +4,7 @@
 """One training run, described by a spec and executed by one function.
 
 :class:`TrainingJobSpec` is the complete configuration of a training run —
-policy, step budget, batch size, precision, device — and nothing else. It holds
+ policy, epoch budget, batch size, precision, device — and nothing else. It holds
 no paths, no job identity, and no transport details, so the same spec can be
 built in-process or sent over HTTP to a remote trainer and mean the same thing
 in both places.
@@ -16,7 +16,7 @@ result goes, how progress is reported, and how cancellation is signalled are all
 arguments — the runner owns none of that policy.
 
 Example:
-    >>> spec = TrainingJobSpec(policy="act", max_steps=1000, batch_size=8)
+    >>> spec = TrainingJobSpec(policy="act", max_epochs=5, batch_size=8)
     >>> run_training_job(  # doctest: +SKIP
     ...     spec,
     ...     dataset_root="/data/snapshot",
@@ -29,12 +29,14 @@ Example:
 
 from __future__ import annotations
 
+import gc
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 if TYPE_CHECKING:
     from physicalai.policies.base import Policy
@@ -64,6 +66,13 @@ _COMPILED_EXPORT_RELOAD_POLICIES = frozenset({"act", "smolvla"})
 """Policies that cannot be exported while ``torch.compile``d, so are reloaded first."""
 
 
+class RunOptions(BaseModel):
+    """Runtime-only controls which are not part of the training payload."""
+
+    resume_from: Path | str | None = None
+    hf_token: SecretStr | None = None
+
+
 class TrainingJobSpec(BaseModel):
     """Everything needed to train one policy, and nothing else.
 
@@ -74,7 +83,7 @@ class TrainingJobSpec(BaseModel):
     arguments to :func:`run_training_job`.
 
     Example:
-        >>> spec = TrainingJobSpec(policy="act", max_steps=2000)
+        >>> spec = TrainingJobSpec(policy="act", max_epochs=5)
         >>> spec.precision
         'bf16-mixed'
     """
@@ -86,7 +95,7 @@ class TrainingJobSpec(BaseModel):
         default="physicalai",
         description="Which implementation of the policy to train.",
     )
-    max_steps: int = Field(default=100, ge=1, description="Optimizer step budget.")
+    max_epochs: int = Field(default=5, ge=1, description="Training epoch budget.")
     batch_size: int = Field(default=8, ge=1, description="Training batch size.")
     num_workers: int | Literal["auto"] = Field(default="auto", description="Dataloader worker count.")
     val_split: float = Field(default=0.1, ge=0.0, lt=1.0, description="Fraction of episodes held out for validation.")
@@ -102,6 +111,7 @@ class TrainingJobSpec(BaseModel):
         ge=0,
         description="Zero-based index of the accelerator to train on. None lets Lightning pick one.",
     )
+    run_options: RunOptions = Field(default_factory=RunOptions)
 
 
 def build_policy(spec: TrainingJobSpec, *, resume_from: Path | str | None = None) -> Policy:
@@ -137,13 +147,17 @@ def run_training_job(
     cache_dir: Path | str,
     report: ReportFn,
     should_stop: StopFn,
-    resume_from: Path | str | None = None,
 ) -> None:
     """Train one policy end to end: fit, checkpoint, and export.
 
-    On success ``output_dir`` holds the final checkpoint
-    (:data:`CHECKPOINT_NAME`), the Lightning CSV logs, and an
-    :data:`EXPORTS_DIRNAME` directory per successful export backend.
+    On success ``output_dir`` holds a checkpoint (:data:`CHECKPOINT_NAME`),
+    the Lightning CSV logs, and an :data:`EXPORTS_DIRNAME` directory per
+    successful export backend. That checkpoint is normally the best epoch,
+    written by the ``ModelCheckpoint`` callback during ``fit``; this function
+    only saves a checkpoint of its own as a fallback when the callback did
+    not produce one (e.g. the monitored metric never logged), so it never
+    overwrites a best checkpoint with the final-epoch weights (see
+    :func:`_ensure_checkpoint_exists`).
 
     Cancellation is cooperative. ``should_stop`` is polled throughout training
     via :class:`~physicalai.train.callbacks.ProgressReportingCallback`; when it
@@ -151,6 +165,13 @@ def run_training_job(
     *without* writing a checkpoint or exporting, since a partially trained run
     has no artifact worth keeping. Callers distinguish a canceled run from a
     completed one by consulting ``should_stop`` again after this returns.
+
+    Before export, the trainer, datamodule, and their references back into the
+    policy are dropped and accelerator memory is released (see
+    :func:`_detach_trainer` and :func:`_release_memory`): the trainer's
+    optimizer state and dataloaders would otherwise stay resident throughout
+    export, and export conversion (OpenVINO in particular) can need several GB
+    on top of that.
 
     Args:
         spec: What to train.
@@ -160,8 +181,6 @@ def run_training_job(
             moved to ``output_dir`` on success.
         report: Telemetry sink, called with ``(progress, message, extra_info)``.
         should_stop: Cooperative cancellation probe.
-        resume_from: Checkpoint to continue training from, e.g. a previously
-            trained model's ``model.ckpt``. None trains from scratch.
     """
     from lightning.pytorch.callbacks import ModelCheckpoint
     from lightning.pytorch.loggers import CSVLogger
@@ -171,6 +190,9 @@ def run_training_job(
 
     from training.device import resolve_accelerator, resolve_devices, resolve_strategy
 
+    if spec.run_options.hf_token is not None:
+        os.environ["HF_TOKEN"] = spec.run_options.hf_token.get_secret_value()
+    accelerator = resolve_accelerator(spec.device_type)
     output_dir, cache_dir = Path(output_dir), Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -181,18 +203,24 @@ def run_training_job(
         num_workers=spec.num_workers,
         val_split=spec.val_split,
     )
-    policy = build_policy(spec, resume_from=resume_from)
+    policy = build_policy(spec, resume_from=spec.run_options.resume_from)
 
     trainer = Trainer(
         logger=CSVLogger(cache_dir.parent, name=cache_dir.stem),
         callbacks=[
-            ModelCheckpoint(dirpath=cache_dir, filename="model", save_top_k=1, monitor="val/loss", mode="min"),
+            ModelCheckpoint(
+                dirpath=cache_dir,
+                filename=Path(CHECKPOINT_NAME).stem,
+                save_top_k=1,
+                monitor="val/loss",
+                mode="min",
+            ),
             ProgressReportingCallback(report=report, should_stop=should_stop),
         ],
-        accelerator=resolve_accelerator(spec.device_type),
+        accelerator=accelerator,
         strategy=resolve_strategy(spec.device_type),
         devices=resolve_devices(spec.device_index),
-        max_steps=spec.max_steps,
+        max_epochs=spec.max_epochs,
         auto_scale_batch_size=spec.auto_scale_batch_size,
         precision=spec.precision,
         check_val_every_n_epoch=1,
@@ -204,9 +232,14 @@ def run_training_job(
         logger.info("Training canceled; skipping checkpoint and export")
         return
 
-    trainer.save_checkpoint(cache_dir / CHECKPOINT_NAME)
+    _ensure_checkpoint_exists(trainer, cache_dir)
     _publish(cache_dir, output_dir)
-    _export(_export_policy(spec, policy, output_dir), output_dir, report)
+
+    export_policy = _export_policy(spec, policy, output_dir)
+    _detach_trainer(export_policy, trainer)
+    del trainer, datamodule, policy
+    _release_memory()
+    _export(export_policy, output_dir, report)
 
 
 def _load_policy_from_checkpoint(spec: TrainingJobSpec, checkpoint: Path) -> Policy:
@@ -234,6 +267,22 @@ def _load_policy_from_checkpoint(spec: TrainingJobSpec, checkpoint: Path) -> Pol
         compile_mode = getattr(policy.config, "compile_mode", "default")
         policy.forward = torch.compile(policy.forward, mode=compile_mode)  # type: ignore[method-assign]
     return policy
+
+
+def _ensure_checkpoint_exists(trainer: Any, cache_dir: Path) -> None:
+    """Save a final checkpoint only if the ``ModelCheckpoint`` callback did not already write one.
+
+    The callback is the preferred source of :data:`CHECKPOINT_NAME`: it tracks
+    the best monitored epoch, not just the last one. But it only saves when
+    its monitored metric was actually logged (e.g. a run with no validation
+    split never logs ``val/loss``), so this is a fallback for that case —
+    saving the trainer's current (final-epoch) weights — rather than a second
+    source of truth that could overwrite the callback's best checkpoint.
+    """
+    checkpoint = cache_dir / CHECKPOINT_NAME
+    if not checkpoint.is_file():
+        logger.warning("ModelCheckpoint callback did not write a checkpoint; saving final weights instead")
+        trainer.save_checkpoint(checkpoint)
 
 
 def _publish(cache_dir: Path, output_dir: Path) -> None:
@@ -266,6 +315,58 @@ def _export_policy(spec: TrainingJobSpec, policy: Policy, output_dir: Path) -> P
         return policy
 
 
+def _detach_trainer(export_policy: Policy, trainer: Any) -> None:
+    """Break the trainer<->policy<->datamodule reference cycle before export.
+
+    Lightning wires ``policy._trainer = trainer``, ``trainer.datamodule =
+    datamodule``, and ``trainer.strategy._lightning_module = policy`` during
+    ``fit``, and never undoes it. When ``export_policy`` is the very policy
+    that was just trained (the common case: no ``torch.compile`` reload), it
+    still holds that ``_trainer`` reference, which keeps the trainer — and
+    everything it holds: optimizer state, dataloaders, the strategy — alive
+    and reachable no matter how many local names ``run_training_job`` deletes.
+    ``gc.collect()`` only reclaims *unreachable* cycles, so without this the
+    memory release below is a no-op on the export object it matters most for.
+
+    Best-effort: a failure here must not abort the job.
+    """
+    try:
+        export_policy._trainer = None
+        if getattr(trainer, "strategy", None) is not None:
+            trainer.strategy._lightning_module = None
+        trainer.datamodule = None
+    except Exception as exc:
+        logger.warning("Could not detach trainer from policy: %s", exc)
+
+
+def _release_memory() -> None:
+    """Return held host and device memory to the OS/allocator before the next stage.
+
+    Export conversion (OpenVINO in particular) allocates several GB above the
+    model's resident size, on top of whatever the just-finished trainer and
+    dataloaders still hold. A garbage-collection pass plus clearing every
+    available accelerator's cache prevents that peak from stacking on top of
+    memory this process no longer needs. Best-effort: a failure here must not
+    abort the job.
+    """
+    gc.collect()
+    try:
+        import torch
+
+        if torch.xpu.is_available():
+            torch.xpu.synchronize()
+            torch.xpu.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        if torch.mps.is_available():
+            torch.mps.empty_cache()
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.warning("Could not release device cache: %s", exc)
+
+
 def _export(policy: Policy, output_dir: Path, report: ReportFn) -> None:
     """Export the policy to every backend it declares support for."""
     from physicalai.export import ExportablePolicyMixin
@@ -288,3 +389,7 @@ def _export(policy: Policy, output_dir: Path, report: ReportFn) -> None:
         except Exception:
             # Export is best-effort: one failing backend must not abort the job.
             logger.exception("Failed exporting model to %s format", name)
+        finally:
+            # Conversion peaks well above the model's resident size, so release
+            # after every backend — not just before the first one.
+            _release_memory()
