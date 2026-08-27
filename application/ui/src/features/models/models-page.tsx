@@ -1,13 +1,13 @@
 import { useState } from 'react';
 
-import { Button, DialogContainer, DialogTrigger, Flex, View } from '@geti-ui/ui';
+import { Button, DialogContainer, DialogTrigger, Divider, Flex, View } from '@geti-ui/ui';
 
 import { $api } from '../../api/client';
 import { SchemaModel } from '../../api/openapi-spec';
 import { LogsDialog } from '../logs/logs-dialog';
 import { useProjectId } from '../projects/use-project';
 import { JobList } from './job-table/job-list';
-import { ModelList } from './model-table/model-list';
+import { ModelsList } from './models-table/models-list';
 import { NoModelsPlaceholder } from './no-models-placeholder';
 import { TrainModelDialog } from './train-model-dialog/train-model-dialog';
 import { useJobUpdates } from './use-job-updates';
@@ -43,7 +43,7 @@ export const ModelsPage = () => {
                 {showIllustratedMessage ? (
                     <NoModelsPlaceholder />
                 ) : (
-                    <Flex direction={'column'} flex={1} gap={'size-300'}>
+                    <Flex direction={'column'} flex={1} gap={'size-300'} minHeight={0}>
                         <Flex justifyContent={'end'}>
                             <DialogTrigger>
                                 <Button variant='accent'>Train model</Button>
@@ -57,20 +57,33 @@ export const ModelsPage = () => {
                                 )}
                             </DialogTrigger>
                         </Flex>
-                        <JobList
-                            jobs={jobs}
-                            onViewLogs={(job) => {
-                                setLogsSourceId(job.id);
+                        <Divider size={'S'} />
+                        <Flex
+                            direction={'column'}
+                            flex={1}
+                            minHeight={0}
+                            gap={'size-600'}
+                            UNSAFE_style={{
+                                overflowY: 'auto',
+                                scrollbarGutter: 'stable',
+                                paddingLeft: 'var(--spectrum-global-dimension-size-350)',
                             }}
-                        />
-                        {hasModels && (
-                            <ModelList
-                                models={models}
+                        >
+                            <JobList
                                 jobs={jobs}
-                                onRetrain={setRetrainModel}
-                                onViewLogs={handleViewLogs}
+                                onViewLogs={(job) => {
+                                    setLogsSourceId(job.id);
+                                }}
                             />
-                        )}
+                            {hasModels && (
+                                <ModelsList
+                                    models={models}
+                                    jobs={jobs}
+                                    onRetrain={setRetrainModel}
+                                    onViewLogs={handleViewLogs}
+                                />
+                            )}
+                        </Flex>
                     </Flex>
                 )}
             </Flex>
