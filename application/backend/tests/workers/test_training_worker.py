@@ -190,7 +190,7 @@ class TestTraining:
 
         with (
             patch(f"{MODULE}.get_settings", return_value=_make_settings(tmp_path)),
-            patch(f"{MODULE}.get_training_backend", return_value=backend),
+            patch(f"{MODULE}.get_training_backend", AsyncMock(return_value=backend)),
             patch(f"{MODULE}.TrainingTrackingDispatcher", return_value=dispatcher),
             patch(f"{MODULE}.JobService") as MockJobService,
             patch(f"{MODULE}.ModelService"),
@@ -228,7 +228,7 @@ class TestTraining:
 
         with (
             patch(f"{MODULE}.get_settings", return_value=_make_settings(tmp_path)),
-            patch(f"{MODULE}.get_training_backend", return_value=backend),
+            patch(f"{MODULE}.get_training_backend", AsyncMock(return_value=backend)),
             patch(f"{MODULE}.TrainingTrackingDispatcher", return_value=dispatcher),
             patch(f"{MODULE}.JobService") as MockJobService,
             patch(f"{MODULE}.ModelService") as MockModelService,
@@ -267,7 +267,7 @@ class TestTraining:
 
         with (
             patch(f"{MODULE}.get_settings", return_value=_make_settings(tmp_path)),
-            patch(f"{MODULE}.get_training_backend", return_value=backend),
+            patch(f"{MODULE}.get_training_backend", AsyncMock(return_value=backend)),
             patch(f"{MODULE}.TrainingTrackingDispatcher", return_value=dispatcher),
             patch(f"{MODULE}.JobService") as MockJobService,
             patch(f"{MODULE}.ModelService") as MockModelService,
@@ -303,7 +303,7 @@ class TestTraining:
 
         with (
             patch(f"{MODULE}.get_settings", return_value=_make_settings(tmp_path)),
-            patch(f"{MODULE}.get_training_backend", return_value=backend),
+            patch(f"{MODULE}.get_training_backend", AsyncMock(return_value=backend)),
             patch(f"{MODULE}.TrainingTrackingDispatcher", return_value=dispatcher),
             patch(f"{MODULE}.JobService") as MockJobService,
             patch(f"{MODULE}.ModelService") as MockModelService,
@@ -341,7 +341,7 @@ class TestTraining:
 
         with (
             patch(f"{MODULE}.get_settings", return_value=_make_settings(tmp_path)),
-            patch(f"{MODULE}.get_training_backend", return_value=backend),
+            patch(f"{MODULE}.get_training_backend", AsyncMock(return_value=backend)),
             patch(f"{MODULE}.TrainingTrackingDispatcher", return_value=dispatcher),
             patch(f"{MODULE}.JobService") as MockJobService,
             patch(f"{MODULE}.ModelService") as MockModelService,
@@ -381,7 +381,7 @@ class TestTraining:
 
         with (
             patch(f"{MODULE}.get_settings", return_value=_make_settings(tmp_path)),
-            patch(f"{MODULE}.get_training_backend", return_value=backend),
+            patch(f"{MODULE}.get_training_backend", AsyncMock(return_value=backend)),
             patch(f"{MODULE}.TrainingTrackingDispatcher", return_value=dispatcher),
             patch(f"{MODULE}.JobService") as MockJobService,
             patch(f"{MODULE}.ModelService") as MockModelService,
@@ -426,7 +426,7 @@ class TestTraining:
 
         with (
             patch(f"{MODULE}.get_settings", return_value=_make_settings(tmp_path)),
-            patch(f"{MODULE}.get_training_backend", return_value=backend),
+            patch(f"{MODULE}.get_training_backend", AsyncMock(return_value=backend)),
             patch(f"{MODULE}.TrainingTrackingDispatcher", return_value=dispatcher),
             patch(f"{MODULE}.JobService") as MockJobService,
             patch(f"{MODULE}.ModelService") as MockModelService,
@@ -504,6 +504,55 @@ class TestTargetKey:
         assert first_key != second_key
         assert "None" not in first_key
         assert "None" not in second_key
+
+
+class TestSetupRecovery:
+    """`setup()` must recover SSH jobs before the generic orphan abort runs."""
+
+    @pytest.mark.anyio
+    async def test_setup_runs_ssh_recovery_before_generic_orphan_abort(self, worker) -> None:
+        from workers.training_worker import TrainingWorker
+
+        calls: list[str] = []
+        handled_job_id = uuid4()
+
+        async def fake_recover_ssh_jobs() -> frozenset[UUID]:
+            calls.append("recover_ssh_jobs")
+            return frozenset({handled_job_id})
+
+        async def fake_abort_orphan_jobs(*, exclude_job_ids: frozenset[UUID] | None = None) -> None:
+            calls.append("abort_orphan_jobs")
+            assert exclude_job_ids == frozenset({handled_job_id})
+
+        with (
+            patch.object(TrainingWorker, "_recover_ssh_jobs", staticmethod(fake_recover_ssh_jobs)),
+            patch.object(TrainingWorker, "_abort_orphan_jobs", staticmethod(fake_abort_orphan_jobs)),
+            patch(f"{MODULE}.BaseProcessWorker.setup", new=AsyncMock()),
+        ):
+            await worker.setup()
+
+        assert calls == ["recover_ssh_jobs", "abort_orphan_jobs"]
+
+    @pytest.mark.anyio
+    async def test_recover_ssh_jobs_wires_recovery_dependencies(self, worker) -> None:
+        """`_recover_ssh_jobs` builds the repo/service trio and logs the report."""
+        from services.ssh.recovery import SshRecoveryReport
+
+        report = SshRecoveryReport(confirmed=1, transient=2, failed=3, stale_rows_cleaned=4, orphans_removed=5)
+
+        with (
+            patch(f"{MODULE}.JobProvisioningRepository") as MockProvisioningRepo,
+            patch(f"{MODULE}.RemoteServerService") as MockRemoteServerService,
+            patch(f"{MODULE}.JobService") as MockJobService,
+            patch(f"{MODULE}.recover_ssh_jobs", AsyncMock(return_value=report)) as mock_recover,
+        ):
+            await worker._recover_ssh_jobs()
+
+            mock_recover.assert_awaited_once_with(
+                MockJobService.return_value,
+                MockProvisioningRepo.return_value,
+                MockRemoteServerService.return_value,
+            )
 
 
 class TestTrainingScheduling:

@@ -1,9 +1,9 @@
 {
   "errors": [
     {
-      "line": 300,
+      "line": 304,
       "column": 40,
-      "stop_line": 300,
+      "stop_line": 304,
       "stop_column": 46,
       "path": "src/physicalai/benchmark/gyms/benchmark.py",
       "code": -2,
@@ -13,9 +13,9 @@
       "severity": "error"
     },
     {
-      "line": 429,
+      "line": 434,
       "column": 13,
-      "stop_line": 429,
+      "stop_line": 434,
       "stop_column": 26,
       "path": "src/physicalai/benchmark/gyms/benchmark.py",
       "code": -2,
@@ -32,8 +32,8 @@
       "path": "src/physicalai/data/datamodules.py",
       "code": -2,
       "name": "unsupported-operation",
-      "description": "Cannot set item in `dict[Unknown, Tensor]`\n  Argument `list[Unknown]` is not assignable to parameter `value` with type `Tensor` in function `dict.__setitem__`",
-      "concise_description": "Cannot set item in `dict[Unknown, Tensor]`",
+      "description": "Cannot set item in `dict[Any, Tensor]`\n  Argument `list[Unknown]` is not assignable to parameter `value` with type `Tensor` in function `dict.__setitem__`",
+      "concise_description": "Cannot set item in `dict[Any, Tensor]`",
       "severity": "error"
     },
     {
@@ -133,18 +133,6 @@
       "severity": "error"
     },
     {
-      "line": 427,
-      "column": 40,
-      "stop_line": 427,
-      "stop_column": 74,
-      "path": "src/physicalai/data/lerobot/datamodule.py",
-      "code": -2,
-      "name": "not-iterable",
-      "description": "`in` is not supported between `Unknown` and `None`",
-      "concise_description": "`in` is not supported between `Unknown` and `None`",
-      "severity": "error"
-    },
-    {
       "line": 428,
       "column": 17,
       "stop_line": 428,
@@ -178,18 +166,6 @@
       "name": "missing-attribute",
       "description": "Object of class `NoneType` has no attribute `items`",
       "concise_description": "Object of class `NoneType` has no attribute `items`",
-      "severity": "error"
-    },
-    {
-      "line": 435,
-      "column": 44,
-      "stop_line": 435,
-      "stop_column": 76,
-      "path": "src/physicalai/data/lerobot/datamodule.py",
-      "code": -2,
-      "name": "not-iterable",
-      "description": "`in` is not supported between `Unknown` and `None`",
-      "concise_description": "`in` is not supported between `Unknown` and `None`",
       "severity": "error"
     },
     {
@@ -370,6 +346,18 @@
       "name": "bad-override",
       "description": "Class member `Rollout.update` overrides parent class `Metric` in an inconsistent manner\n  `Rollout.update` has type `(self: Rollout, env: Gym, policy: Policy, seed: int | None = None) -> dict[str, Tensor]`, which is not assignable to `(self: Rollout, *_: Any, **__: Any) -> None`, the type of `Metric.update`\n  Signature mismatch:\n  expected: def update(self: Rollout, *_: Any, **__: Any) -> None: ...\n                                      ^^^^^^^^^^^^^^^^^^     ^^^^ return type\n                                      |\n                                      parameters\n  found:    def update(self: Rollout, env: Gym, policy: Policy, seed: int | None = None) -> dict[str, Tensor]: ...\n                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^     ^^^^^^^^^^^^^^^^^ return type\n                                      |\n                                      parameters",
       "concise_description": "Class member `Rollout.update` overrides parent class `Metric` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "line": 229,
+      "column": 16,
+      "stop_line": 235,
+      "stop_column": 10,
+      "path": "src/physicalai/eval/rollout/metric.py",
+      "code": -2,
+      "name": "bad-return",
+      "description": "Returned type `dict[str, Module | Tensor | Unknown]` is not assignable to declared return type `dict[str, Tensor]`",
+      "concise_description": "Returned type `dict[str, Module | Tensor | Unknown]` is not assignable to declared return type `dict[str, Tensor]`",
       "severity": "error"
     },
     {
@@ -649,75 +637,15 @@
       "severity": "error"
     },
     {
-      "line": 244,
+      "line": 247,
       "column": 16,
-      "stop_line": 244,
+      "stop_line": 247,
       "stop_column": 56,
       "path": "src/physicalai/gyms/gymnasium_gym.py",
       "code": -2,
       "name": "bad-return",
       "description": "Returned type `tuple[Observation, SupportsFloat | Unknown, bool | Unknown, bool | Unknown, dict[str, Any]]` is not assignable to declared return type `tuple[Observation, SingleOrBatch, SingleOrBatch, SingleOrBatch, dict[str, Any] | list[dict[str, Any]]]`",
       "concise_description": "Returned type `tuple[Observation, SupportsFloat | Unknown, bool | Unknown, bool | Unknown, dict[str, Any]]` is not assignable to declared return type `tuple[Observation, SingleOrBatch, SingleOrBatch, SingleOrBatch, dict[str, Any] | list[dict[str, Any]]]`",
-      "severity": "error"
-    },
-    {
-      "line": 79,
-      "column": 5,
-      "stop_line": 79,
-      "stop_column": 50,
-      "path": "src/physicalai/gyms/libero.py",
-      "code": -2,
-      "name": "missing-import",
-      "description": "Cannot find module `libero.libero.benchmark`\n  Looked in these locations (from config in `/home/devuser/daankrol/physical-ai-studio-feature-peft/library/pyproject.toml`):\n  Search path (from config file): [\"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"]\n  Import root (inferred from project layout): \"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"\n  Site package path queried from interpreter: [\"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/.venv/lib/python3.12/site-packages\", \"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"]",
-      "concise_description": "Cannot find module `libero.libero.benchmark`",
-      "severity": "error"
-    },
-    {
-      "line": 88,
-      "column": 5,
-      "stop_line": 88,
-      "stop_column": 60,
-      "path": "src/physicalai/gyms/libero.py",
-      "code": -2,
-      "name": "missing-import",
-      "description": "Cannot find module `libero.libero`\n  Looked in these locations (from config in `/home/devuser/daankrol/physical-ai-studio-feature-peft/library/pyproject.toml`):\n  Search path (from config file): [\"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"]\n  Import root (inferred from project layout): \"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"\n  Site package path queried from interpreter: [\"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/.venv/lib/python3.12/site-packages\", \"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"]",
-      "concise_description": "Cannot find module `libero.libero`",
-      "severity": "error"
-    },
-    {
-      "line": 89,
-      "column": 5,
-      "stop_line": 89,
-      "stop_column": 46,
-      "path": "src/physicalai/gyms/libero.py",
-      "code": -2,
-      "name": "missing-import",
-      "description": "Cannot find module `libero.libero`\n  Looked in these locations (from config in `/home/devuser/daankrol/physical-ai-studio-feature-peft/library/pyproject.toml`):\n  Search path (from config file): [\"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"]\n  Import root (inferred from project layout): \"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"\n  Site package path queried from interpreter: [\"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/.venv/lib/python3.12/site-packages\", \"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"]",
-      "concise_description": "Cannot find module `libero.libero`",
-      "severity": "error"
-    },
-    {
-      "line": 90,
-      "column": 5,
-      "stop_line": 90,
-      "stop_column": 54,
-      "path": "src/physicalai/gyms/libero.py",
-      "code": -2,
-      "name": "missing-import",
-      "description": "Cannot find module `libero.libero.envs`\n  Looked in these locations (from config in `/home/devuser/daankrol/physical-ai-studio-feature-peft/library/pyproject.toml`):\n  Search path (from config file): [\"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"]\n  Import root (inferred from project layout): \"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"\n  Site package path queried from interpreter: [\"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/.venv/lib/python3.12/site-packages\", \"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"]",
-      "concise_description": "Cannot find module `libero.libero.envs`",
-      "severity": "error"
-    },
-    {
-      "line": 91,
-      "column": 5,
-      "stop_line": 91,
-      "stop_column": 63,
-      "path": "src/physicalai/gyms/libero.py",
-      "code": -2,
-      "name": "missing-import",
-      "description": "Cannot find module `robosuite.utils.transform_utils`\n  Looked in these locations (from config in `/home/devuser/daankrol/physical-ai-studio-feature-peft/library/pyproject.toml`):\n  Search path (from config file): [\"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"]\n  Import root (inferred from project layout): \"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"\n  Site package path queried from interpreter: [\"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/.venv/lib/python3.12/site-packages\", \"/home/devuser/daankrol/physical-ai-studio-feature-peft/library/src\"]",
-      "concise_description": "Cannot find module `robosuite.utils.transform_utils`",
       "severity": "error"
     },
     {
@@ -829,9 +757,9 @@
       "severity": "error"
     },
     {
-      "line": 410,
+      "line": 412,
       "column": 39,
-      "stop_line": 410,
+      "stop_line": 412,
       "stop_column": 52,
       "path": "src/physicalai/gyms/libero.py",
       "code": -2,
@@ -841,9 +769,9 @@
       "severity": "error"
     },
     {
-      "line": 416,
+      "line": 418,
       "column": 27,
-      "stop_line": 416,
+      "stop_line": 418,
       "stop_column": 49,
       "path": "src/physicalai/gyms/libero.py",
       "code": -2,
@@ -853,9 +781,9 @@
       "severity": "error"
     },
     {
-      "line": 457,
+      "line": 459,
       "column": 17,
-      "stop_line": 457,
+      "stop_line": 459,
       "stop_column": 31,
       "path": "src/physicalai/gyms/libero.py",
       "code": -2,
@@ -865,9 +793,9 @@
       "severity": "error"
     },
     {
-      "line": 480,
+      "line": 482,
       "column": 19,
-      "stop_line": 480,
+      "stop_line": 482,
       "stop_column": 31,
       "path": "src/physicalai/gyms/libero.py",
       "code": -2,
@@ -877,9 +805,9 @@
       "severity": "error"
     },
     {
-      "line": 585,
+      "line": 587,
       "column": 21,
-      "stop_line": 585,
+      "stop_line": 587,
       "stop_column": 43,
       "path": "src/physicalai/gyms/libero.py",
       "code": -2,
@@ -889,9 +817,9 @@
       "severity": "error"
     },
     {
-      "line": 662,
+      "line": 664,
       "column": 13,
-      "stop_line": 662,
+      "stop_line": 664,
       "stop_column": 48,
       "path": "src/physicalai/gyms/libero.py",
       "code": -2,
@@ -1090,6 +1018,30 @@
       "name": "bad-override",
       "description": "Class member `ACT.configure_optimizers` overrides parent class `Policy` in an inconsistent manner\n  `ACT.configure_optimizers` has type `(self: ACT) -> dict[str, Any]`, which is not assignable to `(self: ACT) -> OptimizerLRScheduler`, the type of `Policy.configure_optimizers`\n  Signature mismatch:\n  expected: def configure_optimizers(self: ACT) -> OptimizerLRScheduler: ...\n                                                   ^^^^^^^^^^^^^^^^^^^^ return type\n  found:    def configure_optimizers(self: ACT) -> dict[str, Any]: ...\n                                                   ^^^^^^^^^^^^^^ return type",
       "concise_description": "Class member `ACT.configure_optimizers` overrides parent class `Policy` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "line": 218,
+      "column": 25,
+      "stop_line": 218,
+      "stop_column": 38,
+      "path": "src/physicalai/policies/groot/components/action_head.py",
+      "code": -2,
+      "name": "bad-assignment",
+      "description": "`Identity` is not assignable to attribute `vlln` with type `LayerNorm`",
+      "concise_description": "`Identity` is not assignable to attribute `vlln` with type `LayerNorm`",
+      "severity": "error"
+    },
+    {
+      "line": 226,
+      "column": 39,
+      "stop_line": 226,
+      "stop_column": 43,
+      "path": "src/physicalai/policies/groot/components/action_head.py",
+      "code": -2,
+      "name": "bad-assignment",
+      "description": "`None` is not assignable to attribute `position_embedding` with type `Embedding`",
+      "concise_description": "`None` is not assignable to attribute `position_embedding` with type `Embedding`",
       "severity": "error"
     },
     {
@@ -1316,8 +1268,8 @@
       "path": "src/physicalai/policies/lerobot/policy.py",
       "code": -2,
       "name": "bad-argument-type",
-      "description": "Argument `dict[str, dict[str, ndarray[Unknown, Unknown]]] | dict[str, dict[Unknown, Unknown]] | None` is not assignable to parameter `dataset_stats` with type `dict[str, dict[str, Tensor]] | None` in function `LeRobotPolicy.__init__`",
-      "concise_description": "Argument `dict[str, dict[str, ndarray[Unknown, Unknown]]] | dict[str, dict[Unknown, Unknown]] | None` is not assignable to parameter `dataset_stats` with type `dict[str, dict[str, Tensor]] | None` in function `LeRobotPolicy.__init__`",
+      "description": "Argument `dict[str, dict[str, ndarray[Unknown, Unknown]]] | None` is not assignable to parameter `dataset_stats` with type `dict[str, dict[str, Tensor]] | None` in function `LeRobotPolicy.__init__`",
+      "concise_description": "Argument `dict[str, dict[str, ndarray[Unknown, Unknown]]] | None` is not assignable to parameter `dataset_stats` with type `dict[str, dict[str, Tensor]] | None` in function `LeRobotPolicy.__init__`",
       "severity": "error"
     },
     {
@@ -1328,8 +1280,8 @@
       "path": "src/physicalai/policies/lerobot/policy.py",
       "code": -2,
       "name": "bad-argument-type",
-      "description": "Argument `dict[str, dict[str, Tensor]] | dict[str, dict[str, ndarray[Unknown, Unknown]]] | dict[str, dict[Unknown, Unknown]] | Unknown | None` is not assignable to parameter `dataset_stats` with type `dict[str, dict[str, Tensor]] | None` in function `LeRobotPolicy._initialize_policy`",
-      "concise_description": "Argument `dict[str, dict[str, Tensor]] | dict[str, dict[str, ndarray[Unknown, Unknown]]] | dict[str, dict[Unknown, Unknown]] | Unknown | None` is not assignable to parameter `dataset_stats` with type `dict[str, dict[str, Tensor]] | None` in function `LeRobotPolicy._initialize_policy`",
+      "description": "Argument `dict[str, dict[str, Tensor]] | dict[str, dict[str, ndarray[Unknown, Unknown]]] | Unknown | None` is not assignable to parameter `dataset_stats` with type `dict[str, dict[str, Tensor]] | None` in function `LeRobotPolicy._initialize_policy`",
+      "concise_description": "Argument `dict[str, dict[str, Tensor]] | dict[str, dict[str, ndarray[Unknown, Unknown]]] | Unknown | None` is not assignable to parameter `dataset_stats` with type `dict[str, dict[str, Tensor]] | None` in function `LeRobotPolicy._initialize_policy`",
       "severity": "error"
     },
     {
@@ -1861,6 +1813,30 @@
       "severity": "error"
     },
     {
+      "line": 172,
+      "column": 45,
+      "stop_line": 172,
+      "stop_column": 64,
+      "path": "src/physicalai/policies/pi05/preprocessor.py",
+      "code": -2,
+      "name": "bad-assignment",
+      "description": "`Identity` is not assignable to attribute `_state_action_normalizer` with type `FeatureNormalizeTransform`",
+      "concise_description": "`Identity` is not assignable to attribute `_state_action_normalizer` with type `FeatureNormalizeTransform`",
+      "severity": "error"
+    },
+    {
+      "line": 356,
+      "column": 41,
+      "stop_line": 356,
+      "stop_column": 60,
+      "path": "src/physicalai/policies/pi05/preprocessor.py",
+      "code": -2,
+      "name": "bad-assignment",
+      "description": "`Identity` is not assignable to attribute `_action_denormalizer` with type `FeatureNormalizeTransform`",
+      "concise_description": "`Identity` is not assignable to attribute `_action_denormalizer` with type `FeatureNormalizeTransform`",
+      "severity": "error"
+    },
+    {
       "line": 1911,
       "column": 43,
       "stop_line": 1911,
@@ -1897,6 +1873,18 @@
       "severity": "error"
     },
     {
+      "line": 120,
+      "column": 45,
+      "stop_line": 120,
+      "stop_column": 64,
+      "path": "src/physicalai/policies/smolvla/preprocessor.py",
+      "code": -2,
+      "name": "bad-assignment",
+      "description": "`Identity` is not assignable to attribute `_state_action_normalizer` with type `FeatureNormalizeTransform`",
+      "concise_description": "`Identity` is not assignable to attribute `_state_action_normalizer` with type `FeatureNormalizeTransform`",
+      "severity": "error"
+    },
+    {
       "line": 135,
       "column": 40,
       "stop_line": 135,
@@ -1906,6 +1894,18 @@
       "name": "bad-argument-type",
       "description": "Argument `Tensor` is not assignable to parameter `text` with type `list[str] | str` in function `SmolVLAPreprocessor._tokenize`",
       "concise_description": "Argument `Tensor` is not assignable to parameter `text` with type `list[str] | str` in function `SmolVLAPreprocessor._tokenize`",
+      "severity": "error"
+    },
+    {
+      "line": 402,
+      "column": 41,
+      "stop_line": 402,
+      "stop_column": 60,
+      "path": "src/physicalai/policies/smolvla/preprocessor.py",
+      "code": -2,
+      "name": "bad-assignment",
+      "description": "`Identity` is not assignable to attribute `_action_denormalizer` with type `FeatureNormalizeTransform`",
+      "concise_description": "`Identity` is not assignable to attribute `_action_denormalizer` with type `FeatureNormalizeTransform`",
       "severity": "error"
     },
     {
