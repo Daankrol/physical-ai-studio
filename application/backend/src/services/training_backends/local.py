@@ -109,13 +109,20 @@ def build_spec(context: TrainingContext) -> TrainingJobSpec:
         precision=str(payload.precision),
         compile_model=payload.compile_model,
         auto_scale_batch_size=payload.auto_scale_batch_size,
+        snapflow_start_epoch=payload.snapflow_start_epoch,
         device_type=str(device.type) if device else None,
         device_index=device.index if device else None,
     )
 
 
 def _resume_checkpoint(context: TrainingContext) -> Path | None:
-    """Return the base model's checkpoint to resume from, if the job has one."""
+    """Return the base model's checkpoint to resume from, if the job has one.
+
+    Deliberately always the plain checkpoint, never the SnapFlow one: SnapFlow
+    permanently freezes the VLM backbone and switches to 1-step sampling once
+    activated, baked into the checkpoint's hparams. Resuming from it would
+    silently carry that into a run that never asked for SnapFlow.
+    """
     from training.job import CHECKPOINT_NAME
 
     if context.base_model is None:

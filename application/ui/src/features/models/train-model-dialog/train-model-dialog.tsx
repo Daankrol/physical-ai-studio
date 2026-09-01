@@ -22,11 +22,12 @@ import { SchemaTrainJob as SchemaJob, SchemaModel } from '../../../api/openapi-s
 import { useProject } from '../../projects/use-project';
 import { useRemoteTrainerHealth } from '../../remote-trainers/use-remote-trainer-health';
 import { InlineAlert } from '../../robots/setup-wizard/shared/inline-alert';
+import { supportsSnapflow } from '../shared/snapflow';
 import { MODELS } from './policies';
 import { PolicyAccessAlert } from './policy-access-alert';
 import { PolicySelection } from './policy-selection';
 import { TrainingDeviceInfo } from './training-device-info';
-import { TrainingParameters } from './training-parameters';
+import { MIN_EPOCHS_FOR_SNAPFLOW, TrainingParameters } from './training-parameters';
 import { pickBestDevice, useBestTrainingDevice } from './use-training-devices';
 
 import classes from './train-model-dialog.module.css';
@@ -45,6 +46,9 @@ type TrainingTargetOption = {
     id: string;
     label: string;
 };
+
+/** Mirrors `_DEFAULT_SNAPFLOW_DISTILL_EPOCHS` in the backend payload schema. */
+const DEFAULT_SNAPFLOW_DISTILL_EPOCHS = 3;
 
 export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: TrainModelDialogProps) => {
     const bestDevice = useBestTrainingDevice();
@@ -76,7 +80,15 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     const [autoScaleBatchSize, setAutoScaleBatchSize] = useState<boolean>(bestDevice?.type === 'cuda');
     const [precision, setPrecision] = useState<Key | null>(bestDevice?.type === 'cuda' ? 'bf16-mixed' : '32-true');
     const [compileModel, setCompileModel] = useState<boolean>(false);
+    const [snapflowEnabled, setSnapflowEnabled] = useState<boolean>(false);
+    const [snapflowDistillEpochs, setSnapflowDistillEpochs] = useState<number>(DEFAULT_SNAPFLOW_DISTILL_EPOCHS);
     const [remoteTrainerId, setRemoteTrainerId] = useState<Key | null>('local');
+    const isSnapflowSupported = supportsSnapflow(selectedPolicy);
+    // The backend rejects a distillation budget that leaves no epochs to train
+    // the teacher, so clamp instead of letting the user submit a doomed job.
+    const maxDistillEpochs = Math.max(1, maxEpochs - 1);
+    const distillEpochs = Math.min(snapflowDistillEpochs, maxDistillEpochs);
+    const isSnapflowRequested = isSnapflowSupported && snapflowEnabled && maxEpochs >= MIN_EPOCHS_FOR_SNAPFLOW;
     const isRemoteTarget = remoteTrainerId !== null && remoteTrainerId !== 'local';
     const {
         health: remoteTrainerHealth,
@@ -150,6 +162,8 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
             auto_scale_batch_size: autoScaleBatchSize,
             precision: (precision?.toString() ?? 'bf16-mixed') as SchemaJob['payload']['precision'],
             compile_model: compileModel,
+            snapflow_enabled: isSnapflowRequested,
+            snapflow_distill_epochs: distillEpochs,
             val_split: 0.1,
             ...extraPayload,
         } as const;
@@ -246,6 +260,11 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                                 onCompileModelChange={setCompileModel}
                                 isAutoScaleBatchDisabled={activeDevice?.type !== 'cuda'}
                                 deviceType={activeDevice?.type}
+                                isSnapflowSupported={isSnapflowSupported}
+                                snapflowEnabled={snapflowEnabled}
+                                onSnapflowEnabledChange={setSnapflowEnabled}
+                                snapflowDistillEpochs={distillEpochs}
+                                onSnapflowDistillEpochsChange={setSnapflowDistillEpochs}
                             />
                         </DisclosurePanel>
                     </Disclosure>
