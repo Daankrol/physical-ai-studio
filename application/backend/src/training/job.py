@@ -213,8 +213,8 @@ def run_training_job(
 
     When ``spec.snapflow_start_epoch`` is set the run has two phases: standard
     flow matching, then SnapFlow self-distillation. Both phases keep their own
-    checkpoint and export reloads whichever one :func:`resolve_checkpoint` 
-    picks, so the exported artifact (and therefore inference) always matches 
+    checkpoint and export reloads whichever one :func:`resolve_checkpoint`
+    picks, so the exported artifact (and therefore inference) always matches
     the checkpoint a distilled model ships.
 
     Cancellation is cooperative. ``should_stop`` is polled throughout training

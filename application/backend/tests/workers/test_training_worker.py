@@ -624,6 +624,7 @@ class TestSnapFlowProvenance:
             snapshot_service.create_snapshot_for_dataset = AsyncMock(return_value=_make_snapshot(tmp_path))
             await worker._run_training_job(job, payload)
 
+        assert train.await_args is not None
         return train.await_args.args[1]
 
     @pytest.mark.anyio

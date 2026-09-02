@@ -16,6 +16,7 @@ import gc
 import os
 import weakref
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -424,7 +425,7 @@ class TestSnapFlowDistillation:
     """A distillation run keeps two checkpoints, and export/resolve pick the distilled one."""
 
     @staticmethod
-    def _snapflow_callback(trainer_class: MagicMock) -> object | None:
+    def _snapflow_callback(trainer_class: MagicMock) -> Any | None:
         callbacks = trainer_class.call_args.kwargs["callbacks"]
         return next((c for c in callbacks if type(c).__name__ == "SnapFlowPhaseCallback"), None)
 
