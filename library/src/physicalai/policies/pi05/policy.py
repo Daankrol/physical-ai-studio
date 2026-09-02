@@ -30,6 +30,7 @@ from physicalai.export.backends import (
 from physicalai.policies.base import Policy
 from physicalai.policies.mixins import SnapFlowPolicyMixin
 from physicalai.policies.mixins.peft import PeftPolicyMixin
+from physicalai.policies.utils.pretrained import known_config_fields_only
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 from physicalai.train.utils import reformat_dataset_to_match_policy
 
@@ -544,8 +545,11 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
             if detected is not None:
                 hf_config["normalization_mode"] = detected
 
-        # strict=False: ignore legacy config.json keys not present in Pi05Config
-        config = Pi05Config.from_dict(hf_config, strict=False)
+        # Drop keys not present on Pi05Config before parsing. Pretrained lerobot
+        # config.json files carry extra fields (e.g. input_features, output_features,
+        # architectures, model_type) that from_dict() cannot silently ignore; see
+        # known_config_fields_only() for details.
+        config = Pi05Config.from_dict(known_config_fields_only(Pi05Config, hf_config))
 
         # --- build dataset_stats from HF artefacts ---
         dataset_stats = _extract_dataset_stats(hf_config, preprocessor_file, preprocessor_dir)

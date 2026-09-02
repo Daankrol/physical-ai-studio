@@ -38,10 +38,22 @@ Policies live in `library/src/physicalai/policies/<name>/`. Each family is a Lig
 
 6. **Add a training config** in `library/configs/physicalai/<name>.yaml` when the policy is user-facing from the CLI. Wire `model.class_path`, a `data.class_path` (usually `physicalai.data.lerobot.LeRobotDataModule`), and `trainer.*`. Mirror `configs/physicalai/pi05.yaml`.
    - Done when: `physicalai fit --config configs/physicalai/<name>.yaml --trainer.fast_dev_run=true` completes one step.
-7. **Wire export only when ready.** Add `ExportablePolicyMixin` and a valid sample input, then follow the `physicalai-train-exporting-and-validating` skill. If export is intentionally unsupported, say so explicitly in the policy docstring.
-8. **Add tests** under `library/tests/unit/policies/` next to existing policy tests: at least one construction/config path and one shape-validation test.
+7. **If loading pretrained weights (`_from_hf(...)`), filter the raw `config.json` before calling `<Name>Config.from_dict(...)`.** Pretrained `lerobot`-format `config.json` files always carry keys with no matching `Config` field (e.g. `input_features`, `output_features`, `repo_id`, `license`, `push_to_hub`). `Config.from_dict(data, strict=False)` does **not** silently ignore these — the jsonargparse-based parser rejects any unknown key regardless of `strict` (tracked upstream at `openvinotoolkit/physicalai#251`). Use the shared helper instead of hand-rolling a filter or relying on `strict=False` alone:
+
+   ```python
+   from physicalai.policies.utils.pretrained import known_config_fields_only
+
+   config = <Name>Config.from_dict(known_config_fields_only(<Name>Config, hf_config))
+   ```
+
+   See `pi05/policy.py`, `smolvla/policy.py`, or `rldx1/policy.py` for the full `_from_hf` pattern. This only filters top-level keys; keep `<Name>Config` flat (no nested `Config`/dataclass fields) so this remains sufficient — a nested field with its own extra keys would still be rejected.
+
+   - Done when: loading a real pretrained checkpoint's `config.json` (not just a synthetic one) does not raise, and a test exercises `_from_hf` with a config containing at least one unknown top-level key.
+
+8. **Wire export only when ready.** Add `ExportablePolicyMixin` and a valid sample input, then follow the `physicalai-train-exporting-and-validating` skill. If export is intentionally unsupported, say so explicitly in the policy docstring.
+9. **Add tests** under `library/tests/unit/policies/` next to existing policy tests: at least one construction/config path and one shape-validation test.
    - Done when: `uv run --no-sync pytest tests/unit/policies -k <name>` passes.
-9. **Update docs** if the policy is user-visible: `library/docs/explanation/policy/` and any config/API examples.
+10. **Update docs** if the policy is user-visible: `library/docs/explanation/policy/` and any config/API examples.
 
 ## Required checks
 
@@ -51,6 +63,7 @@ Account for every item below (not just "looks fine"):
 - **Observation features** — feature names align with dataset/config conventions (`data/observation.py`: `Feature`, `FeatureType`).
 - **API construction path** — imports, `get_policy(...)`, direct constructor use, and synthetic shape checks pass without CLI involvement.
 - **Config path** — construction works through the jsonargparse CLI path used by `physicalai fit` (`class_path`/`init_args`) when the policy is CLI-visible.
+- **Pretrained config loading** — if the policy loads a pretrained `config.json` (`_from_hf`/similar), unknown keys are filtered via `known_config_fields_only` before `Config.from_dict(...)`, not via `strict=False` alone.
 - **Heavy dependencies** — gate large families behind an optional extra in `library/pyproject.toml` and import lazily, matching `pi05`/`pi0`/`groot`/`smolvla`.
 - **No silent contract changes** — do not alter action dims, feature names, or preprocessing without coordinating export/Runtime.
 

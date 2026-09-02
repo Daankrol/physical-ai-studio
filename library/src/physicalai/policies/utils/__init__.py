@@ -4,7 +4,9 @@
 """Utils for policies."""
 
 from .normalization import FeatureNormalizeTransform
+from .pretrained import known_config_fields_only
 
 __all__ = [
     "FeatureNormalizeTransform",
+    "known_config_fields_only",
 ]

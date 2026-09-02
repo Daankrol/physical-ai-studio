@@ -57,6 +57,7 @@ from physicalai.policies.base import Policy
 from physicalai.policies.rldx1.config import Rldx1Config
 from physicalai.policies.rldx1.model import Rldx1Model
 from physicalai.policies.rldx1.pretrained_utils import extract_dataset_stats, retrieve_safetensors_shards
+from physicalai.policies.utils.pretrained import known_config_fields_only
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 from physicalai.train.utils import reformat_dataset_to_match_policy
 
@@ -367,10 +368,11 @@ class Rldx1(Policy):
         hf_config["action_horizon"] = action_horizon
         hf_config["embodiment_tag"] = embodiment_tag
 
-        # strict=False: ignore upstream config.json keys with no Rldx1Config field
-        # (e.g. architectures, model_type, rtc_inference_*) instead of denylisting
-        # them one by one.
-        config = Rldx1Config.from_dict(hf_config, strict=False)
+        # Drop keys not present on Rldx1Config before parsing. Upstream config.json
+        # files carry extra fields (e.g. architectures, model_type, rtc_inference_*)
+        # that from_dict() cannot silently ignore; see known_config_fields_only()
+        # for details.
+        config = Rldx1Config.from_dict(known_config_fields_only(Rldx1Config, hf_config))
 
         # --- build dataset_stats from HF artefacts ---
         dataset_stats = extract_dataset_stats(

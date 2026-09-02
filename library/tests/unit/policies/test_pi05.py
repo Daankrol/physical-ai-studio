@@ -8,6 +8,9 @@ Fast, self-contained tests with no external dependencies (no HuggingFace model d
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 import torch
 from physicalai.config import Config
@@ -18,6 +21,7 @@ from physicalai.policies.pi05.pretrained_utils import (
     parse_config_features,
     resolve_feature_shape,
 )
+from safetensors.torch import save_file
 
 
 # ============================================================================ #
@@ -1594,3 +1598,87 @@ class TestPi05LoRAConfig:
         total = sum(p.numel() for p in policy.parameters())
         assert 0 < trainable < total
 
+
+# ============================================================================ #
+# Pretrained Config Loading Regression Tests (issue #1069)                    #
+# ============================================================================ #
+
+
+class TestPi05FromHfConfigFiltering:
+    """Regression tests for loading pretrained config.json files with extra keys.
+
+    Real lerobot config.json files (e.g. ``lerobot/pi05_base``) include keys such
+    as ``input_features``/``output_features``/``repo_id``/``license`` that are
+    not fields on ``Pi05Config``. The underlying jsonargparse-based parser used
+    by ``Config.from_dict`` rejects any key without a matching constructor
+    argument regardless of ``strict``, so ``_from_hf`` must filter unknown keys
+    out via ``known_config_fields_only`` before calling ``from_dict`` (see
+    physicalai.policies.utils.pretrained). These tests exercise ``_from_hf``
+    end-to-end and assert that *known* file values survive filtering (not just
+    that no exception is raised), to catch an over-aggressive filter.
+    """
+
+    def _make_pretrained_dir(self, tmp_path: Path) -> Path:
+        config = {
+            # Real-world junk keys observed on lerobot/pi05_base's config.json;
+            # none of these are Pi05Config fields.
+            "type": "pi05",
+            "device": "cuda",
+            "use_amp": False,
+            "push_to_hub": True,
+            "repo_id": "lerobot/pi05_base",
+            "private": None,
+            "tags": None,
+            "license": "apache-2.0",
+            "input_features": {
+                "observation.images.base_0_rgb": {
+                    "type": "VISUAL",
+                    "shape": [3, 224, 224],
+                },
+                "observation.state": {
+                    "type": "STATE",
+                    "shape": [8],
+                },
+            },
+            "output_features": {
+                "action": {
+                    "type": "ACTION",
+                    "shape": [7],
+                },
+            },
+            # Known Pi05Config fields, deliberately set to non-default values and
+            # NOT among _from_hf's explicit override parameters, so a filter that
+            # drops too much (or a caller override masking the bug) can't hide it.
+            "paligemma_variant": "gemma_300m",
+            "tokenizer_max_length": 48,
+            "empty_cameras": 2,
+        }
+        (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        save_file({"model.some_layer.weight": torch.randn(2, 2)}, str(tmp_path / "model.safetensors"))
+        preprocessor: dict[str, list[object]] = {"steps": []}
+        (tmp_path / "policy_preprocessor.json").write_text(json.dumps(preprocessor), encoding="utf-8")
+        return tmp_path
+
+    def test_from_hf_ignores_unknown_config_keys(self, tmp_path: Path) -> None:
+        """_from_hf should not raise on config.json keys absent from Pi05Config."""
+        pretrained_dir = self._make_pretrained_dir(tmp_path)
+
+        loader = object.__new__(Pi05)
+        config, dataset_stats, weight_file = loader._from_hf(pretrained_dir)  # noqa: SLF001
+
+        assert isinstance(config, Pi05Config)
+        # Default values, to make sure the assertions below actually pin file
+        # values rather than defaults that happen to match.
+        default_config = Pi05Config()
+        assert config.paligemma_variant != default_config.paligemma_variant
+        assert config.tokenizer_max_length != default_config.tokenizer_max_length
+        assert config.empty_cameras != default_config.empty_cameras
+
+        # File-sourced values must survive the unknown-key filtering.
+        assert config.paligemma_variant == "gemma_300m"
+        assert config.tokenizer_max_length == 48
+        assert config.empty_cameras == 2
+
+        assert "observation.state" in dataset_stats
+        assert "action" in dataset_stats
+        assert weight_file == pretrained_dir / "model.safetensors"

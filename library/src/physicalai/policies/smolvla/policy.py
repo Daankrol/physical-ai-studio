@@ -29,6 +29,7 @@ from physicalai.export.backends import (
 )
 from physicalai.policies.base import Policy
 from physicalai.policies.mixins import SnapFlowPolicyMixin
+from physicalai.policies.utils.pretrained import known_config_fields_only
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 from physicalai.train.utils import reformat_dataset_to_match_policy
 
@@ -439,8 +440,10 @@ class SmolVLA(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
 
         dataset_stats = extract_dataset_stats(hf_config, preprocessor_file, preprocessor_dir)
 
-        # strict=False: ignore legacy config.json keys not present in SmolVLAConfig
-        config = SmolVLAConfig.from_dict(hf_config, strict=False)
+        # Drop keys not present on SmolVLAConfig before parsing. Legacy config.json
+        # files carry extra fields that from_dict() cannot silently ignore; see
+        # known_config_fields_only() for details.
+        config = SmolVLAConfig.from_dict(known_config_fields_only(SmolVLAConfig, hf_config))
 
         return config, dataset_stats, weights_file
 
