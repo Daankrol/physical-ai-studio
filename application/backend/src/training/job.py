@@ -69,16 +69,6 @@ PEFT_POLICIES = frozenset({"pi05", "pi0"})
 """Policies whose ``Config`` mixes in ``physicalai.policies.mixins.peft.PeftConfigMixin`` and
 support LoRA/DoRA fine-tuning."""
 
-_LORA_LR_SCALE = 10
-"""LoRA/DoRA trains a small fraction of parameters, so it tolerates a much higher learning
-rate than full fine-tuning; mirrors the ~10x bump used in ``configs/physicalai/pi05_lora.yaml``."""
-
-_DEFAULT_OPTIMIZER_LR: dict[str, float] = {
-    "pi05": 2.5e-5,
-}
-"""Default ``optimizer_lr`` for LoRA-capable policies, scaled by :data:`_LORA_LR_SCALE`. Pi0 has
-no ``optimizer_lr`` field, so it is absent here and gets no LR bump."""
-
 
 class RunOptions(BaseModel):
     """Runtime-only controls which are not part of the training payload."""
@@ -195,9 +185,6 @@ def build_policy(spec: TrainingJobSpec, *, resume_from: Path | str | None = None
             lora_dropout=spec.lora_dropout,
             lora_use_dora=spec.lora_use_dora,
         )
-        default_lr = _DEFAULT_OPTIMIZER_LR.get(spec.policy.lower())
-        if default_lr is not None:
-            kwargs["optimizer_lr"] = default_lr * _LORA_LR_SCALE
     return get_policy(spec.policy, source=spec.policy_source, **kwargs)
 
 
