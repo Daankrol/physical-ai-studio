@@ -138,11 +138,14 @@ class TestBuildSpec:
         assert build_spec(_context(tmp_path, _payload())).snapflow_start_epoch is None
 
     def test_the_distillation_budget_becomes_an_absolute_phase_boundary(self, tmp_path):
-        """The payload counts trailing epochs; the runner's callback fires on an epoch."""
+        """Distillation is additive: the boundary is max_epochs, and the spec's
+        max_epochs grows to include the distillation phase."""
         payload = _payload(policy="pi05", max_epochs=8, snapflow_enabled=True, snapflow_distill_epochs=3)
         context = _context(tmp_path, payload, model=_model(tmp_path / "m", policy="pi05"))
 
-        assert build_spec(context).snapflow_start_epoch == 5
+        spec = build_spec(context)
+        assert spec.snapflow_start_epoch == 8
+        assert spec.max_epochs == 11
 
 
 class TestLocalTrainingBackend:

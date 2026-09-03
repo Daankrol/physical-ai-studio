@@ -100,9 +100,9 @@ class TestSshTarget:
 class TestSnapFlowDistillation:
     """The payload expresses the distillation budget; the runner needs a boundary.
 
-    Users pick how many *trailing* epochs are distilled rather than an absolute
-    epoch, so changing the epoch budget doesn't silently move the phase split.
-    `snapflow_start_epoch` is where that translation happens.
+    Distillation epochs are additive on top of ``max_epochs`` (the teacher
+    phase always runs the full budget, then distillation extends the run),
+    so `snapflow_start_epoch` is always just `max_epochs`.
     """
 
     def test_training_is_flow_matching_by_default(self) -> None:
@@ -120,24 +120,27 @@ class TestSnapFlowDistillation:
             snapflow_distill_epochs=3,
         )
 
-        assert payload.snapflow_start_epoch == 5
+        assert payload.snapflow_start_epoch == 8
+        assert payload.total_epochs == 11
 
     @pytest.mark.parametrize("policy", ["act", "pi0", "groot"])
     def test_other_policies_are_rejected_rather_than_silently_trained_without_it(self, policy: str) -> None:
         with pytest.raises(ValidationError, match="not available for policy"):
             LocalTrainJobPayload(**{**_base_kwargs(), "policy": policy}, snapflow_enabled=True)
 
-    def test_the_distillation_budget_must_leave_epochs_to_train_the_teacher(self) -> None:
-        """SnapFlow distils a trained policy; distilling from epoch zero distils noise."""
-        with pytest.raises(ValidationError, match="must be below max_epochs"):
-            LocalTrainJobPayload(
-                **{**_base_kwargs(), "policy": "pi05"},
-                max_epochs=3,
-                snapflow_enabled=True,
-                snapflow_distill_epochs=3,
-            )
+    def test_the_distillation_budget_is_not_bounded_by_max_epochs(self) -> None:
+        """Distillation is additive, so it may exceed max_epochs without error."""
+        payload = LocalTrainJobPayload(
+            **{**_base_kwargs(), "policy": "pi05"},
+            max_epochs=3,
+            snapflow_enabled=True,
+            snapflow_distill_epochs=3,
+        )
 
-    def test_the_budget_is_measured_against_the_default_epoch_count_when_unset(self) -> None:
+        assert payload.snapflow_start_epoch == 3
+        assert payload.total_epochs == 6
+
+    def test_the_boundary_is_measured_against_the_default_epoch_count_when_unset(self) -> None:
         """`max_epochs` is filled in by `resolve_training_limit`, which runs first."""
         payload = LocalTrainJobPayload(
             **{**_base_kwargs(), "policy": "pi05"},
@@ -145,7 +148,8 @@ class TestSnapFlowDistillation:
             snapflow_distill_epochs=2,
         )
 
-        assert payload.snapflow_start_epoch == payload.max_epochs - 2
+        assert payload.snapflow_start_epoch == payload.max_epochs
+        assert payload.total_epochs == payload.max_epochs + 2
 
     def test_a_distillation_budget_on_an_unsupported_policy_is_fine_while_disabled(self) -> None:
         """The field carries a default, so it must not gate an ordinary ACT run."""
@@ -165,4 +169,4 @@ class TestSnapFlowDistillation:
             snapflow_enabled=True,
         )
 
-        assert (remote.snapflow_start_epoch, ssh.snapflow_start_epoch) == (2, 2)
+        assert (remote.snapflow_start_epoch, ssh.snapflow_start_epoch) == (5, 5)

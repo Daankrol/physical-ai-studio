@@ -84,10 +84,9 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     const [snapflowDistillEpochs, setSnapflowDistillEpochs] = useState<number>(DEFAULT_SNAPFLOW_DISTILL_EPOCHS);
     const [remoteTrainerId, setRemoteTrainerId] = useState<Key | null>('local');
     const isSnapflowSupported = supportsSnapflow(selectedPolicy);
-    // The backend rejects a distillation budget that leaves no epochs to train
-    // the teacher, so clamp instead of letting the user submit a doomed job.
-    const maxDistillEpochs = Math.max(1, maxEpochs - 1);
-    const distillEpochs = Math.min(snapflowDistillEpochs, maxDistillEpochs);
+    // snapflow_distill_epochs is additive on top of max_epochs (the teacher phase
+    // always runs the full max_epochs before distillation extends the run), so it
+    // needs no clamp against max_epochs.
     const isSnapflowRequested = isSnapflowSupported && snapflowEnabled && maxEpochs >= MIN_EPOCHS_FOR_SNAPFLOW;
     const isRemoteTarget = remoteTrainerId !== null && remoteTrainerId !== 'local';
     const {
@@ -163,7 +162,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
             precision: (precision?.toString() ?? 'bf16-mixed') as SchemaJob['payload']['precision'],
             compile_model: compileModel,
             snapflow_enabled: isSnapflowRequested,
-            snapflow_distill_epochs: distillEpochs,
+            snapflow_distill_epochs: snapflowDistillEpochs,
             val_split: 0.1,
             ...extraPayload,
         } as const;
@@ -263,7 +262,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                                 isSnapflowSupported={isSnapflowSupported}
                                 snapflowEnabled={snapflowEnabled}
                                 onSnapflowEnabledChange={setSnapflowEnabled}
-                                snapflowDistillEpochs={distillEpochs}
+                                snapflowDistillEpochs={snapflowDistillEpochs}
                                 onSnapflowDistillEpochsChange={setSnapflowDistillEpochs}
                             />
                         </DisclosurePanel>

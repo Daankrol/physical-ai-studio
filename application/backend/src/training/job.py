@@ -112,7 +112,14 @@ class TrainingJobSpec(BaseModel):
         default="physicalai",
         description="Which implementation of the policy to train.",
     )
-    max_epochs: int = Field(default=5, ge=1, description="Training epoch budget.")
+    max_epochs: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Total training epoch budget. When SnapFlow distillation is enabled this already "
+            "includes the distillation phase (see snapflow_start_epoch)."
+        ),
+    )
     batch_size: int = Field(default=8, ge=1, description="Training batch size.")
     num_workers: int | Literal["auto"] = Field(default="auto", description="Dataloader worker count.")
     val_split: float = Field(default=0.1, ge=0.0, lt=1.0, description="Fraction of episodes held out for validation.")
@@ -430,13 +437,12 @@ def _export_policy(spec: TrainingJobSpec, policy: Policy, output_dir: Path) -> P
     Returns:
         The policy instance to hand to the export backends.
     """
-    snapflow_checkpoint = output_dir / SNAPFLOW_CHECKPOINT_NAME
-    if snapflow_checkpoint.is_file():
-        reload_from = snapflow_checkpoint
-    elif spec.compile_model and spec.policy.lower() in _COMPILED_EXPORT_RELOAD_POLICIES:
-        reload_from = output_dir / CHECKPOINT_NAME
-    else:
+    resolved = resolve_checkpoint(output_dir)
+    used_snapflow_checkpoint = resolved.name == SNAPFLOW_CHECKPOINT_NAME
+    needs_compiled_reload = spec.compile_model and spec.policy.lower() in _COMPILED_EXPORT_RELOAD_POLICIES
+    if not used_snapflow_checkpoint and not needs_compiled_reload:
         return policy
+    reload_from = resolved
 
     try:
         logger.info("Reloading policy from %s for export", reload_from.name)

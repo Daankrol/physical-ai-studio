@@ -693,7 +693,8 @@ class TestHttpDatasetTransfer:
 
         body = await _submitted_body(_settings(), context)
 
-        assert body["spec"]["snapflow_start_epoch"] == 5
+        assert body["spec"]["snapflow_start_epoch"] == 8
+        assert body["spec"]["max_epochs"] == 11
 
     @pytest.mark.anyio
     async def test_submit_body_omits_the_studios_device_selection(self, tmp_path):

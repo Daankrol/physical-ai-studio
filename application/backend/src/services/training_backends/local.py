@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING
 from loguru import logger
 from pydantic import SecretStr
 
-from schemas.job import _DEFAULT_MAX_EPOCHS
 from services.training_backends._log_format import render_progress_log
 from settings import get_settings
 
@@ -102,7 +101,9 @@ def build_spec(context: TrainingContext) -> TrainingJobSpec:
     return TrainingJobSpec(
         # A resumed run's architecture is dictated by the base model's checkpoint.
         policy=(context.base_model or context.model).policy,
-        max_epochs=payload.max_epochs if payload.max_epochs is not None else _DEFAULT_MAX_EPOCHS,
+        # SnapFlow distillation epochs are additive: the trainer's epoch budget
+        # is the teacher run plus the distillation phase, not carved out of it.
+        max_epochs=payload.total_epochs,
         batch_size=payload.batch_size,
         num_workers=payload.num_workers,
         val_split=payload.val_split,

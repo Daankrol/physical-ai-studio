@@ -204,10 +204,10 @@ export const TrainingParameters = ({
                             <Heading>SnapFlow distillation</Heading>
                             <Content>
                                 <Text>
-                                    Trains normally first, then spends the final epochs distilling the policy so it
-                                    generates an action chunk in a single denoising step instead of ten. The exported
-                                    model is the distilled one, which runs several times faster on the robot at
-                                    comparable task success.
+                                    Trains normally for the full max epochs, then spends additional epochs distilling
+                                    the policy so it generates an action chunk in a single denoising step instead of
+                                    ten. The exported model is the distilled one, which runs several times faster on the
+                                    robot at comparable task success.
                                 </Text>
                             </Content>
                         </ContextualHelp>
@@ -218,7 +218,7 @@ export const TrainingParameters = ({
                     value={snapflowDistillEpochs}
                     onChange={onSnapflowDistillEpochsChange}
                     minValue={1}
-                    maxValue={Math.max(1, maxEpochs - 1)}
+                    maxValue={10_000}
                     step={1}
                     width='100%'
                     isDisabled={!snapflowEnabled || maxEpochs < MIN_EPOCHS_FOR_SNAPFLOW}
@@ -227,9 +227,8 @@ export const TrainingParameters = ({
                             <Heading>Distillation epochs</Heading>
                             <Content>
                                 <Text>
-                                    How many of the total epochs are spent distilling. The rest train the policy that
-                                    gets distilled, so this must stay below max epochs. Distilling an undertrained
-                                    policy distils noise; 3 to 5 epochs is the published range.
+                                    How many additional epochs to perform distilling after normal finetuning. We
+                                    recommend 2-5 epochs.
                                 </Text>
                             </Content>
                         </ContextualHelp>

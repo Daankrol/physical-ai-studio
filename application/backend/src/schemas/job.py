@@ -155,14 +155,14 @@ class TrainJobPayloadBase(BaseModel):
         ge=1,
         le=10_000,
         description=(
-            "How many of the final epochs are spent distilling. The preceding epochs train with "
-            "standard flow matching. Ignored when snapflow_enabled is false."
+            "How many additional epochs to spend distilling, appended after the "
+            "max_epochs teacher run. Ignored when snapflow_enabled is false."
         ),
     )
 
     @model_validator(mode="after")
     def validate_snapflow(self) -> "TrainJobPayloadBase":
-        """Reject a distillation request the run cannot honour.
+        """Reject a distillation request the policy cannot honour.
 
         Runs after ``resolve_training_limit``, so ``max_epochs`` is resolved.
 
@@ -170,8 +170,7 @@ class TrainJobPayloadBase(BaseModel):
             The validated payload.
 
         Raises:
-            ValueError: If the policy has no SnapFlow implementation, or the
-                distillation budget leaves no epochs to train the teacher.
+            ValueError: If the policy has no SnapFlow implementation.
         """
         if not self.snapflow_enabled:
             return self
@@ -182,15 +181,6 @@ class TrainJobPayloadBase(BaseModel):
                 f"it requires a flow-matching policy ({sorted(SNAPFLOW_POLICIES)})."
             )
             raise ValueError(msg)
-
-        max_epochs = self.max_epochs or _DEFAULT_MAX_EPOCHS
-        if self.snapflow_distill_epochs >= max_epochs:
-            msg = (
-                f"snapflow_distill_epochs ({self.snapflow_distill_epochs}) must be below max_epochs "
-                f"({max_epochs}): SnapFlow distills a trained flow-matching policy, so at least one "
-                "epoch must precede the distillation phase."
-            )
-            raise ValueError(msg)
         return self
 
     @property
@@ -198,16 +188,35 @@ class TrainJobPayloadBase(BaseModel):
         """Epoch at which distillation begins, or None when it is disabled.
 
         Zero-based, matching ``SnapFlowPhaseCallback(start_epoch=...)``: with
-        ``max_epochs=8`` and ``snapflow_distill_epochs=3``, epochs 0-4 train
-        with flow matching and epochs 5-7 distill.
+        ``max_epochs=8`` and ``snapflow_distill_epochs=3``, epochs 0-7 train
+        with flow matching and epochs 8-10 distill (11 epochs total).
+        ``snapflow_distill_epochs`` is additive on top of ``max_epochs``, not
+        carved out of it, so raising the teacher budget never shortens
+        distillation (and vice versa).
 
         Returns:
             The phase boundary, or None for an ordinary flow-matching run.
         """
         if not self.snapflow_enabled:
             return None
+        return self.max_epochs or _DEFAULT_MAX_EPOCHS
+
+    @property
+    def total_epochs(self) -> int:
+        """Total training epochs, including the SnapFlow distillation phase.
+
+        This is what should be handed to the trainer's epoch budget: the
+        teacher phase always runs the full ``max_epochs``, and distillation
+        (when enabled) extends the run rather than eating into it.
+
+        Returns:
+            ``max_epochs`` when SnapFlow is disabled, otherwise
+            ``max_epochs + snapflow_distill_epochs``.
+        """
         max_epochs = self.max_epochs or _DEFAULT_MAX_EPOCHS
-        return max_epochs - self.snapflow_distill_epochs
+        if not self.snapflow_enabled:
+            return max_epochs
+        return max_epochs + self.snapflow_distill_epochs
 
     # Set by the worker for every target (not just remote ones): a snapshot is
     # taken up front so a job's model has stable provenance, and a remote/SSH
