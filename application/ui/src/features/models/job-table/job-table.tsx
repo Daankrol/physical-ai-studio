@@ -21,6 +21,7 @@ import { notify } from '../../../components/notification/notification.component'
 import { Table } from '../../../components/table/table';
 import { useDatasetQuery, useEnvironmentQuery } from '../api/queries';
 import { durationBetween } from '../shared/duration';
+import { PeftBadge } from '../shared/peft-badge';
 import { SingleBadge, SplitBadge } from '../shared/split-badge';
 import { getTrainerLabel } from '../shared/trainer';
 import { SchemaTrainJob } from '../train-model-dialog/train-model-dialog';
@@ -35,6 +36,8 @@ const TrainJobStatus = ({ job }: { job: SchemaTrainJob }) => {
                 <Flex gap={'size-100'} alignItems={'center'} wrap>
                     <Text UNSAFE_style={{ fontWeight: 500 }}>{job.payload.model_name}</Text>
                     <SplitBadge first={job.status} second={job.message} />
+                    <PeftBadge isEnabled={job.payload.lora_enabled} isDora={job.payload.lora_use_dora} />
+                    <TrainingLocationBadge payload={job.payload} />
                 </Flex>
                 {job.start_time ? (
                     <Text UNSAFE_className={classes.rowInfo}>
@@ -53,6 +56,8 @@ const TrainJobStatus = ({ job }: { job: SchemaTrainJob }) => {
                 <Flex gap={'size-100'} alignItems={'center'} wrap>
                     <Text UNSAFE_style={{ fontWeight: 500 }}>{job.payload.model_name}</Text>
                     <SingleBadge color={color} text={job.status} />
+                    <PeftBadge isEnabled={job.payload.lora_enabled} isDora={job.payload.lora_use_dora} />
+                    <TrainingLocationBadge payload={job.payload} />
                 </Flex>
                 {job.start_time && job.end_time && (
                     <Text UNSAFE_className={classes.rowInfo}>
