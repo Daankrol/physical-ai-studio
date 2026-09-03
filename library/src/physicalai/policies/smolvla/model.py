@@ -215,13 +215,18 @@ class SmolVLAModel(Model):
         lang_tokens = batch[TOKENIZED_PROMPT]
         lang_masks = batch[TOKENIZED_PROMPT_MASK]
         loss_dict: dict[str, torch.Tensor | float] = {}
-        losses = self._model.forward(images, img_masks, lang_tokens, lang_masks, state, actions)
+        losses, cd_idx = self._model.forward(images, img_masks, lang_tokens, lang_masks, state, actions)
 
         # Truncate losses to actual action dimensions to avoid dilution from padding
         original_action_dim = int(self._dataset_stats[ACTION]["shape"][-1])
         losses = losses[:, :, :original_action_dim]
 
-        loss = reduce_losses(losses, in_episode_bound(batch))
+        # Mask out action steps that only exist because the chunk query was
+        # clamped at an episode boundary. SnapFlow consistency-distillation
+        # samples (cd_idx) are exempt: they regress onto a self-generated
+        # teacher velocity rather than the dataset action, so padded steps
+        # carry no bad supervision there.
+        loss = reduce_losses(losses, in_episode_bound(batch, cd_idx))
         # Detached tensor, not `.item()` float: see Model.compute_loss docstring.
         loss_dict["loss"] = loss.detach()
         return loss, loss_dict
@@ -1129,7 +1134,7 @@ class VLAFlowMatching(SnapFlowModelMixin, nn.Module):
         actions: torch.Tensor,
         noise: torch.Tensor | None = None,
         time: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Compute flow matching training loss, optionally with SnapFlow self-distillation.
 
         When ``snapflow_enabled`` is *False* this delegates to :meth:`_forward_fm`.
@@ -1148,10 +1153,17 @@ class VLAFlowMatching(SnapFlowModelMixin, nn.Module):
             time: Optional diffusion time step tensor.
 
         Returns:
-            Per-element MSE loss tensor of shape (batch_size, chunk_size, action_dim).
+            Tuple of (per-element MSE loss tensor of shape
+            ``(batch_size, chunk_size, action_dim)``, indices of samples
+            routed through the consistency-distillation branch, or ``None``
+            when SnapFlow is disabled). CD samples do not regress onto the
+            dataset action, so callers should treat ``cd_idx`` as exempt from
+            action-padding masking (see
+            :func:`physicalai.policies.base.in_episode_bound`).
         """
         if not self._snapflow_enabled:
-            return self._forward_fm(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
+            losses = self._forward_fm(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
+            return losses, None
 
         if noise is None:
             noise = self._sample_noise(actions.shape, actions.device)
@@ -1171,9 +1183,7 @@ class VLAFlowMatching(SnapFlowModelMixin, nn.Module):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        # SmolVLA does not exempt consistency-distillation samples from the
-        # action-padding mask (unlike Pi05); the CD indices are discarded here.
-        losses, _cd_idx = self.snapflow_mixed_loss(
+        losses, cd_idx = self.snapflow_mixed_loss(
             u_t=u_t,
             x_t=x_t,
             time=time,
@@ -1184,7 +1194,7 @@ class VLAFlowMatching(SnapFlowModelMixin, nn.Module):
             sample_noise=self._sample_noise,
             predict_velocity=self._predict_velocity,
         )
-        return losses
+        return losses, cd_idx
 
     def sample_actions(  # noqa: PLR0914
         self,
