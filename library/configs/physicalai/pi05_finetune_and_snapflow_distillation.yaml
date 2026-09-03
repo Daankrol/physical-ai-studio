@@ -156,10 +156,10 @@ trainer:
         save_top_k: 1
         filename: "epoch{epoch:03d}"
         auto_insert_metric_name: false
-        dirpath: /mnt/data/experiments/pi05_padded_loss
+        dirpath: ./experiments/snapflow-multi-object-augment-best-ckpt
   logger:
     class_path: lightning.pytorch.loggers.WandbLogger
     init_args:
       project: "physicalai_snapflow"
-      name: "pi05_padded_loss"
+      name: "pi05_finetune_and_snapflow_augment_best_ckpt"
       log_model: false
