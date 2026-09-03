@@ -115,14 +115,16 @@ class TestBuildPolicy:
 
         assert "pretrained_name_or_path" not in get_policy.call_args.kwargs
 
-    def test_lora_disabled_run_gets_no_lora_kwargs_or_lr_override(self) -> None:
+    def test_lora_disabled_run_gets_no_lora_kwargs(self) -> None:
         with patch("physicalai.policies.get_policy") as get_policy:
             build_policy(TrainingJobSpec(policy="pi05"))
 
-        for key in ("lora_enabled", "lora_rank", "lora_alpha", "lora_dropout", "lora_use_dora", "optimizer_lr"):
+        for key in ("lora_enabled", "lora_rank", "lora_alpha", "lora_dropout", "lora_use_dora"):
             assert key not in get_policy.call_args.kwargs
 
-    def test_lora_enabled_run_passes_lora_kwargs_and_scales_the_learning_rate(self) -> None:
+    def test_lora_enabled_run_passes_lora_kwargs(self) -> None:
+        """Learning-rate scaling for LoRA/DoRA is the library's job (PeftConfigMixin.lora_lr_scale),
+        not the backend's; the backend only forwards the hyperparameters it owns."""
         with patch("physicalai.policies.get_policy") as get_policy:
             build_policy(
                 TrainingJobSpec(
@@ -133,15 +135,7 @@ class TestBuildPolicy:
         kwargs = get_policy.call_args.kwargs
         assert (kwargs["lora_enabled"], kwargs["lora_rank"], kwargs["lora_alpha"]) == (True, 16, 32)
         assert (kwargs["lora_dropout"], kwargs["lora_use_dora"]) == (0.1, True)
-        # LoRA/DoRA tolerates (and benefits from) a much higher learning rate.
-        assert kwargs["optimizer_lr"] == pytest.approx(2.5e-4)
-
-    def test_lora_enabled_run_gets_no_lr_override_for_a_policy_without_a_known_default(self) -> None:
-        """Pi0 has no ``optimizer_lr`` config field, so no override is added for it."""
-        with patch("physicalai.policies.get_policy") as get_policy:
-            build_policy(TrainingJobSpec(policy="pi0", lora_enabled=True))
-
-        assert "optimizer_lr" not in get_policy.call_args.kwargs
+        assert "optimizer_lr" not in kwargs
 
     def test_resume_loads_the_checkpoint_instead_of_a_new_policy(self, tmp_path: Path) -> None:
         checkpoint = tmp_path / CHECKPOINT_NAME
