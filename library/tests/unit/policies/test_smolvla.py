@@ -708,7 +708,7 @@ class TestActionPaddingMask:
             _preprocess_batch=lambda b: b,
             _prepare_state=lambda b: None,
             _prepare_action=lambda b: None,
-            _model=SimpleNamespace(forward=lambda *_a, **_kw: losses.clone()),
+            _model=SimpleNamespace(forward=lambda *_a, **_kw: (losses.clone(), None)),
             _dataset_stats={ACTION: {"shape": (action_dim,)}},
         )
         loss, _ = SmolVLAModel.compute_loss(stub, batch)
@@ -791,7 +791,7 @@ class TestActionPaddingMask:
             _preprocess_batch=lambda b: b,
             _prepare_state=lambda b: None,
             _prepare_action=lambda b: None,
-            _model=SimpleNamespace(forward=lambda *_a, **_kw: source * 2.0),
+            _model=SimpleNamespace(forward=lambda *_a, **_kw: (source * 2.0, None)),
             _dataset_stats={ACTION: {"shape": (2,)}},
         )
         batch: dict = {
@@ -808,6 +808,44 @@ class TestActionPaddingMask:
         assert source.grad is not None
         assert torch.all(source.grad[0, :2] != 0), "valid steps must receive gradient"
         assert torch.all(source.grad[0, 2:] == 0), "padded steps must receive zero gradient"
+
+    def test_snapflow_distillation_steps_ignore_the_pad_mask(self) -> None:
+        """Consistency-distillation samples stay fully weighted, matching Pi05.
+
+        The SnapFlow branch regresses the one-step student onto a self-generated
+        two-step teacher, so it never reads the dataset action. Padded steps carry
+        no bad supervision there, and masking them would silently drop valid
+        distillation signal from the tail of every chunk.
+        """
+        from types import SimpleNamespace
+
+        from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
+        from physicalai.data.observation import ACTION, EXTRA, IMAGES
+        from physicalai.policies.smolvla.model import SmolVLAModel
+
+        # All four rows routed through the CD branch (mirrors alpha=0 in the
+        # inner model); the last two are also flagged as padded.
+        losses = torch.tensor([[[1.0, 1.0], [1.0, 1.0], [99.0, 99.0], [99.0, 99.0]]])
+        cd_idx = torch.tensor([0])
+
+        stub = SimpleNamespace(
+            _preprocess_batch=lambda b: b,
+            _prepare_state=lambda b: None,
+            _prepare_action=lambda b: None,
+            _model=SimpleNamespace(forward=lambda *_a, **_kw: (losses.clone(), cd_idx)),
+            _dataset_stats={ACTION: {"shape": (2,)}},
+        )
+        batch: dict = {
+            IMAGES: None,
+            IMAGE_MASKS: None,
+            TOKENIZED_PROMPT: None,
+            TOKENIZED_PROMPT_MASK: None,
+            EXTRA + ".action_is_pad": torch.tensor([[False, False, True, True]]),
+        }
+
+        loss, _ = SmolVLAModel.compute_loss(stub, batch)
+
+        assert float(loss) == pytest.approx(50.0), "distillation steps must not be masked"
 
     @staticmethod
     def _compute_val_loss(
