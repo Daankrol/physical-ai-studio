@@ -29,6 +29,21 @@ import { JobRowContent } from './job-row-content';
 
 import classes from './job-table.module.css';
 
+/** Small pill naming the remote trainer a job runs on. Hidden entirely for local jobs. */
+const TrainingLocationBadge = ({ payload }: { payload: SchemaTrainJob['payload'] }) => {
+    const { data: remoteTrainers = [] } = $api.useQuery('get', '/api/remote-trainers');
+
+    if (payload.training_target !== 'remote') {
+        return null;
+    }
+
+    const remoteTrainer = remoteTrainers.find((trainer) => trainer.id === payload.remote_trainer_id);
+    const label = remoteTrainer?.name ?? payload.remote_trainer_url ?? 'unknown';
+    const text = `Remote · ${label}`;
+
+    return <SingleBadge color='var(--spectrum-global-color-purple-600)' text={text} title={text} preserveCase />;
+};
+
 const TrainJobStatus = ({ job }: { job: SchemaTrainJob }) => {
     if (job.status === 'running') {
         return (
