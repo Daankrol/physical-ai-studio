@@ -12,6 +12,14 @@ type JointsState = Array<{
     value: number;
 }>;
 
+// Mirrors runtime.contract.PoseLandmark.
+export interface PoseLandmark {
+    x: number;
+    y: number;
+    z: number;
+    visibility: number;
+}
+
 const getNewJointState = (newJoints: Record<string, number>) => {
     return Object.keys(newJoints).map((joint_name) => {
         return {
@@ -36,10 +44,11 @@ export const useSynchronizeModelJoints = (joints: JointsState, robotType: Schema
     }, [model, joints, jointMap]);
 };
 
-// Mirrors runtime.contract.FollowerSource. Inference uses 'policy'.
-export type FollowerSource = 'hold' | 'teleop' | 'policy';
+// Mirrors runtime.contract.FollowerSource. Inference uses 'policy'. 'pose' is
+// the PoC human-pose-teleop mode (browser MediaPipe landmarks -> joint angles).
+export type FollowerSource = 'hold' | 'teleop' | 'policy' | 'pose';
 
-const RECOVERABLE_ERROR_CODES = new Set(['leader_connection_lost']);
+const RECOVERABLE_ERROR_CODES = new Set(['leader_connection_lost', 'pose_connection_lost']);
 const EMPTY_CAMERA_IDS: string[] = [];
 
 export const isRecoverableRobotControlError = (errorCode: unknown): errorCode is string =>
@@ -48,6 +57,7 @@ export const isRecoverableRobotControlError = (errorCode: unknown): errorCode is
 interface RobotControlState {
     connected: boolean;
     follower_source: FollowerSource;
+    pose_available?: boolean;
 }
 
 // Compose from a typed project path so this does not depend on regenerating OpenAPI.
@@ -160,6 +170,13 @@ export const useJointState = (
         });
     };
 
+    const sendPoseLandmarks = (landmarks: PoseLandmark[]) => {
+        socket.sendJsonMessage({
+            event: 'set_pose_landmarks',
+            data: { landmarks },
+        });
+    };
+
     const disconnect = () => {
         socket.sendJsonMessage({ event: 'disconnect' });
     };
@@ -181,6 +198,7 @@ export const useJointState = (
         errorCode,
         warning,
         setFollowerSource: setFollowerSourceRequest,
+        sendPoseLandmarks,
         disconnect,
         restart,
     };

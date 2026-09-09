@@ -4,6 +4,8 @@ import { $api } from '../../../../api/client';
 import { getRobotConnectionErrorTitle } from '../../../../api/errors';
 import { useProjectId } from '../../../projects/use-project';
 import { RobotViewer, UnavailableRobotViewer } from '../../controller/robot-viewer';
+import { PoseCameraCapture } from '../../pose-teleop/pose-camera-capture';
+import { usePoseTeleop } from '../../pose-teleop/use-pose-teleop';
 import { RobotModelsProvider } from '../../robot-models-context';
 import { AvailableSchemaRobot, isUnavailableRobot } from '../../robot-types';
 import { InlineAlert } from '../../setup-wizard/shared/inline-alert';
@@ -21,7 +23,7 @@ const AvailableRobotCell = ({
     cameraIds: string[];
 }) => {
     const { project_id } = useProjectId();
-    const { joints, state, error, errorCode, warning, setFollowerSource, restart } = useJointState(
+    const { joints, state, error, errorCode, warning, setFollowerSource, sendPoseLandmarks, restart } = useJointState(
         project_id,
         followerId,
         leaderId,
@@ -30,6 +32,10 @@ const AvailableRobotCell = ({
     useSynchronizeModelJoints(joints, robot.type);
 
     const isTeleoperating = state.follower_source === 'teleop';
+    const poseTeleop = usePoseTeleop({
+        sendPoseLandmarks,
+        onEnabledChange: (next) => setFollowerSource(next ? 'pose' : 'hold'),
+    });
 
     if (error) {
         return (
@@ -75,9 +81,17 @@ const AvailableRobotCell = ({
             position={'relative'}
         >
             <RobotViewer robot={robot} />
+            {poseTeleop.enabled && (
+                <PoseCameraCapture onLandmarks={poseTeleop.handleLandmarks} onError={poseTeleop.handleError} />
+            )}
             {warning && (
                 <View position={'absolute'} left={0} top={0} padding='size-100' maxWidth='size-4600'>
                     <InlineAlert variant='warning'>{warning}</InlineAlert>
+                </View>
+            )}
+            {poseTeleop.error && (
+                <View position={'absolute'} left={0} top={0} padding='size-100' maxWidth='size-4600'>
+                    <InlineAlert variant='error'>{poseTeleop.error}</InlineAlert>
                 </View>
             )}
             <View position={'absolute'} right={0} top={0} padding='size-100'>
@@ -92,6 +106,11 @@ const AvailableRobotCell = ({
                             onChange={(b) => setFollowerSource(b ? 'teleop' : 'hold')}
                         >
                             Teleoperate
+                        </Switch>
+                    )}
+                    {state.pose_available === true && (
+                        <Switch isEmphasized isSelected={poseTeleop.enabled} onChange={poseTeleop.toggle}>
+                            Pose control (PoC)
                         </Switch>
                     )}
                 </Flex>

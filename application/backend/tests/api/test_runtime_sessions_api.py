@@ -118,6 +118,7 @@ def test_a_running_session_maps_its_metadata_through(client: TestClient, monkeyp
         "dataset_loaded": True,
         "is_recording": True,
         "episodes_recorded": 3,
+        "pose_available": None,
     }
     assert session["error"] is None
 

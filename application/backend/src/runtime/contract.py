@@ -13,7 +13,7 @@ from schemas import InferenceDevice
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-FollowerSource = Literal["hold", "teleop", "policy"]
+FollowerSource = Literal["hold", "teleop", "policy", "pose"]
 
 
 class CommandBase(BaseModel):
@@ -68,6 +68,25 @@ class StartRecordingCommand(CommandBase):
     task: str
 
 
+class PoseLandmark(BaseModel):
+    x: float
+    y: float
+    z: float
+    visibility: float = 1.0
+
+
+class SetPoseLandmarksCommand(CommandBase):
+    """Latest human-pose snapshot from the browser's PoseLandmarker.
+
+    Published every frame like ``set_follower_source``, not requested: a
+    dropped snapshot just means the next tick uses a slightly older pose, the
+    same tolerance teleop already has for a slow leader read.
+    """
+
+    command: Literal["set_pose_landmarks"] = "set_pose_landmarks"
+    landmarks: list[PoseLandmark]
+
+
 class SaveEpisodeCommand(BaseModel):
     command: Literal["save_episode"] = "save_episode"
     request_id: str
@@ -86,6 +105,7 @@ Command = Annotated[
     | StartTaskCommand
     | StopTaskCommand
     | StartRecordingCommand
+    | SetPoseLandmarksCommand
     | SaveEpisodeCommand
     | DiscardEpisodeCommand,
     Field(discriminator="command"),
@@ -109,6 +129,7 @@ class StateData(BaseModel):
     dataset_loaded: bool | None = None
     is_recording: bool | None = None
     episodes_recorded: int | None = None
+    pose_available: bool | None = None
 
 
 class StateEvent(BaseModel):

@@ -58,6 +58,7 @@ class RuntimeSessionActivity(BaseModel):
     dataset_loaded: bool | None = None
     is_recording: bool | None = None
     episodes_recorded: int | None = None
+    pose_available: bool | None = None
 
 
 class RuntimeSessionError(BaseModel):

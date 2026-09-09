@@ -311,6 +311,7 @@ def test_ready_state_can_be_recovered_from_metadata_when_publication_is_dropped(
                 "dataset_loaded": None,
                 "is_recording": None,
                 "episodes_recorded": None,
+                "pose_available": None,
             },
         }
     finally:

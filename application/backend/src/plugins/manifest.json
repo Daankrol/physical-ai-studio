@@ -44,5 +44,34 @@
     "repo_url": "https://github.com/MarkRedeman/physicalai-plugins",
     "install_source": "physicalai-lerobot-plugin>=0.2.3",
     "robots": []
+  },
+  {
+    "id": "physicalai-openarm-plugin",
+    "name": "OpenArm Robot Plugin (experimental)",
+    "description": "Native SocketCAN/Damiao OpenArm follower and leader arms. Not yet an officially supported robot — pulled from an unmerged branch for pose-teleop PoC work.",
+    "repo_url": "https://github.com/MarkRedeman/physicalai-plugins",
+    "install_source": "git+https://github.com/MarkRedeman/physicalai-plugins.git@mark/feat-openarm-motorbridge#subdirectory=packages/physicalai-openarm-plugin",
+    "robots": [
+      {
+        "type": "OpenArm_Follower",
+        "display_name": "OpenArm Follower",
+        "role": "follower"
+      },
+      {
+        "type": "OpenArm_Leader",
+        "display_name": "OpenArm Leader",
+        "role": "leader"
+      },
+      {
+        "type": "BimanualOpenArm_Follower",
+        "display_name": "Bimanual OpenArm Follower",
+        "role": "follower"
+      },
+      {
+        "type": "BimanualOpenArm_Leader",
+        "display_name": "Bimanual OpenArm Leader",
+        "role": "leader"
+      }
+    ]
   }
 ]

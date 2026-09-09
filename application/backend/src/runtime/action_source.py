@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11,6 +12,7 @@ from runtime.contract import (
     ErrorEvent,
     LoadModelCommand,
     SetFollowerSourceCommand,
+    SetPoseLandmarksCommand,
     StartRecordingCommand,
     StartTaskCommand,
     StateData,
@@ -18,6 +20,7 @@ from runtime.contract import (
     StopTaskCommand,
 )
 from runtime.policy_loader import PolicyLoader, model_identity
+from runtime.pose_retarget import PoseRetargeter
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -35,7 +38,9 @@ if TYPE_CHECKING:
 class StudioActionSource:
     """Select the action sent by RobotRuntime from Studio's current mode."""
 
-    def __init__(
+    _POSE_STALE_AFTER_S = 1.0
+
+    def __init__(  # noqa: PLR0913
         self,
         *,
         follower: Robot,
@@ -45,6 +50,7 @@ class StudioActionSource:
         fps: float,
         camera_keys: Sequence[str] = (),
         models_dir: Path | None = None,
+        pose_retargeter: PoseRetargeter | None = None,
     ) -> None:
         self._follower = follower
         self._leader = leader
@@ -78,10 +84,43 @@ class StudioActionSource:
             models_dir=models_dir,
         )
         self._recording: RecordingState | None = None
+        # ``None`` means "not attempted yet, resolve lazily once the follower
+        # is connected" — ``self._follower.joint_names`` is not safe to read
+        # from ``__init__`` (the session constructs this before connecting).
+        self._pose_retargeter: PoseRetargeter | None = pose_retargeter
+        self._last_pose_landmarks: list[tuple[float, float, float, float]] | None = None
+        self._last_pose_action: np.ndarray | None = None
+        self._last_pose_received_at: float | None = None
 
     @property
     def follower_source(self) -> FollowerSource:
         return self._follower_source
+
+    @property
+    def pose_available(self) -> bool:
+        return self._resolve_pose_retargeter() is not None
+
+    def _resolve_pose_retargeter(self) -> PoseRetargeter | None:
+        """Lazily build the retargeter from the follower's own joint names.
+
+        Deferred past ``__init__``: the follower is not connected yet when the
+        session constructs this, and reading ``joint_names`` off an
+        unconnected ``SharedRobot`` raises. Retried each call rather than
+        caching a failure — cheap pure computation, and it means an
+        unsupported robot never leaves ``pose_available`` permanently wrong
+        if this is ever called before connect.
+        """
+        if self._pose_retargeter is not None:
+            return self._pose_retargeter
+        try:
+            joint_names = self._follower.joint_names
+        except Exception:
+            return None
+        try:
+            self._pose_retargeter = PoseRetargeter(joint_names, joint_limits_deg={})
+        except ValueError:
+            return None
+        return self._pose_retargeter
 
     def bind_recording(self, recording: RecordingState) -> None:
         """Attach session-owned recording flags so state events include them."""
@@ -98,6 +137,7 @@ class StudioActionSource:
             dataset_loaded=None if recording is None else recording.dataset_loaded,
             is_recording=None if recording is None else recording.is_recording,
             episodes_recorded=None if recording is None else recording.episodes_recorded,
+            pose_available=self.pose_available,
         )
 
     def connect(self, *, bus: object, session_id: str) -> None:
@@ -123,11 +163,14 @@ class StudioActionSource:
 
         leader_action = self._read_leader(robot_state) if self._leader_reads_enabled else self._last_leader_action
         policy_action = self._policy_action(robot_state, camera_frames, step)
+        pose_action = self._pose_action(robot_state)
 
         if self._follower_source == "teleop" and leader_action is not None:
             return leader_action
         if self._follower_source == "policy" and policy_action is not None:
             return policy_action
+        if self._follower_source == "pose" and pose_action is not None:
+            return pose_action
         return self._hold_target.copy()
 
     def disconnect(self) -> None:
@@ -142,6 +185,8 @@ class StudioActionSource:
         self._failure_logged = False
         self._last_robot_state = None
         self._last_camera_frames = {}
+        self._last_pose_landmarks = None
+        self._last_pose_action = None
 
     def shutdown_policy(self) -> None:
         """Stop in-flight loads and the policy execution worker. Session teardown only."""
@@ -219,6 +264,30 @@ class StudioActionSource:
         if changed:
             self._emit_state()
 
+    def _pose_action(self, robot_state: RobotObservation) -> np.ndarray | None:
+        retargeter = self._resolve_pose_retargeter()
+        if retargeter is None or self._last_pose_landmarks is None:
+            return None
+        if (
+            self._last_pose_received_at is not None
+            and time.monotonic() - self._last_pose_received_at > self._POSE_STALE_AFTER_S
+        ):
+            if self._follower_source == "pose":
+                self._disable_stale_pose(robot_state)
+            return None
+        previous = (
+            self._last_pose_action
+            if self._last_pose_action is not None
+            else np.array(robot_state.joint_positions, dtype=np.float32, copy=True)
+        )
+        try:
+            action = retargeter.retarget(self._last_pose_landmarks, previous)
+        except Exception:
+            logger.exception("Pose retargeting failed; holding the last safe pose action")
+            return self._last_pose_action
+        self._last_pose_action = action
+        return action
+
     def _drain_commands(self, robot_state: RobotObservation) -> None:
         for command in self._mailbox.drain():
             if isinstance(command, LoadModelCommand):
@@ -231,6 +300,11 @@ class StudioActionSource:
                 self._handle_set_follower_source(command, robot_state)
             elif isinstance(command, StartRecordingCommand):
                 self._handle_start_recording(command)
+            elif isinstance(command, SetPoseLandmarksCommand):
+                # Latest-value command: a burst of frames just replaces this
+                # each drain, same tolerance as the leader's polled read.
+                self._last_pose_landmarks = [(lm.x, lm.y, lm.z, lm.visibility) for lm in command.landmarks]
+                self._last_pose_received_at = time.monotonic()
 
     def _handle_load_model(self, command: LoadModelCommand) -> None:
         if not command.force and self._loaded_identity == model_identity(command):
@@ -307,6 +381,14 @@ class StudioActionSource:
                 )
             )
             return
+        if requested == "pose" and self._resolve_pose_retargeter() is None:
+            self._event_sink.emit(
+                ErrorEvent(
+                    message="This robot does not support pose-driven teleoperation.",
+                    error_code="pose_not_supported",
+                )
+            )
+            return
         if requested == "policy":
             if not self._arm_policy(task=self._task):
                 return
@@ -318,6 +400,10 @@ class StudioActionSource:
         self._follower_source = requested
         if requested == "hold":
             self._hold_target = np.array(robot_state.joint_positions, dtype=np.float32, copy=True)
+        if requested == "pose":
+            # Seed from the measured pose so entering pose mode does not snap
+            # the arm to whatever the last landmarks happened to produce.
+            self._last_pose_action = np.array(robot_state.joint_positions, dtype=np.float32, copy=True)
         self._emit_state()
 
     def _arm_policy(self, *, task: str | None) -> bool:
@@ -443,6 +529,18 @@ class StudioActionSource:
             ErrorEvent(
                 message="The leader robot stopped responding. The follower switched to hold.",
                 error_code="leader_connection_lost",
+            )
+        )
+
+    def _disable_stale_pose(self, robot_state: RobotObservation) -> None:
+        self._hold_target = np.array(robot_state.joint_positions, dtype=np.float32, copy=True)
+        self._follower_source = "hold"
+        logger.error("No pose landmarks received for {}s; switching to hold", self._POSE_STALE_AFTER_S)
+        self._emit_state()
+        self._event_sink.emit(
+            ErrorEvent(
+                message="Lost the pose camera stream. The follower switched to hold.",
+                error_code="pose_connection_lost",
             )
         )
 

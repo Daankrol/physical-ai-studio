@@ -27,6 +27,7 @@
         "@adobe/react-spectrum": "^3.41.0",
         "@geti-ui/blocks": "^1.1.2",
         "@geti-ui/ui": "^1.1.2",
+        "@mediapipe/tasks-vision": "^0.10.17",
         "@react-three/drei": "^10.7.7",
         "@react-three/fiber": "^9.6.1",
         "@scalar/api-reference-react": "^0.9.59",

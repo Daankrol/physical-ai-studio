@@ -2,7 +2,14 @@ import numpy as np
 import pytest
 
 from runtime.action_source import StudioActionSource
-from runtime.contract import InMemoryCommandMailbox, QueueEventSink, SetFollowerSourceCommand
+from runtime.contract import (
+    InMemoryCommandMailbox,
+    PoseLandmark,
+    QueueEventSink,
+    SetFollowerSourceCommand,
+    SetPoseLandmarksCommand,
+)
+from runtime.pose_retarget import PoseRetargeter
 
 from .fakes import FakeObservation, FakeRobot
 
@@ -12,7 +19,7 @@ def _observation(values: list[float], timestamp: float, *, efforts: list[float] 
     return FakeObservation(np.array(values, dtype=np.float32), timestamp, sensor_data)
 
 
-def _source(*, follower: FakeRobot, leader: FakeRobot | None, fps: float = 30):
+def _source(*, follower: FakeRobot, leader: FakeRobot | None, fps: float = 30, pose_retargeter=None):
     mailbox = InMemoryCommandMailbox()
     events = QueueEventSink()
     source = StudioActionSource(
@@ -21,6 +28,7 @@ def _source(*, follower: FakeRobot, leader: FakeRobot | None, fps: float = 30):
         mailbox=mailbox,
         event_sink=events,
         fps=fps,
+        pose_retargeter=pose_retargeter,
     )
     source.connect(bus=object(), session_id="test")
     return source, mailbox, events
@@ -90,3 +98,82 @@ def test_leader_failure_is_bounded_and_emits_one_error() -> None:
     mailbox.apply(SetFollowerSourceCommand(follower_source="teleop"))
     source.update(state, {}, 7)
     assert source.follower_source == "hold"
+
+
+def _so101_bimanual_joint_names() -> list[str]:
+    suffixes = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+    return [f"{side}_{suffix}" for side in ("left", "right") for suffix in suffixes]
+
+
+def _bimanual_retargeter() -> PoseRetargeter:
+    return PoseRetargeter(_so101_bimanual_joint_names(), joint_limits_deg={})
+
+
+def _pose_landmarks() -> list[PoseLandmark]:
+    landmarks = [PoseLandmark(x=0.0, y=0.0, z=0.0, visibility=1.0) for _ in range(33)]
+    landmarks[23] = PoseLandmark(x=-0.1, y=0.9, z=0.0, visibility=1.0)
+    landmarks[24] = PoseLandmark(x=0.1, y=0.9, z=0.0, visibility=1.0)
+    landmarks[11] = PoseLandmark(x=-0.2, y=0.5, z=0.0, visibility=1.0)
+    landmarks[12] = PoseLandmark(x=0.2, y=0.5, z=0.0, visibility=1.0)
+    landmarks[13] = PoseLandmark(x=-0.2, y=0.8, z=0.0, visibility=1.0)
+    landmarks[14] = PoseLandmark(x=0.2, y=0.8, z=0.0, visibility=1.0)
+    landmarks[15] = PoseLandmark(x=-0.2, y=1.1, z=0.3, visibility=1.0)
+    landmarks[16] = PoseLandmark(x=0.2, y=1.1, z=0.3, visibility=1.0)
+    return landmarks
+
+
+def test_set_follower_source_pose_rejected_without_retargeter() -> None:
+    follower = FakeRobot([_observation([0.0, 0.0], 1)], joint_names=["joint_1", "joint_2"])
+    source, mailbox, events = _source(follower=follower, leader=None)
+    mailbox.apply(SetFollowerSourceCommand(follower_source="pose"))
+
+    source.update(follower.get_observation(), {}, 0)
+
+    assert source.follower_source == "hold"
+    emitted = [events.get_nowait() for _ in range(1)]
+    assert emitted[0].event == "error"
+    assert emitted[0].error_code == "pose_not_supported"
+
+
+def test_pose_mode_drives_the_follower_from_landmarks() -> None:
+    follower = FakeRobot(
+        [_observation([0.0] * 12, 1), _observation([0.0] * 12, 2)],
+        joint_names=_so101_bimanual_joint_names(),
+    )
+    source, mailbox, _ = _source(follower=follower, leader=None, pose_retargeter=_bimanual_retargeter())
+    mailbox.apply(SetFollowerSourceCommand(follower_source="pose"))
+    mailbox.apply(SetPoseLandmarksCommand(landmarks=_pose_landmarks()))
+
+    action = source.update(follower.get_observation(), {}, 0)
+
+    assert source.follower_source == "pose"
+    assert not np.allclose(action, 0.0)
+
+
+def test_pose_mode_falls_back_to_hold_when_landmarks_go_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    follower = FakeRobot(
+        [_observation([0.0] * 12, 1), _observation([0.0] * 12, 2)],
+        joint_names=_so101_bimanual_joint_names(),
+    )
+    source, mailbox, events = _source(follower=follower, leader=None, pose_retargeter=_bimanual_retargeter())
+    mailbox.apply(SetFollowerSourceCommand(follower_source="pose"))
+    mailbox.apply(SetPoseLandmarksCommand(landmarks=_pose_landmarks()))
+    source.update(follower.get_observation(), {}, 0)
+    assert source.follower_source == "pose"
+
+    import runtime.action_source as action_source_module
+
+    monkeypatch.setattr(action_source_module.time, "monotonic", lambda: 1e12)
+
+    source.update(follower.get_observation(), {}, 1)
+
+    assert source.follower_source == "hold"
+    codes = []
+    while True:
+        try:
+            event = events.get_nowait()
+        except Exception:
+            break
+        if event.event == "error":
+            codes.append(event.error_code)
+    assert "pose_connection_lost" in codes
