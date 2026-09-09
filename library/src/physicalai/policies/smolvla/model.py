@@ -17,10 +17,17 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import nn
 
-from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
-from physicalai.data.observation import ACTION, IMAGES, STATE
+from physicalai.data.constants import (
+    IMAGE_MASKS,
+    RTC_EXECUTION_HORIZON,
+    RTC_INFERENCE_DELAY,
+    RTC_MAX_GUIDANCE_WEIGHT,
+    TOKENIZED_PROMPT,
+    TOKENIZED_PROMPT_MASK,
+)
+from physicalai.data.observation import ACTION, IMAGES, PREV_CHUNK_LEFT_OVER, STATE
 from physicalai.policies.base import Model
-from physicalai.policies.mixins import SnapFlowModelMixin
+from physicalai.policies.mixins import RTCModelMixin, SnapFlowModelMixin
 from physicalai.policies.utils import in_episode_bound, reduce_losses
 
 if TYPE_CHECKING:
@@ -55,7 +62,7 @@ def _lazy_import_transformers() -> tuple:
 logger = logging.getLogger(__name__)
 
 
-class SmolVLAModel(Model):
+class SmolVLAModel(RTCModelMixin, Model):
     """SmolVLA flow matching vision-language-action model."""
 
     def __init__(  # noqa: PLR0913
@@ -273,11 +280,17 @@ class SmolVLAModel(Model):
 
         Args:
             batch: A dictionary containing input tensors including images, state information,
-                and tokenized prompts with their masks.
+                and tokenized prompts with their masks. When ``self.enable_rtc`` is True,
+                also expects RTC keys: ``prev_chunk_left_over``, ``inference_delay``,
+                ``max_guidance_weight``, and ``execution_horizon``.
 
         Returns:
             torch.Tensor: A tensor of predicted actions with shape matching the original
                 action dimensions from the dataset statistics.
+
+        Raises:
+            ValueError: If RTC is enabled and the batch is missing
+                ``prev_chunk_left_over``.
         """
         processed_batch = self._preprocess_batch(batch)
         images, img_masks = processed_batch[IMAGES], processed_batch[IMAGE_MASKS]
@@ -285,12 +298,32 @@ class SmolVLAModel(Model):
         lang_tokens = processed_batch[TOKENIZED_PROMPT]
         lang_masks = processed_batch[TOKENIZED_PROMPT_MASK]
 
+        rtc_kwargs: dict[str, Any] = {}
+        if self.enable_rtc:
+            max_guidance = batch.get(RTC_MAX_GUIDANCE_WEIGHT, 0.0)
+            execution_horizon = batch.get(RTC_EXECUTION_HORIZON, 0)
+            inference_delay = batch.get(RTC_INFERENCE_DELAY, 0.0)
+
+            if PREV_CHUNK_LEFT_OVER not in batch:
+                msg = f"Expected {PREV_CHUNK_LEFT_OVER} in batch when RTC is enabled."
+                raise ValueError(msg)
+
+            rtc_kwargs = {
+                "rtc_max_guidance": max_guidance,
+                "rtc_prefix_weights": self._compute_prefix_weights(
+                    inference_delay=torch.as_tensor(inference_delay, device=state.device),
+                    execution_horizon=torch.as_tensor(execution_horizon, device=state.device),
+                ),
+                "rtc_prev_action_chunk": self._pad_prev_chunk(batch.get(PREV_CHUNK_LEFT_OVER)),
+            }
+
         actions = self._model.sample_actions(
             images,
             img_masks,
             lang_tokens,
             lang_masks,
             state,
+            **rtc_kwargs,
         )
 
         # Unpad actions
@@ -1195,6 +1228,9 @@ class VLAFlowMatching(SnapFlowModelMixin, nn.Module):
         lang_masks: torch.Tensor,
         state: torch.Tensor,
         noise: torch.Tensor | None = None,
+        rtc_max_guidance: float = 0.0,
+        rtc_prefix_weights: torch.Tensor | None = None,
+        rtc_prev_action_chunk: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Perform full inference forward pass to compute actions using a diffusion-based sampling process.
 
@@ -1211,6 +1247,10 @@ class VLAFlowMatching(SnapFlowModelMixin, nn.Module):
             state: Current state tensor of shape (batch_size, state_dim).
             noise: Optional pre-sampled noise tensor. If None, noise will be sampled
                 with shape (batch_size, chunk_size, max_action_dim).
+            rtc_max_guidance: Real-Time Chunking maximum guidance weight.
+            rtc_prefix_weights: Precomputed ``(1, chunk_size, 1)`` prefix attention weights.
+            rtc_prev_action_chunk: Unconsumed tail of the previous chunk. RTC guidance is
+                applied only when this is provided.
 
         Returns:
             Tensor: Predicted actions of shape (batch_size, chunk_size, max_action_dim),
@@ -1257,6 +1297,17 @@ class VLAFlowMatching(SnapFlowModelMixin, nn.Module):
                 timestep=time_tensor,
                 target_time=target_time,
             )
+
+            if rtc_prev_action_chunk is not None and rtc_prefix_weights is not None:
+                v_t = RTCModelMixin._rtc_correct(  # noqa: SLF001
+                    x_t,
+                    v_t,
+                    prev_chunk_left_over=rtc_prev_action_chunk,
+                    prefix_weights=rtc_prefix_weights,
+                    time=time,
+                    max_guidance_weight=torch.as_tensor(rtc_max_guidance, device=device),
+                )
+
             x_t += dt * v_t
 
         return x_t
