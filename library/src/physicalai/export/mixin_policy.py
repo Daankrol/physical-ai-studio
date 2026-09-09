@@ -180,6 +180,42 @@ class ExportablePolicyMixin:
         finally:
             setattr(self.model, "enable_rtc", prev)  # noqa: B010
 
+    @contextmanager
+    def _export_ready_model(self) -> Generator[None, None, None]:
+        """Put ``self.model`` in eval mode with ``torch.compile`` wrappers removed.
+
+        Policies compile hot methods by rebinding them on the instance, e.g.
+        ``self.forward = torch.compile(self.forward)``. Tracing through those
+        wrappers is what ``torch.export`` chokes on, and they also survive
+        ``copy.deepcopy`` unchanged (``copy`` treats plain functions as atomic),
+        so a copied module keeps dispatching into the *original* instance --
+        ignoring any ``eval()`` applied to the copy. Dropping the instance
+        attribute makes the uncompiled class-level method resolve again.
+
+        Both the wrappers and the original training mode are restored on exit,
+        including when the block raises.
+        """
+        model = self.model
+        if not isinstance(model, torch.nn.Module):
+            yield
+            return
+
+        compiled: list[tuple[torch.nn.Module, str, Any]] = []
+        for module in model.modules():
+            for name, value in list(vars(module).items()):
+                if hasattr(value, "_torchdynamo_orig_callable"):
+                    compiled.append((module, name, value))
+                    del vars(module)[name]
+
+        was_training = model.training
+        model.eval()
+        try:
+            yield
+        finally:
+            model.train(was_training)
+            for module, name, value in compiled:
+                vars(module)[name] = value
+
     def create_manifest(
         self,
         export_dir: Path,
@@ -397,13 +433,13 @@ class ExportablePolicyMixin:
 
             arg_name = self._get_forward_arg_name()
 
-            self.model.eval()
-            self._onnx_core_export_step(
-                model_path=model_path,
-                input_sample=input_sample,
-                arg_name=arg_name,
-                **extra_export_kwargs,
-            )
+            with self._export_ready_model():
+                self._onnx_core_export_step(
+                    model_path=model_path,
+                    input_sample=input_sample,
+                    arg_name=arg_name,
+                    **extra_export_kwargs,
+                )
 
             if extra_model_args.export_tokenizer:
                 msg = "Tokenizer export is not supported for ONNX backend at this time."
@@ -485,29 +521,28 @@ class ExportablePolicyMixin:
 
             extra_export_kwargs.update(export_kwargs)
 
-            self.model.eval()
-
-            if extra_model_args.via_onnx:
-                with tempfile.NamedTemporaryFile(suffix=".onnx") as tmp:
-                    self._onnx_core_export_step(
-                        model_path=Path(tmp.name),
-                        input_sample=input_sample,
-                        arg_name=arg_name,
+            with self._export_ready_model():
+                if extra_model_args.via_onnx:
+                    with tempfile.NamedTemporaryFile(suffix=".onnx") as tmp:
+                        self._onnx_core_export_step(
+                            model_path=Path(tmp.name),
+                            input_sample=input_sample,
+                            arg_name=arg_name,
+                            **extra_export_kwargs,
+                        )
+                        with _quiet_loggers(_ONNX_PROBE_NOISE_LOGGERS, level=logging.ERROR):
+                            ov_model = openvino.convert_model(
+                                tmp.name,
+                                example_input={arg_name: input_sample},
+                                input=input_shapes,
+                            )
+                else:
+                    ov_model = openvino.convert_model(
+                        self.model,
+                        example_input={arg_name: input_sample},
+                        input=input_shapes,
                         **extra_export_kwargs,
                     )
-                    with _quiet_loggers(_ONNX_PROBE_NOISE_LOGGERS, level=logging.ERROR):
-                        ov_model = openvino.convert_model(
-                            tmp.name,
-                            example_input={arg_name: input_sample},
-                            input=input_shapes,
-                        )
-            else:
-                ov_model = openvino.convert_model(
-                    self.model,
-                    example_input={arg_name: input_sample},
-                    input=input_shapes,
-                    **extra_export_kwargs,
-                )
             _postprocess_openvino_model(ov_model, extra_model_args.outputs)
 
         openvino.save_model(ov_model, str(model_path), compress_to_fp16=extra_model_args.compress_to_fp16)
@@ -612,24 +647,22 @@ class ExportablePolicyMixin:
             raise ImportError(msg) from e
 
         # ExecuTorch doesn't support CUDA/XPU tensors (segfaults instead of
-        # raising), so trace on CPU. Original device/train mode are always
-        # restored.
+        # raising), so trace on CPU. The original device is always restored;
+        # train mode is restored by _export_ready_model().
         original_device = self.device
-        was_training = self.model.training
         self.model.to("cpu")
-        self.model.eval()
         try:
-            self._export_executorch_pte(
-                model_path=model_path,
-                input_sample=input_sample,
-                extra_export_kwargs=extra_export_kwargs,
-                delegate=delegate,
-                delegate_config=delegate_config,
-                to_edge_transform_and_lower=to_edge_transform_and_lower,
-            )
+            with self._export_ready_model():
+                self._export_executorch_pte(
+                    model_path=model_path,
+                    input_sample=input_sample,
+                    extra_export_kwargs=extra_export_kwargs,
+                    delegate=delegate,
+                    delegate_config=delegate_config,
+                    to_edge_transform_and_lower=to_edge_transform_and_lower,
+                )
         finally:
             self.model.to(original_device)
-            self.model.train(was_training)
 
         self.create_manifest(
             export_dir,

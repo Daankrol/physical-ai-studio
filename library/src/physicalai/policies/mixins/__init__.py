@@ -12,6 +12,7 @@ from physicalai.policies.mixins.peft import (
     is_lora_injected,
     log_trainable_parameters,
     merge_lora_,
+    merged_lora_scope,
 )
 from physicalai.policies.mixins.snapflow import SnapFlowConfigMixin, SnapFlowModelMixin, SnapFlowPolicyMixin
 
@@ -27,4 +28,5 @@ __all__ = [
     "is_lora_injected",
     "log_trainable_parameters",
     "merge_lora_",
+    "merged_lora_scope",
 ]

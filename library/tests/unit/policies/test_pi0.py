@@ -595,14 +595,12 @@ class TestPi0LoRAIntegration:
         assert any("lora_magnitude_vector" in n for n in param_names)
 
     def test_merge_lora_before_export_preserves_predictions(self) -> None:
-        """Test that Pi0.export's merge-before-export leaves self.model untouched.
+        """Test that Pi0.export's merge-before-export preserves predictions.
 
-        And produces predictions matching the pre-merge model on a disposable copy.
+        And restores the live model's adapters and weights once the scope exits.
         """
-        import copy
-
         from physicalai.data import Observation
-        from physicalai.policies.mixins.peft import is_lora_injected, merge_lora_
+        from physicalai.policies.mixins.peft import is_lora_injected, merged_lora_scope
 
         policy = Pi0(
             action_expert_variant="gemma_300m",
@@ -627,21 +625,19 @@ class TestPi0LoRAIntegration:
         torch.manual_seed(0)
         with torch.no_grad():
             action_before = policy(obs)
+        weights_before = {name: param.detach().clone() for name, param in policy.model.named_parameters()}
 
-        original_model = policy.model
-        merged_model = policy._merged_lora_model_for_export()  # noqa: SLF001
-        assert merged_model is not None
-        assert not is_lora_injected(merged_model)
-
-        policy.model = merged_model
-        torch.manual_seed(0)
-        with torch.no_grad():
-            action_after = policy(obs)
-        policy.model = original_model
+        with merged_lora_scope(policy.model):
+            assert not is_lora_injected(policy.model)
+            torch.manual_seed(0)
+            with torch.no_grad():
+                action_after = policy(obs)
 
         torch.testing.assert_close(action_before, action_after, atol=1e-3, rtol=1e-3)
-        # The live training model must be untouched (still has LoRA injected).
+        # The live training model must be restored exactly (adapters back, weights intact).
         assert is_lora_injected(policy.model)
+        for name, param in policy.model.named_parameters():
+            assert torch.equal(param, weights_before[name]), f"{name} was not restored exactly"
 
     def test_checkpoint_roundtrip_preserves_lora_weights(self) -> None:
         """Test LoRA adapter weights survive a Lightning checkpoint save/load cycle."""
