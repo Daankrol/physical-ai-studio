@@ -506,7 +506,11 @@ class TestTraining:
 
             await worker._run_training_job(job, payload)
 
-        assert captured["model"].properties == {"lora_enabled": lora_enabled, "lora_use_dora": lora_use_dora}
+        assert captured["model"].properties == {
+            "lora_enabled": lora_enabled,
+            "lora_use_dora": lora_use_dora,
+            "snapflow_enabled": False,
+        }
         assert captured["model"].lora_enabled is lora_enabled
         assert captured["model"].lora_use_dora is lora_use_dora
 

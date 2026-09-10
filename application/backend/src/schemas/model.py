@@ -47,7 +47,6 @@ class Model(BaseIDModel):
         return sorted(backends)
 
     @computed_field  # type: ignore[prop-decorator]
-    @property
     @computed_field  # type: ignore[prop-decorator]
     @property
     def lora_enabled(self) -> bool:

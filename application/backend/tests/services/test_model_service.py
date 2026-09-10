@@ -222,6 +222,8 @@ def test_get_training_summary_carries_lora_fields_when_enabled() -> None:
         0.1,
         True,
     )
+
+
 class TestSnapFlowFlag:
     """`snapflow_enabled` tells the models list which checkpoints are distilled.
 

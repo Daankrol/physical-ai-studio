@@ -67,7 +67,6 @@ def _model(path: Path, *, policy: str = "act") -> Model:
 
 
 def _context(
-def _context(
     tmp_path: Path,
     payload: TrainJobPayload,
     *,

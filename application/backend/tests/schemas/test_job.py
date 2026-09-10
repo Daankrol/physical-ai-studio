@@ -131,6 +131,8 @@ class TestLoraFields:
     def test_lora_out_of_range_values_are_rejected(self, extra: dict) -> None:
         with pytest.raises(ValidationError):
             LocalTrainJobPayload(**{**_base_kwargs(), "policy": "pi05"}, lora_enabled=True, **extra)
+
+
 class TestSnapFlowDistillation:
     """The payload expresses the distillation budget; the runner needs a boundary.
 

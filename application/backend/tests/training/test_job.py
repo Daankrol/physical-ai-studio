@@ -94,6 +94,7 @@ class TestTrainingJobSpec:
     def test_lora_is_rejected_for_a_lerobot_sourced_policy(self) -> None:
         with pytest.raises(ValidationError):
             TrainingJobSpec(policy="pi05", policy_source="lerobot", lora_enabled=True)
+
     def test_flow_matching_is_the_default(self) -> None:
         assert TrainingJobSpec(policy="pi05").snapflow_start_epoch is None
 
