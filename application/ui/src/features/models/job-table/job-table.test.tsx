@@ -59,6 +59,8 @@ const localJob: SchemaTrainJob = {
         lora_alpha: null,
         lora_dropout: 0.05,
         lora_use_dora: false,
+        snapflow_enabled: false,
+        snapflow_distill_epochs: 3,
         training_target: 'local',
     },
 };
@@ -195,6 +197,21 @@ describe('TrainingRow', () => {
         renderTrainingRow({ payload: { ...localJob.payload, lora_enabled: true, lora_use_dora: true } });
 
         expect(screen.getByText('DoRA')).toBeInTheDocument();
+    });
+
+    it.each(['running', 'completed', 'failed'] as const)('badges a %s SnapFlow job', (status) => {
+        renderTrainingRow({
+            status,
+            payload: { ...localJob.payload, policy: 'pi05', snapflow_enabled: true },
+        });
+
+        expect(screen.getByText('SnapFlow')).toBeInTheDocument();
+    });
+
+    it('leaves an ordinary flow-matching job unbadged', () => {
+        renderTrainingRow();
+
+        expect(screen.queryByText('SnapFlow')).not.toBeInTheDocument();
     });
 
     it('reveals the panel tabs when the row is clicked', async () => {

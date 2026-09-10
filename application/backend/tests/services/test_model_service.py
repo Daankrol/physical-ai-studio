@@ -222,3 +222,25 @@ def test_get_training_summary_carries_lora_fields_when_enabled() -> None:
         0.1,
         True,
     )
+class TestSnapFlowFlag:
+    """`snapflow_enabled` tells the models list which checkpoints are distilled.
+
+    It reads out of the untyped `properties` bag so surfacing it needed no
+    migration, but it is exposed as a typed field so the UI does not have to
+    reach into that bag to render a badge.
+    """
+
+    def test_a_model_without_the_property_is_not_distilled(self) -> None:
+        assert _make_model().snapflow_enabled is False
+
+    def test_the_property_drives_the_flag(self) -> None:
+        model = _make_model()
+        model.properties = {"snapflow_enabled": True}
+
+        assert model.snapflow_enabled is True
+
+    def test_the_flag_is_serialized_for_clients(self) -> None:
+        model = _make_model()
+        model.properties = {"snapflow_enabled": True}
+
+        assert model.model_dump()["snapflow_enabled"] is True

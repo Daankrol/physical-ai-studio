@@ -47,6 +47,7 @@ const model: SchemaModel = {
     available_backends: [],
     lora_enabled: false,
     lora_use_dora: false,
+    snapflow_enabled: false,
 };
 
 const trainingJob: SchemaTrainJob = {
@@ -75,6 +76,8 @@ const trainingJob: SchemaTrainJob = {
         lora_alpha: null,
         lora_dropout: 0.05,
         lora_use_dora: false,
+        snapflow_enabled: false,
+        snapflow_distill_epochs: 3,
         training_target: 'local',
     },
 };
@@ -239,6 +242,18 @@ describe('ModelRow', () => {
         renderModelRow();
 
         expect(screen.getByTestId('trainer-cell')).toHaveTextContent('-');
+    });
+
+    it('badges a model whose checkpoint was distilled with SnapFlow', () => {
+        renderModelRow({ modelOverride: { snapflow_enabled: true } });
+
+        expect(screen.getByText('SnapFlow')).toBeInTheDocument();
+    });
+
+    it('leaves an ordinary flow-matching model unbadged', () => {
+        renderModelRow({ modelOverride: { snapflow_enabled: false } });
+
+        expect(screen.queryByText('SnapFlow')).not.toBeInTheDocument();
     });
 
     it('does not render the detail panel initially', () => {

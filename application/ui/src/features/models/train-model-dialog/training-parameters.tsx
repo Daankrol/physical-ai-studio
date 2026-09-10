@@ -4,6 +4,12 @@ export const RECOMMENDED_PRECISION: Record<string, string> = {
     cuda: 'bf16-mixed',
 };
 
+/**
+ * Distillation needs at least one epoch to train the policy it distils, plus
+ * one to distil it, so a single-epoch run cannot use SnapFlow at all.
+ */
+export const MIN_EPOCHS_FOR_SNAPFLOW = 2;
+
 export const PRECISION_LABELS: Record<string, string> = {
     'bf16-mixed': 'BF16 Mixed',
     'bf16-true': 'BF16 True',
@@ -37,6 +43,12 @@ interface TrainingParametersProps {
     onLoraDropoutChange: (value: number) => void;
     loraUseDora: boolean;
     onLoraUseDoraChange: (value: boolean) => void;
+    /** False for policies without a flow-matching sampler; hides the SnapFlow controls entirely. */
+    isSnapflowSupported: boolean;
+    snapflowEnabled: boolean;
+    onSnapflowEnabledChange: (value: boolean) => void;
+    snapflowDistillEpochs: number;
+    onSnapflowDistillEpochsChange: (value: number) => void;
 }
 
 export const TrainingParameters = ({
@@ -65,6 +77,11 @@ export const TrainingParameters = ({
     onLoraDropoutChange,
     loraUseDora,
     onLoraUseDoraChange,
+    isSnapflowSupported,
+    snapflowEnabled,
+    onSnapflowEnabledChange,
+    snapflowDistillEpochs,
+    onSnapflowDistillEpochsChange,
 }: TrainingParametersProps) => (
     <Flex direction='column' gap='size-150' width='100%'>
         <Flex direction='row' gap='size-150' width='100%'>
@@ -287,6 +304,55 @@ export const TrainingParameters = ({
                         </Flex>
                     </Flex>
                 )}
+            </Flex>
+        )}
+        {isSnapflowSupported && (
+            <Flex direction='row' gap='size-150' width='100%' alignItems='end'>
+                <Flex direction='column' gap='size-150' width='100%' justifyContent='center'>
+                    <Flex direction='row' gap='size-100' alignItems='center'>
+                        {/* A single-epoch run has no epoch left over to train the policy that gets distilled. */}
+                        <Checkbox
+                            isEmphasized
+                            isSelected={snapflowEnabled}
+                            onChange={onSnapflowEnabledChange}
+                            isDisabled={maxEpochs < MIN_EPOCHS_FOR_SNAPFLOW}
+                        >
+                            SnapFlow distillation
+                        </Checkbox>
+                        <ContextualHelp variant='info'>
+                            <Heading>SnapFlow distillation</Heading>
+                            <Content>
+                                <Text>
+                                    Trains normally for the full max epochs, then spends additional epochs distilling
+                                    the policy so it generates an action chunk in a single denoising step instead of
+                                    ten. The exported model is the distilled one, which runs several times faster on the
+                                    robot at comparable task success.
+                                </Text>
+                            </Content>
+                        </ContextualHelp>
+                    </Flex>
+                </Flex>
+                <NumberField
+                    label='Distillation epochs'
+                    value={snapflowDistillEpochs}
+                    onChange={onSnapflowDistillEpochsChange}
+                    minValue={1}
+                    maxValue={10_000}
+                    step={1}
+                    width='100%'
+                    isDisabled={!snapflowEnabled || maxEpochs < MIN_EPOCHS_FOR_SNAPFLOW}
+                    contextualHelp={
+                        <ContextualHelp variant='info'>
+                            <Heading>Distillation epochs</Heading>
+                            <Content>
+                                <Text>
+                                    How many additional epochs to perform distilling after normal finetuning. We
+                                    recommend 2-5 epochs.
+                                </Text>
+                            </Content>
+                        </ContextualHelp>
+                    }
+                />
             </Flex>
         )}
     </Flex>

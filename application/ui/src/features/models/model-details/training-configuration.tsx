@@ -47,6 +47,12 @@ export const TrainingParameters = ({ summary }: { summary: SchemaModelDetailResp
                 {summary.lora_enabled && summary.lora_use_dora !== null && summary.lora_use_dora !== undefined && (
                     <DetailRow name='DoRA' value={summary.lora_use_dora ? 'Yes' : 'No'} />
                 )}
+                {summary.snapflow_enabled !== null && summary.snapflow_enabled !== undefined && (
+                    <DetailRow name='SnapFlow distillation' value={summary.snapflow_enabled ? 'Yes' : 'No'} />
+                )}
+                {summary.snapflow_distill_epochs !== null && summary.snapflow_distill_epochs !== undefined && (
+                    <DetailRow name='Distillation epochs' value={summary.snapflow_distill_epochs} />
+                )}
             </Flex>
         </View>
     );

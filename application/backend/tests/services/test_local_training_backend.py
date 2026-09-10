@@ -67,7 +67,13 @@ def _model(path: Path, *, policy: str = "act") -> Model:
 
 
 def _context(
-    tmp_path: Path, payload: TrainJobPayload, *, base_model: Model | None = None, model_policy: str = "act"
+def _context(
+    tmp_path: Path,
+    payload: TrainJobPayload,
+    *,
+    base_model: Model | None = None,
+    model_policy: str = "act",
+    model: Model | None = None,
 ) -> TrainingContext:
     model_dir = tmp_path / "models" / str(uuid4())
     snap_dir = tmp_path / "snap"
@@ -76,7 +82,7 @@ def _context(
     cache_dir.mkdir(parents=True, exist_ok=True)
     return TrainingContext(
         job=MagicMock(),
-        model=_model(model_dir, policy=model_policy),
+        model=model if model is not None else _model(model_dir, policy=model_policy),
         snapshot=Snapshot(id=uuid4(), dataset_id=uuid4(), path=str(snap_dir)),
         payload=payload,
         base_model=base_model,
@@ -143,6 +149,19 @@ class TestBuildSpec:
         context = _context(tmp_path, _payload(base_model_id=base_model.id), base_model=base_model)
 
         assert build_spec(context).policy == "pi0"
+
+    def test_a_flow_matching_run_carries_no_distillation_boundary(self, tmp_path):
+        assert build_spec(_context(tmp_path, _payload())).snapflow_start_epoch is None
+
+    def test_the_distillation_budget_becomes_an_absolute_phase_boundary(self, tmp_path):
+        """Distillation is additive: the boundary is max_epochs, and the spec's
+        max_epochs grows to include the distillation phase."""
+        payload = _payload(policy="pi05", max_epochs=8, snapflow_enabled=True, snapflow_distill_epochs=3)
+        context = _context(tmp_path, payload, model=_model(tmp_path / "m", policy="pi05"))
+
+        spec = build_spec(context)
+        assert spec.snapflow_start_epoch == 8
+        assert spec.max_epochs == 11
 
 
 class TestLocalTrainingBackend:

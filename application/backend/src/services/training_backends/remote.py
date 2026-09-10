@@ -344,8 +344,11 @@ class RemoteTrainingBackend:
         )
         spec = build_spec(context).model_copy(update=device_update)
 
+        excluded = {"run_options"}
+        if spec.snapflow_start_epoch is None:
+            excluded.add("snapflow_start_epoch")
         body: dict[str, Any] = {
-            "spec": spec.model_dump(mode="json", exclude={"run_options"}),
+            "spec": spec.model_dump(mode="json", exclude=excluded),
             "dataset_transfer": "http",
         }
         async with await self._client() as client:
