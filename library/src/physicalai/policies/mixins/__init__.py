@@ -14,12 +14,15 @@ from physicalai.policies.mixins.peft import (
     merge_lora_,
     merged_lora_scope,
 )
+from physicalai.policies.mixins.rtc import RTCModelMixin, RTCPolicyMixin
 from physicalai.policies.mixins.snapflow import SnapFlowConfigMixin, SnapFlowModelMixin, SnapFlowPolicyMixin
 
 __all__ = [
     "PeftConfigMixin",
     "PeftModelMixin",
     "PeftPolicyMixin",
+    "RTCModelMixin",
+    "RTCPolicyMixin",
     "SnapFlowConfigMixin",
     "SnapFlowModelMixin",
     "SnapFlowPolicyMixin",
