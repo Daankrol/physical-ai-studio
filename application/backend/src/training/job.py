@@ -137,7 +137,10 @@ class TrainingJobSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_lora(self) -> TrainingJobSpec:
-        """Reject a LoRA request the run cannot honour."""
+        """Reject a LoRA request the run cannot honour, and DoRA requested without LoRA."""
+        if self.lora_use_dora and not self.lora_enabled:
+            msg = "lora_use_dora requires lora_enabled; DoRA is a variant of LoRA, not a standalone mode."
+            raise ValueError(msg)
         if not self.lora_enabled:
             return self
         if self.policy_source != "physicalai":
