@@ -69,10 +69,9 @@ class PeftConfigMixin:
             policy has one, its scheduler decay LR) when ``lora_enabled`` is True. Training
             only a small fraction of parameters tolerates, and benefits from, a much higher
             learning rate than full fine-tuning; 10x is a reasonable default. Applied by each
-            policy's own ``configure_optimizers`` via ``lora_lr_multiplier``, on top of
-            whatever ``optimizer_lr``/``learning_rate`` you set, so set that field to the
-            full-fine-tune value you would otherwise use, not the already-scaled one. Set to
-            1.0 to disable scaling. Ignored when ``lora_enabled`` is False.
+            policy's own ``configure_optimizers`` only when ``lora_enabled`` is True, on top
+            of whatever ``optimizer_lr``/``learning_rate`` you set, so set that field to the
+            full-fine-tune value you would otherwise use, not the already-scaled one.
     """
 
     lora_enabled: bool = False
@@ -156,11 +155,3 @@ class PeftConfigMixin:
     def effective_lora_alpha(self) -> int:
         """Resolve ``lora_alpha``, defaulting to ``lora_rank`` (scaling = 1.0) when unset."""
         return self.lora_alpha if self.lora_alpha is not None else self.lora_rank
-
-    @property
-    def lora_lr_multiplier(self) -> float:
-        """Learning-rate multiplier a policy's ``configure_optimizers`` should apply.
-
-        ``lora_lr_scale`` when LoRA is enabled, 1.0 (no-op) otherwise.
-        """
-        return self.lora_lr_scale if self.lora_enabled else 1.0

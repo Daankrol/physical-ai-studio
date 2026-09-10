@@ -408,7 +408,7 @@ class Pi0(PeftPolicyMixin, ExportablePolicyMixin, Policy, FromConfig):
         """Configure optimizer and scheduler.
 
         When LoRA/DoRA is enabled, ``learning_rate`` is scaled by
-        ``self.config.lora_lr_multiplier`` (see ``PeftConfigMixin.lora_lr_scale``), since
+        ``self.config.lora_lr_scale`` (see ``PeftConfigMixin``), since
         adapter training tolerates a much higher learning rate than full fine-tuning. The
         decay floor (``decay_lr``) is expressed below as a ratio to ``learning_rate``, so it
         scales along with it automatically.
@@ -419,9 +419,10 @@ class Pi0(PeftPolicyMixin, ExportablePolicyMixin, Policy, FromConfig):
         # Get trainable parameters
         params = [p for p in self.parameters() if p.requires_grad]
 
-        lr_multiplier = self.config.lora_lr_multiplier
-        learning_rate = self.config.learning_rate * lr_multiplier
+        learning_rate = self.config.learning_rate
         if self.config.lora_enabled:
+            lr_multiplier = self.config.lora_lr_scale
+            learning_rate *= lr_multiplier
             logger.info(
                 "LoRA/DoRA enabled: scaling learning_rate %.3g -> %.3g (x%.3g)",
                 self.config.learning_rate,

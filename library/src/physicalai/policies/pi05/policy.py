@@ -730,18 +730,20 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
         ``scheduler_decay_lr`` exactly at the end of training.
 
         When LoRA/DoRA is enabled, ``optimizer_lr`` and ``scheduler_decay_lr`` are scaled
-        by ``self.config.lora_lr_multiplier`` (see ``PeftConfigMixin.lora_lr_scale``), since
-        adapter training tolerates a much higher learning rate than full fine-tuning.
+        by ``self.config.lora_lr_scale`` (see ``PeftConfigMixin``), since adapter training
+        tolerates a much higher learning rate than full fine-tuning.
 
         Returns:
             Dict with optimizer and lr_scheduler config.
         """
         params = [p for p in self.parameters() if p.requires_grad]
 
-        lr_multiplier = self.config.lora_lr_multiplier
-        peak_lr = self.config.optimizer_lr * lr_multiplier
-        decay_lr = self.config.scheduler_decay_lr * lr_multiplier
+        peak_lr = self.config.optimizer_lr
+        decay_lr = self.config.scheduler_decay_lr
         if self.config.lora_enabled:
+            lr_multiplier = self.config.lora_lr_scale
+            peak_lr *= lr_multiplier
+            decay_lr *= lr_multiplier
             logger.info(
                 "LoRA/DoRA enabled: scaling optimizer_lr %.3g -> %.3g and scheduler_decay_lr %.3g -> %.3g (x%.3g)",
                 self.config.optimizer_lr,

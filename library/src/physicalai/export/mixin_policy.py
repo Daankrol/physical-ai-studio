@@ -421,13 +421,12 @@ class ExportablePolicyMixin:
 
         arg_name = self._get_forward_arg_name()
 
-        with self._export_ready_model():
-            self._onnx_core_export_step(
-                model_path=model_path,
-                input_sample=input_sample,
-                arg_name=arg_name,
-                **extra_export_kwargs,
-            )
+        self._export_ready_model()(self._onnx_core_export_step)(
+            model_path=model_path,
+            input_sample=input_sample,
+            arg_name=arg_name,
+            **extra_export_kwargs,
+        )
 
         if extra_model_args.export_tokenizer:
             msg = "Tokenizer export is not supported for ONNX backend at this time."
@@ -507,28 +506,13 @@ class ExportablePolicyMixin:
 
         extra_export_kwargs.update(export_kwargs)
 
-        with self._export_ready_model():
-            if extra_model_args.via_onnx:
-                with tempfile.NamedTemporaryFile(suffix=".onnx") as tmp:
-                    self._onnx_core_export_step(
-                        model_path=Path(tmp.name),
-                        input_sample=input_sample,
-                        arg_name=arg_name,
-                        **extra_export_kwargs,
-                    )
-                    with _quiet_loggers(_ONNX_PROBE_NOISE_LOGGERS, level=logging.ERROR):
-                        ov_model = openvino.convert_model(
-                            tmp.name,
-                            example_input={arg_name: input_sample},
-                            input=input_shapes,
-                        )
-            else:
-                ov_model = openvino.convert_model(
-                    self.model,
-                    example_input={arg_name: input_sample},
-                    input=input_shapes,
-                    **extra_export_kwargs,
-                )
+        ov_model = self._export_ready_model()(self._openvino_convert_step)(
+            extra_model_args=extra_model_args,
+            input_sample=input_sample,
+            arg_name=arg_name,
+            input_shapes=input_shapes,
+            extra_export_kwargs=extra_export_kwargs,
+        )
         _postprocess_openvino_model(ov_model, extra_model_args.outputs)
 
         openvino.save_model(ov_model, str(model_path), compress_to_fp16=extra_model_args.compress_to_fp16)
@@ -638,15 +622,14 @@ class ExportablePolicyMixin:
         original_device = self.device
         self.model.to("cpu")
         try:
-            with self._export_ready_model():
-                self._export_executorch_pte(
-                    model_path=model_path,
-                    input_sample=input_sample,
-                    extra_export_kwargs=extra_export_kwargs,
-                    delegate=delegate,
-                    delegate_config=delegate_config,
-                    to_edge_transform_and_lower=to_edge_transform_and_lower,
-                )
+            self._export_ready_model()(self._export_executorch_pte)(
+                model_path=model_path,
+                input_sample=input_sample,
+                extra_export_kwargs=extra_export_kwargs,
+                delegate=delegate,
+                delegate_config=delegate_config,
+                to_edge_transform_and_lower=to_edge_transform_and_lower,
+            )
         finally:
             self.model.to(original_device)
 
@@ -803,6 +786,51 @@ class ExportablePolicyMixin:
             f=str(model_path),
             input_names=list(input_sample.keys()),
             **export_kwargs,
+        )
+
+    def _openvino_convert_step(
+        self,
+        *,
+        extra_model_args: "OpenVINOExportParameters",
+        input_sample: dict[str, torch.Tensor],
+        arg_name: str,
+        input_shapes: list[openvino.Shape],
+        extra_export_kwargs: dict,
+    ) -> Any:  # noqa: ANN401
+        """Convert ``self.model`` to an in-memory OpenVINO model.
+
+        Assumes ``self.model`` is already eval-mode and export-ready (see
+        ``_export_ready_model``); the caller is responsible for that.
+
+        Args:
+            extra_model_args: Resolved OpenVINO export parameters (``via_onnx``, etc).
+            input_sample: Input tensors for tracing.
+            arg_name: Name of the forward method's first positional argument.
+            input_shapes: OpenVINO shapes matching ``input_sample``.
+            extra_export_kwargs: Additional keyword arguments for ``openvino.convert_model``.
+
+        Returns:
+            The converted OpenVINO model.
+        """
+        if extra_model_args.via_onnx:
+            with tempfile.NamedTemporaryFile(suffix=".onnx") as tmp:
+                self._onnx_core_export_step(
+                    model_path=Path(tmp.name),
+                    input_sample=input_sample,
+                    arg_name=arg_name,
+                    **extra_export_kwargs,
+                )
+                with _quiet_loggers(_ONNX_PROBE_NOISE_LOGGERS, level=logging.ERROR):
+                    return openvino.convert_model(
+                        tmp.name,
+                        example_input={arg_name: input_sample},
+                        input=input_shapes,
+                    )
+        return openvino.convert_model(
+            self.model,
+            example_input={arg_name: input_sample},
+            input=input_shapes,
+            **extra_export_kwargs,
         )
 
     def _get_default_export_input_sample(self) -> dict[str, torch.Tensor] | None:

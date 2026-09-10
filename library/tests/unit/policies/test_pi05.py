@@ -255,7 +255,7 @@ class TestPi05Policy:
 
 
 class TestPi05ConfigureOptimizersLoraLR:
-    """LoRA/DoRA scales the learning rate via PeftConfigMixin.lora_lr_multiplier; this is a
+    """LoRA/DoRA scales the learning rate via PeftConfigMixin.lora_lr_scale; this is a
     library concern, not the application's, so it must hold regardless of caller (UI, CLI,
     or a raw YAML config)."""
 
