@@ -46,7 +46,9 @@ dependencies by hand instead:
 ```
 
 The script also verifies mediapipe can actually construct a `PoseLandmarker`, not just import
-cleanly. mediapipe's compiled task-vision library needs a real OpenGL ES library at runtime that
+cleanly.
+
+**Linux:** mediapipe's compiled task-vision library needs a real OpenGL ES library at runtime that
 the pip package does not provide; without it, construction fails with:
 
 ```
@@ -54,8 +56,25 @@ OSError: libGLESv2.so.2: cannot open shared object file: No such file or directo
 ```
 
 On Debian/Ubuntu the script installs `libgles2` (via `sudo apt-get`) automatically if missing. On
-other platforms, install whatever OS package provides an OpenGL ES 2 ICD/dispatch library; macOS
-ships this as part of the system frameworks, so it should not need a separate install there.
+other Linux distros, install whatever OS package provides an OpenGL ES 2 ICD/dispatch library.
+
+**macOS:** the latest mediapipe (1.0.x) has a known upstream regression
+([mediapipe#6356](https://github.com/google-ai-edge/mediapipe/issues/6356)): every Tasks Vision
+graph with a detector/landmarker calculator, including `PoseLandmarker`, aborts the process during
+graph construction, unconditionally, even with a CPU-only delegate:
+
+```
+F0000 graph_service.h:139] Check failed: service_ Service is unavailable.
+    @ -[DrishtiMetalHelper initWithCalculatorContext:]
+    @ mediapipe::api2::TensorsToDetectionsCalculator::Open()
+```
+
+Not something this project's code can work around. The script installs `mediapipe==0.10.21` on
+macOS instead, which is confirmed working (real pose detection tested against the same estimator
+code this project uses). That release has no wheel past Python 3.12, so it also checks the venv's
+Python version and tells you to recreate it on 3.12 (`uv venv --python 3.12`) if needed. That
+older mediapipe also needs a working `cv2` import (unlike 1.0.x), which this project's own
+`opencv-python` dependency already satisfies, so there is nothing extra to install for that.
 
 This failure is deliberately **not silent** in the running backend either: if the pose worker
 fails to start (missing native library, model download failure, ...), the session emits a
