@@ -76,6 +76,20 @@ Python version and tells you to recreate it on 3.12 (`uv venv --python 3.12`) if
 older mediapipe also needs a working `cv2` import (unlike 1.0.x), which this project's own
 `opencv-python` dependency already satisfies, so there is nothing extra to install for that.
 
+`mediapipe==0.10.21` also requires `protobuf<5,>=4.25.3`. Since it's installed with `--no-deps`,
+this project's own much newer `protobuf` stays in place otherwise, and construction fails with:
+
+```
+AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+```
+
+(`GetPrototype` was removed in protobuf 5+.) The script downgrades `protobuf` on macOS to fix
+this. Verified safe by running the full backend test suite against the downgraded version: this
+project's other protobuf users (`onnx`, `onnxruntime`, `physicalai`, `transformers`) only declare
+a `>=4.25.x` lower bound, none require `>=5`. Unlike mediapipe/torch/opencv, `protobuf` is a
+transitive dependency pinned in `uv.lock`, so _any_ `uv sync` (with or without `--inexact`)
+restores the newer version. Re-run this script after every `uv sync` on macOS.
+
 This failure is deliberately **not silent** in the running backend either: if the pose worker
 fails to start (missing native library, model download failure, ...), the session emits a
 `pose_init_failed` error, shown as a dismissable warning banner on the robot panel rather than

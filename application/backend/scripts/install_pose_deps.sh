@@ -45,12 +45,29 @@ set -euo pipefail
 # dependency (already installed by `uv sync`) satisfies that import; nothing
 # extra to install here. Only skip `--no-deps` mediapipe pulling in a SECOND,
 # conflicting `opencv-contrib-python`, which is exactly what --no-deps avoids.
+#
+# mediapipe==0.10.21 also requires `protobuf<5,>=4.25.3`; `--no-deps` does not
+# install it, so this project's own (much newer, unconstrained-upper-bound)
+# protobuf stays in place and 0.10.21's compiled bindings fail with:
+#   AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'
+# ('GetPrototype' was removed from protobuf 5+.) The fix is downgrading
+# protobuf in this venv. Verified safe against this project's actual
+# dependents (onnx, onnxruntime, physicalai, transformers all declare only a
+# >=4.25.x lower bound, no >=5 requirement) by running the full backend test
+# suite with protobuf downgraded — all passed.
+#
+# `protobuf` is a transitive dependency pinned in uv.lock (not a direct
+# pyproject.toml dependency of this project), so *any* `uv sync` — with or
+# without --inexact — restores it to the newer lockfile-pinned version,
+# unlike mediapipe/torch/opencv, which `uv sync` alone leaves alone. Re-run
+# this script after every `uv sync` on macOS.
 # -----------------------------------------------------------------------------
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
 	mediapipe_spec="mediapipe==0.10.21"
+	protobuf_spec="protobuf<5,>=4.25.3"
 	python_minor="$(.venv/bin/python -c 'import sys; print(sys.version_info[1])')"
 	if [[ "${python_minor}" -ge 13 ]]; then
 		echo "mediapipe==0.10.21 (the macOS-working release, see the comment above) has no" >&2
@@ -60,10 +77,14 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 	fi
 else
 	mediapipe_spec="mediapipe"
+	protobuf_spec=""
 fi
 
 uv pip install --python .venv/bin/python --no-deps "${mediapipe_spec}"
 uv pip install --python .venv/bin/python matplotlib absl-py sounddevice flatbuffers
+if [[ -n "${protobuf_spec}" ]]; then
+	uv pip install --python .venv/bin/python "${protobuf_spec}"
+fi
 
 if command -v apt-get >/dev/null 2>&1 && ! ldconfig -p 2>/dev/null | grep -q libGLESv2.so.2; then
 	echo "Installing libgles2 (provides libGLESv2.so.2, required by mediapipe's native library)..."
