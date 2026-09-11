@@ -208,11 +208,19 @@ class EnvironmentRobotDB(Base):
     tele_operator_robot_id: Mapped[str | None] = mapped_column(
         ForeignKey("project_robots.id", ondelete="NO ACTION"), nullable=True
     )
+    # Set when tele_operator_type == "pose": the camera the pose estimator reads.
+    # NO ACTION for the same reason as tele_operator_robot_id above.
+    tele_operator_camera_id: Mapped[str | None] = mapped_column(
+        ForeignKey("project_cameras.id", ondelete="NO ACTION"), nullable=True
+    )
 
     environment: Mapped["ProjectEnvironmentDB"] = relationship("ProjectEnvironmentDB", back_populates="robot_links")
     robot: Mapped["ProjectRobotDB"] = relationship("ProjectRobotDB", foreign_keys=[robot_id], lazy="selectin")
     tele_operator_robot: Mapped["ProjectRobotDB | None"] = relationship(
         "ProjectRobotDB", foreign_keys=[tele_operator_robot_id], lazy="selectin"
+    )
+    tele_operator_camera: Mapped["ProjectCameraDB | None"] = relationship(
+        "ProjectCameraDB", foreign_keys=[tele_operator_camera_id], lazy="selectin"
     )
 
 

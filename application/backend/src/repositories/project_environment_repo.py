@@ -14,6 +14,7 @@ from schemas.environment import (
     EnvironmentWithRelations,
     RobotWithTeleoperator,
     TeleoperatorNoneWithRobot,
+    TeleoperatorPoseWithRobot,
     TeleoperatorRobotWithRobot,
 )
 
@@ -137,6 +138,41 @@ class ProjectEnvironmentRepository(ProjectBaseRepository[Environment, ProjectEnv
                     link.robot_id,
                 )
                 tele_operator = TeleoperatorNoneWithRobot()
+            elif link.tele_operator_type == "pose" and link.tele_operator_camera_id is not None:
+                if link.tele_operator_camera is None:
+                    logger.warning(
+                        "Environment {} references missing pose teleoperator camera {} for robot {}. "
+                        "Returning teleoperator without eager-loaded camera.",
+                        environment_id,
+                        link.tele_operator_camera_id,
+                        link.robot_id,
+                    )
+                    tele_operator = TeleoperatorPoseWithRobot(
+                        camera_id=UUID(link.tele_operator_camera_id),
+                        camera=None,
+                    )
+                else:
+                    tele_operator = TeleoperatorPoseWithRobot(
+                        camera_id=UUID(link.tele_operator_camera_id),
+                        camera=ProjectCameraMapper.from_schema(link.tele_operator_camera),
+                    )
+            elif link.tele_operator_type == "pose":
+                logger.warning(
+                    "Environment {} has robot link {} with tele_operator_type=pose but no "
+                    "tele_operator_camera_id. Falling back to no teleoperator.",
+                    environment_id,
+                    link.robot_id,
+                )
+                tele_operator = TeleoperatorNoneWithRobot()
+            elif link.tele_operator_type != "none":
+                logger.warning(
+                    "Environment {} has robot link {} with unrecognized tele_operator_type {!r}. "
+                    "Falling back to no teleoperator.",
+                    environment_id,
+                    link.robot_id,
+                    link.tele_operator_type,
+                )
+                tele_operator = TeleoperatorNoneWithRobot()
             else:
                 tele_operator = TeleoperatorNoneWithRobot()
 
@@ -160,16 +196,27 @@ class ProjectEnvironmentRepository(ProjectBaseRepository[Environment, ProjectEnv
         return list(result.scalars().all())
 
     async def find_environment_names_using_camera(self, camera_id: UUID) -> list[str]:
-        """Return names of environments in this project that reference the camera."""
+        """Return names of environments in this project that reference the camera.
+
+        A camera is "in use" either as an observation source (``EnvironmentCameraDB``)
+        or as a pose teleoperator's input (``EnvironmentRobotDB.tele_operator_camera_id``).
+        """
         cid = str(camera_id)
-        stmt = (
+        camera_stmt = (
             select(ProjectEnvironmentDB.name)
             .join(EnvironmentCameraDB, EnvironmentCameraDB.environment_id == ProjectEnvironmentDB.id)
             .where(
                 ProjectEnvironmentDB.project_id == self.project_id,
                 EnvironmentCameraDB.camera_id == cid,
             )
-            .distinct()
         )
-        result = await self.db.execute(stmt)
+        teleoperator_stmt = (
+            select(ProjectEnvironmentDB.name)
+            .join(EnvironmentRobotDB, EnvironmentRobotDB.environment_id == ProjectEnvironmentDB.id)
+            .where(
+                ProjectEnvironmentDB.project_id == self.project_id,
+                EnvironmentRobotDB.tele_operator_camera_id == cid,
+            )
+        )
+        result = await self.db.execute(camera_stmt.union(teleoperator_stmt))
         return list(result.scalars().all())

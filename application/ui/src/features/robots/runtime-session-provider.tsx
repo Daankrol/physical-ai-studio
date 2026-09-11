@@ -81,10 +81,13 @@ const handshakeDevices = (environment: SchemaEnvironmentWithRelations) => {
     if (follower === undefined) {
         throw new Error('Cannot start a runtime session without a follower robot.');
     }
-    const leader_id = follower.tele_operator.type === 'robot' ? follower.tele_operator.robot_id : undefined;
+    const teleOperator = follower.tele_operator;
+    const leader_id = teleOperator.type === 'robot' ? teleOperator.robot_id : undefined;
+    const pose_camera_id = teleOperator.type === 'pose' ? teleOperator.camera_id : undefined;
     return {
         follower_id: follower.robot.id,
         leader_id,
+        pose_camera_id,
         camera_ids: (environment.cameras ?? []).flatMap((camera) => (camera.id ? [camera.id] : [])),
     };
 };
@@ -125,6 +128,7 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
         socket.sendJsonMessage({
             follower_id: devices.follower_id,
             leader_id: devices.leader_id,
+            pose_camera_id: devices.pose_camera_id,
             camera_ids: devices.camera_ids,
         });
         if (props.model && props.inferenceDevice) {
@@ -132,7 +136,7 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
         }
         if (props.dataset) {
             loadDataset.mutate(props.dataset);
-            setFollowerSource.mutate('teleop');
+            setFollowerSource.mutate(devices.pose_camera_id !== undefined ? 'pose' : 'teleop');
         }
     };
 

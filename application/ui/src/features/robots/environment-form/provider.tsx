@@ -4,7 +4,7 @@ import { SchemaEnvironmentInput } from '../../../api/openapi-spec';
 
 export type RobotConfiguration = {
     robot_id: string;
-    teleoperator: { type: 'robot'; robot_id: string } | { type: 'none' };
+    teleoperator: { type: 'robot'; robot_id: string } | { type: 'pose'; camera_id: string } | { type: 'none' };
 };
 
 export type CameraConfiguration = {
@@ -34,15 +34,15 @@ export const useEnvironmentFormBody = (environment_id: string) => {
             };
         }),
         robots: environmentForm.robots.map((robot) => {
+            const teleoperator = robot.teleoperator;
             return {
                 robot_id: robot.robot_id,
                 tele_operator:
-                    robot.teleoperator.type === 'robot'
-                        ? {
-                              type: 'robot',
-                              robot_id: robot.teleoperator.robot_id,
-                          }
-                        : { type: 'none' },
+                    teleoperator.type === 'robot'
+                        ? { type: 'robot', robot_id: teleoperator.robot_id }
+                        : teleoperator.type === 'pose'
+                          ? { type: 'pose', camera_id: teleoperator.camera_id }
+                          : { type: 'none' },
             };
         }),
     } satisfies SchemaEnvironmentInput;

@@ -28,7 +28,23 @@ class TeleoperatorNone(BaseModel):
     model_config = ConfigDict(json_schema_extra={"example": {"type": "none"}})
 
 
-Teleoperator = Annotated[TeleoperatorRobot | TeleoperatorNone, Field(discriminator="type")]
+class TeleoperatorPose(BaseModel):
+    """Drive the follower from a human's body pose, estimated from an environment camera."""
+
+    type: Literal["pose"] = "pose"
+    camera_id: UUID = Field(..., description="ID of the camera the pose estimator reads")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "type": "pose",
+                "camera_id": "c8g5dfh9-269e-7d2h-d546-31ggc3dic786",
+            }
+        }
+    )
+
+
+Teleoperator = Annotated[TeleoperatorRobot | TeleoperatorPose | TeleoperatorNone, Field(discriminator="type")]
 
 
 class RobotEnvironmentConfiguration(BaseModel):
@@ -118,7 +134,18 @@ class TeleoperatorNoneWithRobot(BaseModel):
     type: Literal["none"] = "none"
 
 
-TeleoperatorWithRobot = Annotated[TeleoperatorRobotWithRobot | TeleoperatorNoneWithRobot, Field(discriminator="type")]
+class TeleoperatorPoseWithRobot(BaseModel):
+    """Pose teleoperator configuration with the eager-loaded camera it reads."""
+
+    type: Literal["pose"] = "pose"
+    camera_id: UUID = Field(..., description="ID of the camera the pose estimator reads")
+    camera: Camera | None = Field(None, description="Eager-loaded camera object")
+
+
+TeleoperatorWithRobot = Annotated[
+    TeleoperatorRobotWithRobot | TeleoperatorPoseWithRobot | TeleoperatorNoneWithRobot,
+    Field(discriminator="type"),
+]
 
 
 class RobotWithTeleoperator(BaseModel):

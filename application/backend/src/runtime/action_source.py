@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11,8 +10,9 @@ from physicalai.runtime import WorkerDiedError
 from runtime.contract import (
     ErrorEvent,
     LoadModelCommand,
+    PoseEvent,
+    PoseLandmarkData,
     SetFollowerSourceCommand,
-    SetPoseLandmarksCommand,
     StartRecordingCommand,
     StartTaskCommand,
     StateData,
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from runtime.callbacks.recording import RecordingState
     from runtime.contract import CommandMailbox, EventSink, FollowerSource
     from runtime.policy_loader import ModelIdentity, ObservationSnapshot
+    from runtime.pose.worker import PoseWorker
 
 
 class StudioActionSource:
@@ -51,6 +52,9 @@ class StudioActionSource:
         camera_keys: Sequence[str] = (),
         models_dir: Path | None = None,
         pose_retargeter: PoseRetargeter | None = None,
+        pose_worker: PoseWorker | None = None,
+        pose_camera_key: str | None = None,
+        pose_camera_id: str | None = None,
     ) -> None:
         self._follower = follower
         self._leader = leader
@@ -88,9 +92,10 @@ class StudioActionSource:
         # is connected" — ``self._follower.joint_names`` is not safe to read
         # from ``__init__`` (the session constructs this before connecting).
         self._pose_retargeter: PoseRetargeter | None = pose_retargeter
-        self._last_pose_landmarks: list[tuple[float, float, float, float]] | None = None
+        self._pose_worker = pose_worker
+        self._pose_camera_key = pose_camera_key
+        self._pose_camera_id = pose_camera_id
         self._last_pose_action: np.ndarray | None = None
-        self._last_pose_received_at: float | None = None
 
     @property
     def follower_source(self) -> FollowerSource:
@@ -98,7 +103,7 @@ class StudioActionSource:
 
     @property
     def pose_available(self) -> bool:
-        return self._resolve_pose_retargeter() is not None
+        return self._pose_worker is not None and self._resolve_pose_retargeter() is not None
 
     def _resolve_pose_retargeter(self) -> PoseRetargeter | None:
         """Lazily build the retargeter from the follower's own joint names.
@@ -161,6 +166,11 @@ class StudioActionSource:
         if self._hold_target is None:
             self._hold_target = np.array(robot_state.joint_positions, dtype=np.float32, copy=True)
 
+        # Feeding the worker and publishing the overlay happen every tick
+        # regardless of mode, so the skeleton is visible in the UI even while
+        # driving from a leader or a policy.
+        self._update_pose_worker(camera_frames)
+
         leader_action = self._read_leader(robot_state) if self._leader_reads_enabled else self._last_leader_action
         policy_action = self._policy_action(robot_state, camera_frames, step)
         pose_action = self._pose_action(robot_state)
@@ -185,7 +195,6 @@ class StudioActionSource:
         self._failure_logged = False
         self._last_robot_state = None
         self._last_camera_frames = {}
-        self._last_pose_landmarks = None
         self._last_pose_action = None
 
     def shutdown_policy(self) -> None:
@@ -199,6 +208,11 @@ class StudioActionSource:
             self._loaded_identity = None
         if policy is not None:
             policy.disconnect()
+
+    def shutdown_pose(self) -> None:
+        """Stop the pose worker's background thread. Session teardown only."""
+        if self._pose_worker is not None:
+            self._pose_worker.close()
 
     def _set_policy(self, source: PolicySource, generation: int, identity: ModelIdentity | None = None) -> None:
         with self._policy_lock:
@@ -266,14 +280,17 @@ class StudioActionSource:
 
     def _pose_action(self, robot_state: RobotObservation) -> np.ndarray | None:
         retargeter = self._resolve_pose_retargeter()
-        if retargeter is None or self._last_pose_landmarks is None:
+        if retargeter is None or self._pose_worker is None:
             return None
-        if (
-            self._last_pose_received_at is not None
-            and time.monotonic() - self._last_pose_received_at > self._POSE_STALE_AFTER_S
-        ):
+        age = self._pose_worker.seconds_since_update()
+        if age is None:
+            return None  # no detection yet this session; not the same as stale
+        if age > self._POSE_STALE_AFTER_S:
             if self._follower_source == "pose":
                 self._disable_stale_pose(robot_state)
+            return None
+        landmarks = self._pose_worker.latest_landmarks()
+        if landmarks is None:
             return None
         previous = (
             self._last_pose_action
@@ -281,12 +298,35 @@ class StudioActionSource:
             else np.array(robot_state.joint_positions, dtype=np.float32, copy=True)
         )
         try:
-            action = retargeter.retarget(self._last_pose_landmarks, previous)
+            action = retargeter.retarget(landmarks, previous)
         except Exception:
             logger.exception("Pose retargeting failed; holding the last safe pose action")
             return self._last_pose_action
         self._last_pose_action = action
         return action
+
+    def _update_pose_worker(self, camera_frames: Mapping[str, Frame]) -> None:
+        """Feed the pose camera's newest frame to the worker and publish the overlay.
+
+        Runs every tick regardless of ``follower_source`` so the UI can show
+        the estimated skeleton without driving the arm from it.
+        """
+        if self._pose_worker is None or self._pose_camera_key is None:
+            return
+        frame = camera_frames.get(self._pose_camera_key)
+        if frame is not None:
+            self._pose_worker.submit_frame(frame.data, frame.sequence)
+        if self._pose_camera_id is None:
+            return
+        landmarks = self._pose_worker.latest_overlay_landmarks()
+        if landmarks is None:
+            return
+        self._event_sink.emit(
+            PoseEvent(
+                camera_id=self._pose_camera_id,
+                landmarks=[PoseLandmarkData(x=x, y=y, z=z, visibility=v) for x, y, z, v in landmarks],
+            )
+        )
 
     def _drain_commands(self, robot_state: RobotObservation) -> None:
         for command in self._mailbox.drain():
@@ -300,11 +340,6 @@ class StudioActionSource:
                 self._handle_set_follower_source(command, robot_state)
             elif isinstance(command, StartRecordingCommand):
                 self._handle_start_recording(command)
-            elif isinstance(command, SetPoseLandmarksCommand):
-                # Latest-value command: a burst of frames just replaces this
-                # each drain, same tolerance as the leader's polled read.
-                self._last_pose_landmarks = [(lm.x, lm.y, lm.z, lm.visibility) for lm in command.landmarks]
-                self._last_pose_received_at = time.monotonic()
 
     def _handle_load_model(self, command: LoadModelCommand) -> None:
         if not command.force and self._loaded_identity == model_identity(command):
@@ -381,7 +416,7 @@ class StudioActionSource:
                 )
             )
             return
-        if requested == "pose" and self._resolve_pose_retargeter() is None:
+        if requested == "pose" and not self.pose_available:
             self._event_sink.emit(
                 ErrorEvent(
                     message="This robot does not support pose-driven teleoperation.",

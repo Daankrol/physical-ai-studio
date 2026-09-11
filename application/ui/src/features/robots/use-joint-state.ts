@@ -12,12 +12,19 @@ type JointsState = Array<{
     value: number;
 }>;
 
-// Mirrors runtime.contract.PoseLandmark.
+// Mirrors runtime.contract.PoseLandmarkData: one skeleton overlay point.
 export interface PoseLandmark {
     x: number;
     y: number;
     z: number;
     visibility: number;
+}
+
+// Mirrors runtime.contract.PoseEvent. Addressed by camera_id (not a feature
+// key) so the browser can match it to the right camera panel.
+export interface PoseOverlay {
+    cameraId: string;
+    landmarks: PoseLandmark[];
 }
 
 const getNewJointState = (newJoints: Record<string, number>) => {
@@ -71,13 +78,15 @@ export const useJointState = (
     project_id: string,
     follower_id: string,
     leader_id?: string,
-    camera_ids: string[] = EMPTY_CAMERA_IDS
+    camera_ids: string[] = EMPTY_CAMERA_IDS,
+    pose_camera_id?: string
 ) => {
     const [joints, setJoints] = useState<JointsState>([]);
     const [state, setState] = useState<RobotControlState>({
         connected: false,
         follower_source: 'hold',
     });
+    const [poseOverlay, setPoseOverlay] = useState<PoseOverlay | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [errorCode, setErrorCode] = useState<string | null>(null);
     const [warning, setWarning] = useState<string | null>(null);
@@ -93,6 +102,8 @@ export const useJointState = (
             if (payload['event'] === 'observation') {
                 const newJoints = getNewJointState(payload['data']);
                 setJoints(newJoints);
+            } else if (payload['event'] === 'pose') {
+                setPoseOverlay({ cameraId: payload['camera_id'], landmarks: payload['landmarks'] });
             } else if (payload['event'] === 'state') {
                 setState(payload['data']);
                 setError(null);
@@ -137,6 +148,7 @@ export const useJointState = (
                 socket.sendJsonMessage({
                     follower_id,
                     leader_id,
+                    pose_camera_id,
                     camera_ids,
                     ...(shouldRestart ? { restart: true } : {}),
                 });
@@ -170,13 +182,6 @@ export const useJointState = (
         });
     };
 
-    const sendPoseLandmarks = (landmarks: PoseLandmark[]) => {
-        socket.sendJsonMessage({
-            event: 'set_pose_landmarks',
-            data: { landmarks },
-        });
-    };
-
     const disconnect = () => {
         socket.sendJsonMessage({ event: 'disconnect' });
     };
@@ -194,12 +199,46 @@ export const useJointState = (
         joints,
         socket,
         state,
+        poseOverlay,
         error,
         errorCode,
         warning,
         setFollowerSource: setFollowerSourceRequest,
-        sendPoseLandmarks,
         disconnect,
         restart,
     };
+};
+
+/**
+ * Passive listener for a runtime session's pose overlay, for a component
+ * (e.g. a camera panel) that is not the one driving the handshake.
+ *
+ * Relies on react-use-websocket's `share: true` reusing the same underlying
+ * socket the robot panel already opened and handshook for this follower —
+ * this hook only listens, it never sends the handshake itself. Pass
+ * `follower_id: undefined` when there is no pose teleoperator to watch; the
+ * socket is not opened in that case.
+ */
+export const usePoseOverlay = (project_id: string, follower_id: string | undefined): PoseOverlay | null => {
+    const [poseOverlay, setPoseOverlay] = useState<PoseOverlay | null>(null);
+
+    useWebSocket(
+        runtimeSocketUrl(project_id, follower_id ?? ''),
+        {
+            share: true,
+            onMessage: (event: WebSocketEventMap['message']) => {
+                try {
+                    const payload = JSON.parse(event.data);
+                    if (payload['event'] === 'pose') {
+                        setPoseOverlay({ cameraId: payload['camera_id'], landmarks: payload['landmarks'] });
+                    }
+                } catch (parseError) {
+                    console.error('Failed to parse WebSocket message:', parseError);
+                }
+            },
+        },
+        follower_id !== undefined
+    );
+
+    return poseOverlay;
 };

@@ -98,7 +98,6 @@ _RUNTIME_PUBLICATIONS = frozenset(
         "stop_task",
         "load_dataset",
         "start_recording",
-        "set_pose_landmarks",
     }
 )
 _RUNTIME_REQUESTS = frozenset({"save_episode", "discard_episode"})
@@ -152,7 +151,7 @@ async def _devices_from_handshake(
     project_id: UUID,
     robot_service: RobotService,
     camera_service: ProjectCameraService,
-) -> tuple[Robot, Robot | None, list[Camera]]:
+) -> tuple[Robot, Robot | None, list[Camera], Camera | None]:
     """Resolve handshake ids against the project so a client cannot name another project's devices."""
     follower_id = get_robot_id(handshake["follower_id"])
     follower = await robot_service.get_robot_by_id(project_id, follower_id)
@@ -171,7 +170,12 @@ async def _devices_from_handshake(
         if not isinstance(raw, str):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid camera ID")
         cameras.append(await camera_service.get_camera_by_id(project_id, get_camera_id(raw)))
-    return follower, leader, cameras
+
+    pose_camera = None
+    if handshake.get("pose_camera_id") is not None:
+        pose_camera = await camera_service.get_camera_by_id(project_id, get_camera_id(handshake["pose_camera_id"]))
+
+    return follower, leader, cameras, pose_camera
 
 
 async def _release_claims_when_dead(
@@ -247,13 +251,16 @@ async def runtime_websocket(  # noqa: PLR0913, PLR0915, PLR0912
     claim_generation = 0
     try:
         handshake = await websocket.receive_json("text")
-        follower, leader, cameras = await _devices_from_handshake(handshake, project_id, robot_service, camera_service)
+        follower, leader, cameras, pose_camera = await _devices_from_handshake(
+            handshake, project_id, robot_service, camera_service
+        )
         document = await build_runtime_config(
             follower=follower,
             leader=leader,
             cameras=cameras,
             fps=RUNTIME_FPS,
             robot_factory=robot_client_factory,
+            pose_camera=pose_camera,
         )
         name = runtime_session_name(follower.id)
         session_name = name

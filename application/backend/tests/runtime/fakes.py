@@ -214,3 +214,29 @@ class FakeCamera:
             timestamp=time.monotonic(),
             sequence=self._sequence,
         )
+
+
+class FakePoseWorker:
+    """Test double for ``runtime.pose.worker.PoseWorker`` with no real inference."""
+
+    def __init__(self) -> None:
+        self.world_landmarks: list[tuple[float, float, float, float]] | None = None
+        self.image_landmarks: list[tuple[float, float, float, float]] | None = None
+        self.age_s: float | None = None
+        self.submitted_frames: list[tuple[np.ndarray, int]] = []
+        self.closed = False
+
+    def submit_frame(self, frame_rgb: np.ndarray, sequence: int) -> None:
+        self.submitted_frames.append((frame_rgb, sequence))
+
+    def latest_landmarks(self) -> list[tuple[float, float, float, float]] | None:
+        return self.world_landmarks
+
+    def latest_overlay_landmarks(self) -> list[tuple[float, float, float, float]] | None:
+        return self.image_landmarks
+
+    def seconds_since_update(self) -> float | None:
+        return self.age_s
+
+    def close(self) -> None:
+        self.closed = True

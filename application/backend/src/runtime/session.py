@@ -28,6 +28,8 @@ from runtime.contract import (
     StateEvent,
 )
 from runtime.dataset_features import build_lerobot_dataset_features
+from runtime.pose.mediapipe_estimator import MediaPipePoseEstimator, default_model_path
+from runtime.pose.worker import PoseWorker
 from settings import get_settings
 
 if TYPE_CHECKING:
@@ -102,6 +104,8 @@ class RuntimeSession:
             for key, config in init_args.get("cameras", {}).items()
         }
 
+        pose_worker = self._build_pose_worker(init_args.get("pose"))
+
         self._action_source = StudioActionSource(
             follower=self._follower,
             leader=self._leader,
@@ -109,6 +113,9 @@ class RuntimeSession:
             event_sink=self._event_sink,
             fps=float(init_args["fps"]),
             camera_keys=tuple(self._cameras),
+            pose_worker=pose_worker,
+            pose_camera_key=None if pose_worker is None else init_args["pose"]["camera_key"],
+            pose_camera_id=None if pose_worker is None else init_args["pose"]["camera_id"],
         )
         self._action_source.bind_recording(self._recording)
         action_source = self._action_source
@@ -124,6 +131,24 @@ class RuntimeSession:
             recording=self._recording,
             follower_source=lambda: action_source.follower_source,
         )
+
+    def _build_pose_worker(self, pose_config: dict[str, Any] | None) -> PoseWorker | None:
+        """Build the pose-estimation worker when the teleoperator is a pose camera.
+
+        Failing to build one (missing ``mediapipe`` install, model download
+        failure) must not crash the session — it just means ``pose_available``
+        stays false and the client sees ``pose_not_supported`` if it tries to
+        switch into pose mode. See ``scripts/install_pose_deps.sh``.
+        """
+        if pose_config is None:
+            return None
+        try:
+            model_path = default_model_path(get_settings().cache_dir / "pose")
+            estimator = MediaPipePoseEstimator(model_path=model_path)
+        except Exception:
+            logger.exception("Failed to start pose estimation; pose teleoperation will be unavailable")
+            return None
+        return PoseWorker(estimator)
 
     def build_runtime(self) -> RobotRuntime:
         if (
@@ -213,6 +238,7 @@ class RuntimeSession:
         # Stop the policy worker before dropping devices it may still be reading.
         if self._action_source is not None:
             self._action_source.shutdown_policy()
+            self._action_source.shutdown_pose()
         # Cameras first so a wedged publisher cannot strand the arm connected.
         for key, camera in self._cameras.items():
             try:

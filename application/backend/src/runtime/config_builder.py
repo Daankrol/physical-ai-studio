@@ -162,7 +162,7 @@ def runtime_export_readme(document: dict[str, Any], *, unresolved: list[str]) ->
     return "\n".join(lines)
 
 
-async def build_runtime_config(
+async def build_runtime_config(  # noqa: PLR0913
     *,
     follower: Robot,
     leader: Robot | None,
@@ -171,6 +171,7 @@ async def build_runtime_config(
     fps: float = RUNTIME_FPS,
     allow_stored_port: bool = False,
     action_source: dict[str, Any] | None = None,
+    pose_camera: Camera | None = None,
 ) -> dict[str, Any]:
     """Assemble one physicalai runtime recipe from Studio database rows.
 
@@ -182,6 +183,12 @@ async def build_runtime_config(
     Pass ``action_source`` to pin a PolicySource fragment for a headless
     export. The live session leaves it unset and wraps TeleopSource itself
     when a leader is present.
+
+    Pass ``pose_camera`` when the environment's teleoperator is a pose
+    estimator (mutually exclusive with ``leader``/``action_source`` in
+    practice — Studio never sets more than one controller kind at a time).
+    The camera must already be one of ``cameras``: pose reuses an existing
+    observation camera rather than claiming a second subscriber.
     """
     port_finder: CatalogRobotFactory = _StoredPortFallback(robot_factory) if allow_stored_port else robot_factory
     follower_config = await _shared_robot_config(follower, robot_factory, port_finder)
@@ -206,6 +213,13 @@ async def build_runtime_config(
             "class_path": "physicalai.runtime.TeleopSource",
             "init_args": {"leader": leader_config},
         }
+    elif pose_camera is not None:
+        pose_camera_key = sanitize_camera_name(pose_camera.name)
+        if pose_camera_key not in camera_configs:
+            raise ValueError(f"Pose teleoperator camera {pose_camera.name!r} is not one of the environment's cameras")
+        # Not a nested Config (no class_path): read back verbatim as plain
+        # data in session.py, the same way "fps" is.
+        init_args["pose"] = {"camera_key": pose_camera_key, "camera_id": str(pose_camera.id)}
 
     document = Config("physicalai.runtime.RobotRuntime", init_args).to_dict()
     validate_config(document)
@@ -215,16 +229,20 @@ async def build_runtime_config(
 def runtime_identity_digest(document: dict[str, Any]) -> str:
     """Identify the hardware a session is driving, so a client cannot attach to a different rig.
 
-    Covers the robot recipe, the leader recipe and fps — everything that
-    physically determines what the arm does. Cameras are deliberately excluded:
-    they are read-only observation, a client that needs more can restart the
-    session, and including them would make every camera edit in the environment
-    form look like a rig change. See runtime-process-context.md#decisions.
+    Covers the robot recipe, the controller (leader or pose camera) and fps —
+    everything that physically determines what the arm does. Observation
+    cameras are deliberately excluded: they are read-only, a client that needs
+    more can restart the session, and including them would make every camera
+    edit in the environment form look like a rig change. See
+    runtime-process-context.md#decisions. The pose camera is different — it
+    is the control input, so it is covered by ``pose`` here even though the
+    same camera also appears (excluded) in ``cameras``.
     """
     init_args = document["init_args"]
     identity = {
         "robot": init_args["robot"],
         "action_source": init_args.get("action_source"),
+        "pose": init_args.get("pose"),
         "fps": init_args["fps"],
     }
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))

@@ -140,3 +140,81 @@ def test_get_by_id_with_relations_skips_missing_camera_and_logs_warning() -> Non
     assert len(environment.cameras) == 1
     assert environment.cameras[0].name == "Front Camera"
     warning_mock.assert_called_once()
+
+
+def test_build_robots_with_teleoperators_resolves_pose_camera() -> None:
+    environment_id = uuid4()
+    camera_id = uuid4()
+
+    link = MagicMock()
+    link.robot = _make_robot_db_model(name="Follower")
+    link.robot_id = link.robot.id
+    link.tele_operator_type = "pose"
+    link.tele_operator_robot_id = None
+    link.tele_operator_robot = None
+    link.tele_operator_camera_id = str(camera_id)
+    link.tele_operator_camera = _make_camera_db_model(name="Overhead", camera_id=camera_id)
+
+    catalog_registry = MagicMock(spec=RobotCatalogRegistry)
+    catalog_registry.get_definition.return_value = MagicMock()
+    catalog_registry.get_robot_adapter.return_value = RobotAdapter
+    repo = ProjectEnvironmentRepository(MagicMock(), uuid4(), catalog_registry)
+
+    robots = repo._build_robots_with_teleoperators(environment_id, [link])
+
+    assert len(robots) == 1
+    assert robots[0].tele_operator.type == "pose"
+    assert robots[0].tele_operator.camera_id == camera_id
+    assert robots[0].tele_operator.camera is not None
+    assert robots[0].tele_operator.camera.name == "Overhead"
+
+
+def test_build_robots_with_teleoperators_keeps_camera_id_when_eager_camera_missing() -> None:
+    environment_id = uuid4()
+    camera_id = uuid4()
+
+    link = MagicMock()
+    link.robot = _make_robot_db_model(name="Follower")
+    link.robot_id = link.robot.id
+    link.tele_operator_type = "pose"
+    link.tele_operator_robot_id = None
+    link.tele_operator_robot = None
+    link.tele_operator_camera_id = str(camera_id)
+    link.tele_operator_camera = None
+
+    catalog_registry = MagicMock(spec=RobotCatalogRegistry)
+    catalog_registry.get_definition.return_value = MagicMock()
+    catalog_registry.get_robot_adapter.return_value = RobotAdapter
+    repo = ProjectEnvironmentRepository(MagicMock(), uuid4(), catalog_registry)
+
+    with patch("repositories.project_environment_repo.logger.warning") as warning_mock:
+        robots = repo._build_robots_with_teleoperators(environment_id, [link])
+
+    assert robots[0].tele_operator.type == "pose"
+    assert robots[0].tele_operator.camera_id == camera_id
+    assert robots[0].tele_operator.camera is None
+    warning_mock.assert_called_once()
+
+
+def test_build_robots_with_teleoperators_degrades_unknown_type_and_warns() -> None:
+    environment_id = uuid4()
+
+    link = MagicMock()
+    link.robot = _make_robot_db_model(name="Follower")
+    link.robot_id = link.robot.id
+    link.tele_operator_type = "vr_headset"
+    link.tele_operator_robot_id = None
+    link.tele_operator_robot = None
+    link.tele_operator_camera_id = None
+    link.tele_operator_camera = None
+
+    catalog_registry = MagicMock(spec=RobotCatalogRegistry)
+    catalog_registry.get_definition.return_value = MagicMock()
+    catalog_registry.get_robot_adapter.return_value = RobotAdapter
+    repo = ProjectEnvironmentRepository(MagicMock(), uuid4(), catalog_registry)
+
+    with patch("repositories.project_environment_repo.logger.warning") as warning_mock:
+        robots = repo._build_robots_with_teleoperators(environment_id, [link])
+
+    assert robots[0].tele_operator.type == "none"
+    warning_mock.assert_called_once()

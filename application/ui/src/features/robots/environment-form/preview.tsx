@@ -36,6 +36,7 @@ const components = {
             title: string;
             follower_id: string;
             leader_id: string | undefined;
+            pose_camera_id: string | undefined;
             camera_ids: string[];
         }>
     ) => {
@@ -43,12 +44,13 @@ const components = {
             <RobotCell
                 follower_id={props.params.follower_id}
                 leader_id={props.params.leader_id}
+                pose_camera_id={props.params.pose_camera_id}
                 camera_ids={props.params.camera_ids}
             />
         );
     },
-    camera: (props: IDockviewPanelProps<{ camera_id: string }>) => {
-        return <CameraCell camera_id={props.params.camera_id} />;
+    camera: (props: IDockviewPanelProps<{ camera_id: string; pose_follower_id: string | undefined }>) => {
+        return <CameraCell camera_id={props.params.camera_id} pose_follower_id={props.params.pose_follower_id} />;
     },
     default: (props: IDockviewPanelProps<{ title: string }>) => {
         return <div style={{ padding: '20px', color: 'white' }}>{props.params.title}</div>;
@@ -67,6 +69,13 @@ const buildDockviewPanels = (
 
     const panels = new Set<string>();
 
+    const poseFollowerIdByCameraId: Record<string, string> = {};
+    environment.robots.forEach((robot) => {
+        if (robot.teleoperator.type === 'pose') {
+            poseFollowerIdByCameraId[robot.teleoperator.camera_id] = robot.robot_id;
+        }
+    });
+
     environment.cameras.forEach(({ camera_id }) => {
         panels.add(camera_id);
         if (!api.panels.some((panel) => panel.id === camera_id)) {
@@ -77,6 +86,7 @@ const buildDockviewPanels = (
                 params: {
                     title: cameraNameMap[camera_id] ?? camera_id,
                     camera_id,
+                    pose_follower_id: poseFollowerIdByCameraId[camera_id],
                 },
                 position: {
                     direction: 'right',
@@ -87,7 +97,9 @@ const buildDockviewPanels = (
     });
 
     environment.robots.forEach((robot) => {
-        const teleoperator_id = robot.teleoperator.type === 'robot' ? robot.teleoperator.robot_id : undefined;
+        const teleoperator = robot.teleoperator;
+        const leaderId = teleoperator.type === 'robot' ? teleoperator.robot_id : undefined;
+        const poseCameraId = teleoperator.type === 'pose' ? teleoperator.camera_id : undefined;
         panels.add(robot.robot_id);
         // Existing follower panels keep the camera_ids they were created with.
         // Adding a camera here must not restart the live preview; session cameras
@@ -99,7 +111,8 @@ const buildDockviewPanels = (
                 params: {
                     title: 'Follower',
                     follower_id: robot.robot_id,
-                    leader_id: teleoperator_id,
+                    leader_id: leaderId,
+                    pose_camera_id: poseCameraId,
                     camera_ids: cameraIds,
                 },
                 title: 'Follower',

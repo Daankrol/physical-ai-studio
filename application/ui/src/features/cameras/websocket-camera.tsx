@@ -5,6 +5,8 @@ import useWebSocket from 'react-use-websocket';
 
 import { fetchClient } from '../../api/client';
 import { SchemaProjectCamera } from '../../api/types';
+import { PoseSkeletonOverlay } from '../robots/pose-overlay/pose-skeleton-overlay';
+import { PoseLandmark } from '../robots/use-joint-state';
 import { useFittedMediaSize } from './use-fitted-media-size';
 
 const CAMERA_WS_URL = fetchClient.PATH('/api/cameras/ws');
@@ -99,15 +101,24 @@ const CameraCanvas = ({ camera, width, height }: { camera: SchemaProjectCamera; 
     );
 };
 
-export const WebsocketCamera = ({ camera }: { camera: SchemaProjectCamera }) => {
+export const WebsocketCamera = ({
+    camera,
+    poseOverlayLandmarks,
+}: {
+    camera: SchemaProjectCamera;
+    poseOverlayLandmarks?: PoseLandmark[];
+}) => {
     const { containerRef, width, height } = useFittedMediaSize(
         Number(camera.payload?.width),
         Number(camera.payload?.height)
     );
 
     return (
-        <div ref={containerRef} style={{ height: '100%', width: '100%' }}>
+        <div ref={containerRef} style={{ height: '100%', width: '100%', position: 'relative' }}>
             <CameraCanvas camera={camera} width={width} height={height} />
+            {poseOverlayLandmarks && (
+                <PoseSkeletonOverlay landmarks={poseOverlayLandmarks} width={width} height={height} />
+            )}
         </div>
     );
 };

@@ -17,6 +17,9 @@ const RobotListItem = ({ robot, onRemove }: { robot: RobotConfiguration; onRemov
     const robotsQuery = $api.useSuspenseQuery('get', '/api/projects/{project_id}/robots', {
         params: { path: { project_id } },
     });
+    const camerasQuery = $api.useSuspenseQuery('get', '/api/projects/{project_id}/cameras', {
+        params: { path: { project_id } },
+    });
 
     const followerRobot = robotsQuery.data.find(({ id }) => id === robot.robot_id);
 
@@ -27,6 +30,15 @@ const RobotListItem = ({ robot, onRemove }: { robot: RobotConfiguration; onRemov
     const teleoperator = robot.teleoperator;
     const leaderRobot =
         teleoperator.type === 'robot' ? robotsQuery.data.find(({ id }) => id === teleoperator.robot_id) : undefined;
+    const poseCamera =
+        teleoperator.type === 'pose' ? camerasQuery.data.find(({ id }) => id === teleoperator.camera_id) : undefined;
+
+    const teleoperatorLabel =
+        teleoperator.type === 'none'
+            ? 'None'
+            : teleoperator.type === 'robot'
+              ? (leaderRobot?.name ?? 'Unknown leader robot')
+              : `Human pose (${poseCamera?.name ?? 'unknown camera'})`;
 
     return (
         <li>
@@ -39,9 +51,7 @@ const RobotListItem = ({ robot, onRemove }: { robot: RobotConfiguration; onRemov
                         </Flex>
                         <Flex gap='size-200'>
                             <span>Tele operator</span>
-                            <span>
-                                {teleoperator.type === 'none' ? 'None' : (leaderRobot?.name ?? 'Unknown leader robot')}
-                            </span>
+                            <span>{teleoperatorLabel}</span>
                         </Flex>
                     </Flex>
 
@@ -56,6 +66,8 @@ const RobotListItem = ({ robot, onRemove }: { robot: RobotConfiguration; onRemov
     );
 };
 
+type TeleoperatorKind = 'none' | 'robot' | 'pose';
+
 export const AddRobotForm = ({
     onAddRobot,
 
@@ -66,10 +78,15 @@ export const AddRobotForm = ({
     onCancel?: () => void;
 }) => {
     const [selectedRobotId, setSelectedRobotId] = useState<string | null>(null);
+    const [teleoperatorKind, setTeleoperatorKind] = useState<TeleoperatorKind>('none');
     const [selectedTeleoperatorRobotId, setSelectedTeleoperatorRobotId] = useState<string | null>(null);
+    const [selectedPoseCameraId, setSelectedPoseCameraId] = useState<string | null>(null);
 
     const { project_id } = useProjectId();
     const robotsQuery = $api.useSuspenseQuery('get', '/api/projects/{project_id}/robots', {
+        params: { path: { project_id } },
+    });
+    const camerasQuery = $api.useSuspenseQuery('get', '/api/projects/{project_id}/cameras', {
         params: { path: { project_id } },
     });
     const { isFollower, isLeader } = useIsRobotRole();
@@ -95,9 +112,21 @@ export const AddRobotForm = ({
         );
     });
 
+    // Pose reuses an existing environment camera (no second subscriber), so
+    // only cameras already added to this environment are offered here.
+    const availablePoseCameras = camerasQuery.data.filter((camera) =>
+        environment.cameras.some(({ camera_id }) => camera_id === camera.id)
+    );
+
     if (availableRobots.length === 0) {
         return <span>No available robots</span>;
     }
+
+    const canSubmit =
+        selectedRobotId !== null &&
+        (teleoperatorKind === 'none' ||
+            (teleoperatorKind === 'robot' && selectedTeleoperatorRobotId !== null) ||
+            (teleoperatorKind === 'pose' && selectedPoseCameraId !== null));
 
     return (
         <Flex direction='column' gap='size-100'>
@@ -123,36 +152,88 @@ export const AddRobotForm = ({
             </Picker>
 
             <Picker
-                label='Robot (Leader, optional)'
+                label='Teleoperator (optional)'
                 width='100%'
-                selectedKey={selectedTeleoperatorRobotId}
+                selectedKey={teleoperatorKind}
                 onSelectionChange={(key) => {
                     if (key !== null && typeof key === 'string') {
-                        setSelectedTeleoperatorRobotId(key);
+                        setTeleoperatorKind(key as TeleoperatorKind);
+                        setSelectedTeleoperatorRobotId(null);
+                        setSelectedPoseCameraId(null);
                     }
                 }}
             >
-                {availableRobots.filter(isLeader).map((robot) => {
-                    return (
-                        <Item textValue={robot.name} key={robot.id}>
-                            <Text>{robot.name}</Text>
-                        </Item>
-                    );
-                })}
+                <Item textValue='None' key='none'>
+                    <Text>None</Text>
+                </Item>
+                <Item textValue='Leader robot' key='robot'>
+                    <Text>Leader robot</Text>
+                </Item>
+                <Item textValue='Human pose' key='pose'>
+                    <Text>Human pose (camera)</Text>
+                </Item>
             </Picker>
+
+            {teleoperatorKind === 'robot' && (
+                <Picker
+                    label='Robot (Leader)'
+                    width='100%'
+                    selectedKey={selectedTeleoperatorRobotId}
+                    onSelectionChange={(key) => {
+                        if (key !== null && typeof key === 'string') {
+                            setSelectedTeleoperatorRobotId(key);
+                        }
+                    }}
+                >
+                    {availableRobots.filter(isLeader).map((robot) => {
+                        return (
+                            <Item textValue={robot.name} key={robot.id}>
+                                <Text>{robot.name}</Text>
+                            </Item>
+                        );
+                    })}
+                </Picker>
+            )}
+
+            {teleoperatorKind === 'pose' &&
+                (availablePoseCameras.length === 0 ? (
+                    <Text>Add a camera to this environment first to use it for pose estimation.</Text>
+                ) : (
+                    <Picker
+                        label='Camera'
+                        width='100%'
+                        selectedKey={selectedPoseCameraId}
+                        onSelectionChange={(key) => {
+                            if (key !== null && typeof key === 'string') {
+                                setSelectedPoseCameraId(key);
+                            }
+                        }}
+                    >
+                        {availablePoseCameras.map((camera) => {
+                            return (
+                                <Item textValue={camera.name} key={camera.id}>
+                                    <Text>{camera.name}</Text>
+                                </Item>
+                            );
+                        })}
+                    </Picker>
+                ))}
 
             <Flex gap='size-100'>
                 <Button
                     variant='secondary'
+                    isDisabled={!canSubmit}
                     onPress={() => {
-                        if (selectedRobotId) {
-                            onAddRobot({
-                                robot_id: selectedRobotId,
-                                teleoperator: selectedTeleoperatorRobotId
-                                    ? { robot_id: selectedTeleoperatorRobotId, type: 'robot' }
-                                    : { type: 'none' },
-                            });
+                        if (selectedRobotId === null) {
+                            return;
                         }
+                        const teleoperator: RobotConfiguration['teleoperator'] =
+                            teleoperatorKind === 'robot' && selectedTeleoperatorRobotId
+                                ? { type: 'robot', robot_id: selectedTeleoperatorRobotId }
+                                : teleoperatorKind === 'pose' && selectedPoseCameraId
+                                  ? { type: 'pose', camera_id: selectedPoseCameraId }
+                                  : { type: 'none' };
+                        onAddRobot({ robot_id: selectedRobotId, teleoperator });
                     }}
                 >
                     Add

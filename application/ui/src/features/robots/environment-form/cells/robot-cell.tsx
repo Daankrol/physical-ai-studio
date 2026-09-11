@@ -4,8 +4,6 @@ import { $api } from '../../../../api/client';
 import { getRobotConnectionErrorTitle } from '../../../../api/errors';
 import { useProjectId } from '../../../projects/use-project';
 import { RobotViewer, UnavailableRobotViewer } from '../../controller/robot-viewer';
-import { PoseCameraCapture } from '../../pose-teleop/pose-camera-capture';
-import { usePoseTeleop } from '../../pose-teleop/use-pose-teleop';
 import { RobotModelsProvider } from '../../robot-models-context';
 import { AvailableSchemaRobot, isUnavailableRobot } from '../../robot-types';
 import { InlineAlert } from '../../setup-wizard/shared/inline-alert';
@@ -15,27 +13,27 @@ const AvailableRobotCell = ({
     robot,
     followerId,
     leaderId,
+    poseCameraId,
     cameraIds,
 }: {
     robot: AvailableSchemaRobot;
     followerId: string;
     leaderId?: string;
+    poseCameraId?: string;
     cameraIds: string[];
 }) => {
     const { project_id } = useProjectId();
-    const { joints, state, error, errorCode, warning, setFollowerSource, sendPoseLandmarks, restart } = useJointState(
+    const { joints, state, error, errorCode, warning, setFollowerSource, restart } = useJointState(
         project_id,
         followerId,
         leaderId,
-        cameraIds
+        cameraIds,
+        poseCameraId
     );
     useSynchronizeModelJoints(joints, robot.type);
 
     const isTeleoperating = state.follower_source === 'teleop';
-    const poseTeleop = usePoseTeleop({
-        sendPoseLandmarks,
-        onEnabledChange: (next) => setFollowerSource(next ? 'pose' : 'hold'),
-    });
+    const isPoseDriving = state.follower_source === 'pose';
 
     if (error) {
         return (
@@ -81,17 +79,9 @@ const AvailableRobotCell = ({
             position={'relative'}
         >
             <RobotViewer robot={robot} />
-            {poseTeleop.enabled && (
-                <PoseCameraCapture onLandmarks={poseTeleop.handleLandmarks} onError={poseTeleop.handleError} />
-            )}
             {warning && (
                 <View position={'absolute'} left={0} top={0} padding='size-100' maxWidth='size-4600'>
                     <InlineAlert variant='warning'>{warning}</InlineAlert>
-                </View>
-            )}
-            {poseTeleop.error && (
-                <View position={'absolute'} left={0} top={0} padding='size-100' maxWidth='size-4600'>
-                    <InlineAlert variant='error'>{poseTeleop.error}</InlineAlert>
                 </View>
             )}
             <View position={'absolute'} right={0} top={0} padding='size-100'>
@@ -108,9 +98,13 @@ const AvailableRobotCell = ({
                             Teleoperate
                         </Switch>
                     )}
-                    {state.pose_available === true && (
-                        <Switch isEmphasized isSelected={poseTeleop.enabled} onChange={poseTeleop.toggle}>
-                            Pose control (PoC)
+                    {poseCameraId !== undefined && (
+                        <Switch
+                            isEmphasized
+                            isSelected={isPoseDriving}
+                            onChange={(b) => setFollowerSource(b ? 'pose' : 'hold')}
+                        >
+                            Pose control
                         </Switch>
                     )}
                 </Flex>
@@ -122,10 +116,12 @@ const AvailableRobotCell = ({
 export const RobotCell = ({
     follower_id,
     leader_id,
+    pose_camera_id,
     camera_ids,
 }: {
     follower_id: string;
     leader_id?: string;
+    pose_camera_id?: string;
     camera_ids: string[];
 }) => {
     const { project_id } = useProjectId();
@@ -139,7 +135,13 @@ export const RobotCell = ({
 
     return (
         <RobotModelsProvider>
-            <AvailableRobotCell robot={robot} followerId={follower_id} leaderId={leader_id} cameraIds={camera_ids} />
+            <AvailableRobotCell
+                robot={robot}
+                followerId={follower_id}
+                leaderId={leader_id}
+                poseCameraId={pose_camera_id}
+                cameraIds={camera_ids}
+            />
         </RobotModelsProvider>
     );
 };

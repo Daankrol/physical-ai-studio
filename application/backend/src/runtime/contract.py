@@ -68,25 +68,6 @@ class StartRecordingCommand(CommandBase):
     task: str
 
 
-class PoseLandmark(BaseModel):
-    x: float
-    y: float
-    z: float
-    visibility: float = 1.0
-
-
-class SetPoseLandmarksCommand(CommandBase):
-    """Latest human-pose snapshot from the browser's PoseLandmarker.
-
-    Published every frame like ``set_follower_source``, not requested: a
-    dropped snapshot just means the next tick uses a slightly older pose, the
-    same tolerance teleop already has for a slow leader read.
-    """
-
-    command: Literal["set_pose_landmarks"] = "set_pose_landmarks"
-    landmarks: list[PoseLandmark]
-
-
 class SaveEpisodeCommand(BaseModel):
     command: Literal["save_episode"] = "save_episode"
     request_id: str
@@ -105,7 +86,6 @@ Command = Annotated[
     | StartTaskCommand
     | StopTaskCommand
     | StartRecordingCommand
-    | SetPoseLandmarksCommand
     | SaveEpisodeCommand
     | DiscardEpisodeCommand,
     Field(discriminator="command"),
@@ -117,6 +97,26 @@ class ObservationEvent(BaseModel):
     event: Literal["observation"] = "observation"
     data: dict[str, float]
     actions: dict[str, float] | None = None
+
+
+class PoseLandmarkData(BaseModel):
+    x: float
+    y: float
+    z: float
+    visibility: float = 1.0
+
+
+class PoseEvent(BaseModel):
+    """Skeleton overlay for the browser, estimated from a camera the session already reads.
+
+    Carries ``camera_id`` (not a feature key): the browser addresses camera
+    panels by database id, and the runtime document only ever carries a
+    sanitized camera *name*, so the id has to travel on the event itself.
+    """
+
+    event: Literal["pose"] = "pose"
+    camera_id: str
+    landmarks: list[PoseLandmarkData]
 
 
 class StateData(BaseModel):
@@ -165,7 +165,7 @@ class AckEvent(BaseModel):
     data: AckData
 
 
-RuntimeEvent = ObservationEvent | StateEvent | ErrorEvent | LifecycleEvent | AckEvent
+RuntimeEvent = ObservationEvent | StateEvent | ErrorEvent | LifecycleEvent | AckEvent | PoseEvent
 RuntimeEventAdapter: TypeAdapter[RuntimeEvent] = TypeAdapter(RuntimeEvent)
 
 
@@ -208,8 +208,9 @@ class QueueEventSink:
 
     def emit(self, event: RuntimeEvent) -> None:
         with self._lock:
-            if isinstance(event, ObservationEvent):
-                self._events = deque(item for item in self._events if not isinstance(item, ObservationEvent))
+            if isinstance(event, ObservationEvent | PoseEvent):
+                event_type = type(event)
+                self._events = deque(item for item in self._events if not isinstance(item, event_type))
             self._events.append(event)
 
     def get_nowait(self) -> RuntimeEvent:

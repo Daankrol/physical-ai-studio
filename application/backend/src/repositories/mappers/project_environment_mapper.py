@@ -7,6 +7,7 @@ from schemas.environment import (
     Environment,
     RobotEnvironmentConfiguration,
     TeleoperatorNone,
+    TeleoperatorPose,
     TeleoperatorRobot,
 )
 
@@ -17,17 +18,23 @@ class ProjectEnvironmentMapper(IBaseMapper):
     @staticmethod
     def build_robot_links(db_schema: Environment) -> list[EnvironmentRobotDB]:
         """Build standalone robot join rows (not attached to a parent) from the schema."""
-        return [
-            EnvironmentRobotDB(
-                environment_id=str(db_schema.id),
-                robot_id=str(robot.robot_id),
-                tele_operator_type=robot.tele_operator.type,
-                tele_operator_robot_id=(
-                    str(robot.tele_operator.robot_id) if isinstance(robot.tele_operator, TeleoperatorRobot) else None
-                ),
+        links = []
+        for robot in db_schema.robots:
+            tele_operator = robot.tele_operator
+            links.append(
+                EnvironmentRobotDB(
+                    environment_id=str(db_schema.id),
+                    robot_id=str(robot.robot_id),
+                    tele_operator_type=tele_operator.type,
+                    tele_operator_robot_id=(
+                        str(tele_operator.robot_id) if isinstance(tele_operator, TeleoperatorRobot) else None
+                    ),
+                    tele_operator_camera_id=(
+                        str(tele_operator.camera_id) if isinstance(tele_operator, TeleoperatorPose) else None
+                    ),
+                )
             )
-            for robot in db_schema.robots
-        ]
+        return links
 
     @staticmethod
     def build_camera_links(db_schema: Environment) -> list[EnvironmentCameraDB]:
@@ -59,11 +66,7 @@ class ProjectEnvironmentMapper(IBaseMapper):
         robots = [
             RobotEnvironmentConfiguration(
                 robot_id=UUID(link.robot_id),
-                tele_operator=(
-                    TeleoperatorRobot(robot_id=UUID(link.tele_operator_robot_id))
-                    if link.tele_operator_type == "robot" and link.tele_operator_robot_id is not None
-                    else TeleoperatorNone()
-                ),
+                tele_operator=ProjectEnvironmentMapper._teleoperator_from_link(link),
             )
             for link in model.robot_links
         ]
@@ -78,3 +81,11 @@ class ProjectEnvironmentMapper(IBaseMapper):
             created_at=model.created_at,
             updated_at=model.updated_at,
         )
+
+    @staticmethod
+    def _teleoperator_from_link(link: EnvironmentRobotDB) -> TeleoperatorRobot | TeleoperatorPose | TeleoperatorNone:
+        if link.tele_operator_type == "robot" and link.tele_operator_robot_id is not None:
+            return TeleoperatorRobot(robot_id=UUID(link.tele_operator_robot_id))
+        if link.tele_operator_type == "pose" and link.tele_operator_camera_id is not None:
+            return TeleoperatorPose(camera_id=UUID(link.tele_operator_camera_id))
+        return TeleoperatorNone()

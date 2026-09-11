@@ -38,16 +38,16 @@ export const EnvironmentShow = () => {
         cameras: environment.cameras?.map(({ id, name }) => ({ camera_id: id!, name: name! })) ?? [],
         robots:
             environment.robots?.map((robot) => {
+                const teleOperator = robot.tele_operator;
                 return {
                     robot_id: robot.robot.id,
                     name: robot.robot.name,
                     teleoperator:
-                        robot.tele_operator.type === 'robot'
-                            ? {
-                                  type: 'robot',
-                                  robot_id: robot.tele_operator.robot_id,
-                              }
-                            : { type: 'none' },
+                        teleOperator.type === 'robot'
+                            ? { type: 'robot', robot_id: teleOperator.robot_id }
+                            : teleOperator.type === 'pose'
+                              ? { type: 'pose', camera_id: teleOperator.camera_id }
+                              : { type: 'none' },
                 };
             }) ?? [],
     };
