@@ -55,7 +55,12 @@ export const useSynchronizeModelJoints = (joints: JointsState, robotType: Schema
 // the PoC human-pose-teleop mode (browser MediaPipe landmarks -> joint angles).
 export type FollowerSource = 'hold' | 'teleop' | 'policy' | 'pose';
 
-const RECOVERABLE_ERROR_CODES = new Set(['leader_connection_lost', 'pose_connection_lost']);
+const RECOVERABLE_ERROR_CODES = new Set([
+    'leader_connection_lost',
+    'pose_connection_lost',
+    'pose_init_failed',
+    'pose_not_supported',
+]);
 const EMPTY_CAMERA_IDS: string[] = [];
 
 export const isRecoverableRobotControlError = (errorCode: unknown): errorCode is string =>
@@ -108,7 +113,13 @@ export const useJointState = (
                 setState(payload['data']);
                 setError(null);
                 setErrorCode(null);
-                setWarning(null);
+                // Deliberately not clearing `warning` here: a recoverable error
+                // (e.g. pose_init_failed) is reported once via an 'error' event,
+                // often around the same time as the initial 'state' event on
+                // connect, and an unrelated later state change (model loaded,
+                // dataset loaded, ...) must not silently hide a condition that
+                // is still true. Only a fresh 'error' event or a reconnect
+                // (onOpen) replaces it.
                 hasFatalError.current = false;
             } else if (payload['event'] === 'error') {
                 if (isRecoverableRobotControlError(payload.error_code)) {

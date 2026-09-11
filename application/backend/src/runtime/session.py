@@ -135,18 +135,32 @@ class RuntimeSession:
     def _build_pose_worker(self, pose_config: dict[str, Any] | None) -> PoseWorker | None:
         """Build the pose-estimation worker when the teleoperator is a pose camera.
 
-        Failing to build one (missing ``mediapipe`` install, model download
-        failure) must not crash the session — it just means ``pose_available``
-        stays false and the client sees ``pose_not_supported`` if it tries to
-        switch into pose mode. See ``scripts/install_pose_deps.sh``.
+        Failing to build one (missing ``mediapipe`` install, missing native
+        libraries such as ``libGLESv2``, model download failure) must not
+        crash the session — it just means ``pose_available`` stays false and
+        the client sees ``pose_not_supported`` if it tries to switch into
+        pose mode. It must NOT fail silently either: this is exactly the
+        kind of error a user has no way to notice from the UI otherwise, so
+        it is reported as a (non-fatal, recoverable) error event. See
+        ``scripts/install_pose_deps.sh``.
         """
         if pose_config is None:
             return None
         try:
             model_path = default_model_path(get_settings().cache_dir / "pose")
             estimator = MediaPipePoseEstimator(model_path=model_path)
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to start pose estimation; pose teleoperation will be unavailable")
+            self._event_sink.emit(
+                ErrorEvent(
+                    message=(
+                        "Pose estimation failed to start"
+                        f"{': ' + str(exc) if str(exc) else ''}. See the backend logs, "
+                        "and application/backend/scripts/install_pose_deps.sh."
+                    ),
+                    error_code="pose_init_failed",
+                )
+            )
             return None
         return PoseWorker(estimator)
 

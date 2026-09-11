@@ -45,6 +45,24 @@ dependencies by hand instead:
 ./scripts/install_pose_deps.sh
 ```
 
+The script also verifies mediapipe can actually construct a `PoseLandmarker`, not just import
+cleanly. mediapipe's compiled task-vision library needs a real OpenGL ES library at runtime that
+the pip package does not provide; without it, construction fails with:
+
+```
+OSError: libGLESv2.so.2: cannot open shared object file: No such file or directory
+```
+
+On Debian/Ubuntu the script installs `libgles2` (via `sudo apt-get`) automatically if missing. On
+other platforms, install whatever OS package provides an OpenGL ES 2 ICD/dispatch library; macOS
+ships this as part of the system frameworks, so it should not need a separate install there.
+
+This failure is deliberately **not silent** in the running backend either: if the pose worker
+fails to start (missing native library, model download failure, ...), the session emits a
+`pose_init_failed` error, shown as a dismissable warning banner on the robot panel rather than
+failing invisibly. If you toggle "Pose control" and see nothing at all, check the backend logs
+for `Failed to start pose estimation` first.
+
 Without a pose teleoperator configured, none of this is imported, so skipping this step is fine
 for the OpenArm/SO-101 leader-arm teleop paths. Pose estimation only loads on first use inside a
 session that has a pose teleoperator.
@@ -118,16 +136,36 @@ Pose is a teleoperator kind, alongside "leader robot" and "none", persisted on t
 (`schemas.environment.TeleoperatorPose`, migration
 `20260911_000000_c2e5b8f1a3d6_add_pose_teleoperator_camera`):
 
-1. Register a robot of one of the supported types (`BimanualOpenArm_Follower` or
-   `BimanualSO101_Follower`) in a project.
+1. Register a robot in a project. Any type works for step 4's skeleton overlay (the built-in
+   `SO101_Follower` needs no plugin). Only `BimanualOpenArm_Follower` and `BimanualSO101_Follower`
+   are wired up to actually be _driven_ by pose (step 5); the "Bimanual SO-101" plugin
+   (`physicalai-bimanual-so101-plugin`) needs installing from Settings > Plugins first, which in
+   turn needs the `plugins` feature flag enabled (off by default, see below).
 2. Create or edit an environment. Add a camera to it first. Pose reuses an environment camera,
    so the picker only offers cameras already in this environment.
 3. Add the robot as a follower, choose "Human pose (camera)" as its teleoperator, and pick the
    camera.
 4. Open the environment. A "Pose control" switch appears next to "Teleoperate" on the robot panel.
    The camera panel for the chosen camera overlays the estimated skeleton whenever the session is
-   running, whether or not pose is actually driving the arm.
-5. Toggle "Pose control" on to drive the follower from the estimated pose.
+   running and a person is detected, whether or not pose is actually driving the arm. This is the
+   quickest way to check the model is working at all, without needing a supported dual-arm robot.
+5. Toggle "Pose control" on to drive the follower from the estimated pose. On an unsupported robot
+   this correctly refuses with `pose_not_supported`, shown as a warning rather than failing the
+   whole panel.
+
+### The Plugins page is hidden by default
+
+The Plugins nav item and route are gated behind a build-time feature flag
+(`PUBLIC_ENABLE_PLUGINS`), off by default, unrelated to this PoC. Without it you cannot see
+Settings > Plugins at all, so you cannot install the Bimanual SO-101 (or OpenArm) plugin. Enable
+it per-browser from devtools, no rebuild needed:
+
+```js
+window.setFeatureFlag("plugins", true);
+```
+
+then reload. Or set `PUBLIC_ENABLE_PLUGINS=true` in the environment before `npm run start` /
+`npm run build` for a permanent enable.
 
 ## Running the tests without hardware
 

@@ -162,3 +162,37 @@ async def test_worker_stop_before_run_does_not_connect_hardware() -> None:
     assert session._leader is not None
     assert not session._follower.is_connected()
     assert not session._leader.is_connected()
+
+
+def _document_with_pose(camera_key: str = "front") -> dict:
+    document = _document_with_cameras(camera_key)
+    document["init_args"]["pose"] = {"camera_key": camera_key, "camera_id": "camera-uuid"}
+    return document
+
+
+async def test_pose_worker_build_failure_reports_error_not_silence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broken pose estimator (missing native lib, bad model download, ...) must be visible."""
+    import runtime.session as session_module
+
+    def _boom(*args: Any, **kwargs: Any) -> None:
+        raise OSError("libGLESv2.so.2: cannot open shared object file")
+
+    monkeypatch.setattr(session_module, "MediaPipePoseEstimator", _boom)
+
+    events = QueueEventSink()
+    session = RuntimeSession(_document_with_pose(), event_sink=events)
+    await session.setup()
+
+    assert session._action_source is not None
+    assert session._action_source.pose_available is False
+
+    emitted = []
+    while True:
+        try:
+            emitted.append(events.get_nowait())
+        except queue.Empty:
+            break
+    error_events = [event for event in emitted if event.event == "error"]
+    assert len(error_events) == 1
+    assert error_events[0].error_code == "pose_init_failed"
+    assert "libGLESv2" in error_events[0].message
