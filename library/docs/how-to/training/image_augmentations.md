@@ -140,5 +140,5 @@ You can also enable augmentations from the command line without modifying the co
 ```bash
 physicalai fit \
     --config configs/physicalai/act.yaml \
-    --data.image_transforms physicalai.transforms.DefaultImageAugmentations
+    --data.image_transforms.class_path physicalai.transforms.DefaultImageAugmentations
 ```

@@ -16,7 +16,7 @@ from torchvision.transforms.v2 import functional as F  # noqa: N812
 _EXPECTED_SHARPNESS_LEN = 2
 
 _DEFAULT_N_SUBSET = 3
-"""How many of the default transforms are applied per image."""
+# How many of the default transforms are applied per image.
 
 
 class RandomChoice(Transform):
