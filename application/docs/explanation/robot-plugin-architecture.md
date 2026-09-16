@@ -222,7 +222,7 @@ payload data model:
 - `robot_field_ui` marks advanced configuration or applies a Studio-only
   required override, and can define contextual help (`info`) shown next to a field.
 - `robot_payload_ui` orders fields and adds `section`, `field`, `connection`,
-  `calibration`, and `info` items.
+  `ip_address`, `calibration`, and `info` items.
 - Field-like `robot_payload_ui` items (`field`, `connection`, `ip_address`,
   `calibration`) can include contextual help (`info`) with `title`, required
   `description`, optional `link_url`, and optional `variant` (`info` or `help`).

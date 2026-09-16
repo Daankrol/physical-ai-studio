@@ -21,7 +21,7 @@ Read `application/docs/robot-plugins.md` and the [`physicalai-studio-plugin` SDK
 2. **Implement the Runtime robot without Studio imports.** Follow the Runtime skill `physicalai-runtime-adding-a-robot-integration` in the Physical AI repository. The driver structurally implements `physicalai.robot.interface.Robot`; it does not need a Studio base class.
 
    - Implement idempotent `connect()`, safe `disconnect()`, and `is_connected()`.
-   - Expose `joint_names` in exactly the order used by observations and actions. `get_observation()` returns joint positions in that order and a `time.monotonic()` timestamp. `send_action(action, *, goal_time=...)` accepts an action with shape `(len(joint_names),)`.
+   - Expose `joint_names` in exactly the order used by observations and actions. `get_observation()` returns joint positions in that order and a `time.monotonic()` timestamp. The returned observation must also expose `sensor_data` and `images`, set to `None` when unused. `send_action(action, *, goal_time=...)` accepts an action with shape `(len(joint_names),)`.
    - Expose `device_ids` from constructor arguments without hardware I/O, including every exclusive device for composite robots.
    - Put vendor SDK imports behind the driver connection path when they are optional or heavy. Validate user-configured ports and addresses; do not invoke a shell with them.
    - Decorate every driver class returned to Studio with `@physicalai.config.export_config`. Studio serializes the disconnected driver to start its hardware-owner process; an undecorated driver fails with `ConfigError`.

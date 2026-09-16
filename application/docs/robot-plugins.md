@@ -106,9 +106,8 @@ physicalai-my-robot-plugin/
 ```
 
 The packages in [`openvinotoolkit/physicalai/packages`][physicalai-packages]
-contain complete examples. These packages demonstrates multiple robot types,
-serial discovery, payload validation, URDF assets, and driver builders. 
-
+contain complete examples. They demonstrate multiple robot types, serial
+discovery, payload validation, URDF assets, and driver builders.
 
 [physicalai-packages]: https://github.com/openvinotoolkit/physicalai/tree/main/packages
 
@@ -247,6 +246,7 @@ first-party connection control. The supported item kinds are:
 - `section`: groups items under an optional heading.
 - `field`: places a normal payload field.
 - `connection`: renders Studio's serial-device selector and owns its bindings.
+- `ip_address`: renders Studio's IP address control for a string field.
 - `calibration`: renders Studio's calibration JSON upload control for an object field.
 - `info`: renders read-only guidance or warnings.
 
