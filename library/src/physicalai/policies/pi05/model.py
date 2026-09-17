@@ -713,8 +713,9 @@ class Pi05Model(PeftModelMixin, SnapFlowModelMixin, RTCModelMixin, Model):
 
         if compile_model:
             torch.set_float32_matmul_precision("high")
-            # TODO(Eugene): max-autotune currently failed.  # noqa: TD003, FIX002
-            # Set to default for now, need further investigation.
+            # Default to "default" compile mode for training; max-autotune incurs
+            # excessive autotuning overhead that slows down training runs.
+            # See https://github.com/open-edge-platform/physical-ai-studio/issues/1165
             compile_mode = "default"
             self.sample_actions = torch.compile(self.sample_actions, mode=compile_mode)  # type: ignore[method-assign]
             self.forward = torch.compile(self.forward, mode=compile_mode)  # type: ignore[method-assign]
