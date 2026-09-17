@@ -224,11 +224,12 @@ jobs:
           DOCKER_RC_TAG: ${{ needs.validate.outputs.docker_rc_tag }}
           DOCKER_PATCH_TAG: ${{ needs.validate.outputs.docker_patch_tag }}
           DEVICE: ${{ matrix.device }}
+          OWNER: ${{ github.repository_owner }}
           FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
-          SOURCE_IMAGE="ghcr.io/open-edge-platform/physical-ai-studio-${DEVICE}:${DOCKER_RC_TAG}"
-          TARGET_IMAGE="ghcr.io/open-edge-platform/physical-ai-studio-${DEVICE}:${DOCKER_PATCH_TAG}"
+          SOURCE_IMAGE="ghcr.io/${OWNER}/physical-ai-studio-${DEVICE}:${DOCKER_RC_TAG}"
+          TARGET_IMAGE="ghcr.io/${OWNER}/physical-ai-studio-${DEVICE}:${DOCKER_PATCH_TAG}"
 
           echo "Pulling ${SOURCE_IMAGE}"
           docker pull "${SOURCE_IMAGE}"
@@ -259,17 +260,18 @@ jobs:
       - name: Sign Docker image
         uses: open-edge-platform/geti-ci/actions/sign-image@7d25e47329bbfcde4ee51ab3581aea8613e245e2
         with:
-          image-uri: ghcr.io/open-edge-platform/physical-ai-studio-${{ matrix.device }}:${{ needs.validate.outputs.docker_patch_tag }}
+          image-uri: ghcr.io/${{ github.repository_owner }}/physical-ai-studio-${{ matrix.device }}:${{ needs.validate.outputs.docker_patch_tag }}
 
       - name: Print summary
         env:
           DOCKER_PATCH_TAG: ${{ needs.validate.outputs.docker_patch_tag }}
           DEVICE: ${{ matrix.device }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           {
             echo "## Promotion Complete"
             echo ""
             echo "### Docker Images"
-            echo "- \`ghcr.io/open-edge-platform/physical-ai-studio-${DEVICE}:${DOCKER_PATCH_TAG}\`"
+            echo "- \`ghcr.io/${OWNER}/physical-ai-studio-${DEVICE}:${DOCKER_PATCH_TAG}\`"
             echo ""
           } >> "${GITHUB_STEP_SUMMARY}"

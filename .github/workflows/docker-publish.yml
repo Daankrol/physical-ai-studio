@@ -86,7 +86,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/open-edge-platform/physical-ai-studio-${{ matrix.device }}
+          images: ghcr.io/${{ github.repository_owner }}/physical-ai-studio-${{ matrix.device }}
           tags: |
             type=raw,value=${{ steps.version.outputs.version }}-dev-${{ steps.version.outputs.short-sha }}
             type=raw,value=${{ github.ref_name }}
