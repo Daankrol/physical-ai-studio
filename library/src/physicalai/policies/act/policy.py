@@ -3,6 +3,7 @@
 
 """Lightning module for ACT policy."""
 
+import copy
 import json
 import logging
 from pathlib import Path
@@ -25,13 +26,15 @@ from physicalai.export.backends import (
 )
 from physicalai.export.mixin_policy import ExportablePolicyMixin, ExportBackend
 from physicalai.gyms import Gym
-from physicalai.policies.act.config import ACTConfig
+from physicalai.policies.act.config import IMAGENET_MEAN, IMAGENET_STD, ACTConfig
 from physicalai.policies.act.model import ACT as ACTModel  # noqa: N811
 from physicalai.policies.act.preprocessor import ACTPreprocessor
 from physicalai.policies.base import Policy
 from physicalai.train.utils import reformat_dataset_to_match_policy
 
 logger = logging.getLogger(__name__)
+
+RGB_CHANNELS = 3
 
 # LeRobot's checkpoint state dict uses a flat "model."/"normalize_inputs."/"normalize_targets."/
 # "unnormalize_outputs." prefix scheme, while physicalai's ACTModel nests the core network under
@@ -120,6 +123,8 @@ class ACT(ExportablePolicyMixin, Policy):
         optimizer_lr: Learning rate for the optimizer.
         optimizer_weight_decay: Weight decay for the optimizer.
         optimizer_grad_clip_norm: Maximum gradient norm for gradient clipping.
+        use_imagenet_stats: Whether to normalize 3-channel visual observations using ImageNet
+            mean and std instead of empirical dataset statistics.
         dataset_stats: Dataset normalization statistics for eager model initialization
             (used when restoring from a checkpoint).
 
@@ -173,6 +178,7 @@ class ACT(ExportablePolicyMixin, Policy):
         optimizer_weight_decay: float = 1e-4,
         optimizer_grad_clip_norm: float = 10.0,
         compile_model: bool = False,
+        use_imagenet_stats: bool = True,
         # Eager initialization (for checkpoint loading)
         dataset_stats: dict[str, Any] | None = None,
     ) -> None:
@@ -229,6 +235,7 @@ class ACT(ExportablePolicyMixin, Policy):
                 optimizer_weight_decay=optimizer_weight_decay,
                 optimizer_grad_clip_norm=optimizer_grad_clip_norm,
                 compile_model=compile_model,
+                use_imagenet_stats=use_imagenet_stats,
             )
 
         # Save config as hyperparameters for checkpoint restoration
@@ -244,6 +251,16 @@ class ACT(ExportablePolicyMixin, Policy):
 
         # Eager initialization if dataset_stats is provided
         if dataset_stats is not None:
+            if self.config.use_imagenet_stats and weights_file is None:
+                dataset_stats = copy.deepcopy(dataset_stats)
+                for stat in dataset_stats.values():
+                    if (
+                        FeatureType(stat["type"]) == FeatureType.VISUAL
+                        and len(stat["shape"]) >= RGB_CHANNELS
+                        and stat["shape"][0] == RGB_CHANNELS
+                    ):
+                        stat["mean"] = list(IMAGENET_MEAN)
+                        stat["std"] = list(IMAGENET_STD)
             self._initialize_model(dataset_stats, weights_file)
 
         self._dataset_stats = dataset_stats
@@ -328,6 +345,7 @@ class ACT(ExportablePolicyMixin, Policy):
             optimizer_weight_decay=optimizer_weight_decay,
             optimizer_grad_clip_norm=optimizer_grad_clip_norm,
             compile_model=compile_model,
+            use_imagenet_stats=hf_config.get("use_imagenet_stats", True),
         )
 
         return config, dataset_stats, weights_file
@@ -351,13 +369,28 @@ class ACT(ExportablePolicyMixin, Policy):
         """
         features: dict[str, Feature] = {}
         for stat in dataset_stats.values():
+            ftype = cast("FeatureType", stat["type"])
+            shape = cast("tuple[int, ...]", stat["shape"])
+            if (
+                self.config.use_imagenet_stats
+                and weights_file is None
+                and FeatureType(ftype) == FeatureType.VISUAL
+                and len(shape) >= RGB_CHANNELS
+                and shape[0] == RGB_CHANNELS
+            ):
+                mean = list(IMAGENET_MEAN)
+                std = list(IMAGENET_STD)
+            else:
+                mean = cast("list[float]", stat["mean"])
+                std = cast("list[float]", stat["std"])
+
             features[str(stat["name"])] = Feature(
                 name=str(stat["name"]),
-                ftype=cast("FeatureType", stat["type"]),
-                shape=cast("tuple[int, ...]", stat["shape"]),
+                ftype=ftype,
+                shape=shape,
                 normalization_data=NormalizationParameters(
-                    mean=cast("list[float]", stat["mean"]),
-                    std=cast("list[float]", stat["std"]),
+                    mean=mean,
+                    std=std,
                 ),
             )
 
@@ -434,7 +467,16 @@ class ACT(ExportablePolicyMixin, Policy):
             reformat_dataset_to_match_policy(self, datamodule)
             return
 
-        stats_dict = train_dataset.stats
+        stats_dict = copy.deepcopy(train_dataset.stats)
+        if self.config.use_imagenet_stats:
+            for stat in stats_dict.values():
+                if (
+                    FeatureType(stat["type"]) == FeatureType.VISUAL
+                    and len(stat["shape"]) >= RGB_CHANNELS
+                    and stat["shape"][0] == RGB_CHANNELS
+                ):
+                    stat["mean"] = list(IMAGENET_MEAN)
+                    stat["std"] = list(IMAGENET_STD)
 
         self.hparams["dataset_stats"] = stats_dict
 
@@ -762,7 +804,7 @@ class ACT(ExportablePolicyMixin, Policy):
         extra_args["openvino"] = OpenVINOExportParameters(
             outputs=output_names,
             export_tokenizer=False,
-            compress_to_fp16=True,
+            compress_to_fp16=False,
             exporter_kwargs={},
             preprocessors_specs=preproc_specs,
             postprocessors_specs=postproc_specs,

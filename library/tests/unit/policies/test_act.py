@@ -315,7 +315,7 @@ class TestACTolicy:
                 "std": [1.0] * 3,
             },
         }
-        policy = ACT(dataset_stats=dataset_stats)
+        policy = ACT(dataset_stats=dataset_stats, use_imagenet_stats=False)
         batch = {
             "images.wrist": torch.ones(1, 3, 64, 64),
             "images.overhead": torch.ones(1, 3, 64, 64),
@@ -328,6 +328,61 @@ class TestACTolicy:
         expected_overhead = (1.0 - 0.2) / 0.1
         assert torch.isclose(normed["images.wrist"][0, 0, 0, 0], torch.tensor(expected_wrist), atol=1e-4)
         assert torch.isclose(normed["images.overhead"][0, 0, 0, 0], torch.tensor(expected_overhead), atol=1e-4)
+
+    def test_imagenet_stats_normalization(self):
+        """Visual features default to ImageNet mean and std when use_imagenet_stats is True."""
+        from physicalai.data import FeatureType
+        from physicalai.policies.act.config import IMAGENET_MEAN, IMAGENET_STD
+
+        dataset_stats = {
+            "observation.images.top": {
+                "name": "observation.images.top",
+                "type": FeatureType.VISUAL,
+                "shape": (3, 64, 64),
+                "mean": [0.1, 0.2, 0.3],
+                "std": [0.01, 0.02, 0.03],
+            },
+            "observation.state": {
+                "name": "observation.state",
+                "type": FeatureType.STATE,
+                "shape": (3,),
+                "mean": [1.0, 2.0, 3.0],
+                "std": [0.5, 0.5, 0.5],
+            },
+            "action": {
+                "name": "action",
+                "type": FeatureType.ACTION,
+                "shape": (3,),
+                "mean": [0.0] * 3,
+                "std": [1.0] * 3,
+            },
+        }
+        policy = ACT(dataset_stats=dataset_stats)
+        assert policy.config.use_imagenet_stats is True
+        # Visual stats should be overridden to ImageNet values
+        assert policy._dataset_stats["observation.images.top"]["mean"] == IMAGENET_MEAN
+        assert policy._dataset_stats["observation.images.top"]["std"] == IMAGENET_STD
+        # State stats should remain intact
+        assert policy._dataset_stats["observation.state"]["mean"] == [1.0, 2.0, 3.0]
+
+        batch = {
+            "images.top": torch.ones(1, 3, 64, 64),
+            "state": torch.tensor([[1.0, 2.0, 3.0]]),
+            "action": torch.zeros(1, 100, 3),
+            "extra.action_is_pad": torch.zeros(1, 100, dtype=torch.bool),
+        }
+        normed = policy.model._input_normalizer(dict(batch))
+        expected_top = (1.0 - IMAGENET_MEAN[0]) / IMAGENET_STD[0]
+        assert torch.isclose(normed["images.top"][0, 0, 0, 0], torch.tensor(expected_top), atol=1e-4)
+        assert torch.allclose(normed["state"], torch.zeros(1, 3), atol=1e-4)
+
+        # When use_imagenet_stats is False, empirical stats are preserved
+        policy_empirical = ACT(dataset_stats=dataset_stats, use_imagenet_stats=False)
+        assert policy_empirical.config.use_imagenet_stats is False
+        assert policy_empirical._dataset_stats["observation.images.top"]["mean"] == [0.1, 0.2, 0.3]
+        normed_empirical = policy_empirical.model._input_normalizer(dict(batch))
+        expected_top_emp = (1.0 - 0.1) / 0.01
+        assert torch.isclose(normed_empirical["images.top"][0, 0, 0, 0], torch.tensor(expected_top_emp), atol=1e-4)
 
     def test_remap_lerobot_act_state_dict_multi_and_single_camera(self):
         """Test checkpoint state-dict remapping for both single- and multi-camera checkpoints."""
