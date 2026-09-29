@@ -27,9 +27,9 @@ policy ──Take over──▶ handover ramp ──▶ teleop (recorded) ──
 - **Handover ramp.** Entering `teleop` blends from the last action sent to the live leader pose over `RUNTIME_TELEOP_HANDOVER_S` (default 1.0 s). The blend is relative to time, so it doesn't depend on joint units, which differ between robot plugins. Set it to `0` for the old instant behavior. It applies to every entry into `teleop`, so the Teleoperate switch and the recording page get the fix too. At the start of a recording both arms are usually at rest in the same pose, so the ramp is invisible there.
 - **Per-tick provenance.** `StudioActionSource.update()` records which source produced the action it returned: `hold`, `handover`, `teleop`, or `policy`. The runtime calls `update()`, sends the action, then calls `on_tick` on the same thread (`physicalai.runtime.core.RobotRuntime.run`), so `RecordingCallback` can read that value without a race.
 - **Record only human actions.** A frame is written only when that tick's source is `teleop` and the leader read on that tick succeeded. Hold, handover, stale-leader fallback, and policy ticks are never written. This changes behavior on purpose: Studio no longer records policy actions as demonstrations. No UI does that today.
-- **Mark saved correction episodes.** Persist a per-episode `human_correction` label alongside the dataset, while normal demonstrations remain `demonstration`. The dataset list and episode viewer show a "Human correction" badge; the label is for review, not a training feature or a rewrite of the task.
+- **Mark correction frames in the dataset.** Every recorded frame gets an `intervention` bool column, the same name, dtype and shape LeRobot's own DAgger strategy writes (`{"dtype": "bool", "shape": (1,), "names": None}`). Correction frames are `True`, normal demonstrations `False`. An episode with any `True` frame shows a "Human correction" badge in the dataset list and episode viewer. Because the label lives in the LeRobot data itself, it survives export, import, snapshots and episode deletion with no Studio-specific bookkeeping, and LeRobot HIL datasets imported into Studio get the badge for free. Policies never see it: Studio's converter puts unknown keys into `Observation.extra`, and LeRobot builds policy inputs only from `observation.*` and `action.*`. Ronald's WIP branch (`RHeckerIntel/rhecker/human-in-loop`) used a per-frame `source` int column the same way, but never migrated existing datasets (see below).
 - **No gaps inside an episode.** Arming the policy is rejected while an episode is open. A correction is always a single continuous stretch of human control.
-- **No new command kinds.** The UI composes `set_follower_source`, `start_recording`, `save_episode`, `discard_episode`, and `start_task`. Extend `start_recording` with an optional `origin="human_correction"` (default `"demonstration"`); `save_episode` and `discard_episode` remain acknowledged.
+- **No new command kinds.** The UI composes `set_follower_source`, `start_recording`, `save_episode`, `discard_episode`, and `start_task`. Extend `start_recording` with an optional `intervention: bool = False`; `save_episode` and `discard_episode` remain acknowledged.
 
 ## PR 1: backend (safe handover and clean labels)
 
@@ -57,13 +57,16 @@ This PR is useful without the UI because it fixes the takeover jump and the labe
 
 - `RecordingCallback.__init__` takes `action_origin: Callable[[], ActionOrigin]`. `on_tick` returns early unless `action_origin() == "teleop"`.
 - `RecordingState` counts frames per episode: reset in `start()`, increment in `add_frame()` only when the frame was written. `stop_episode()` raises `RuntimeError("No frames were recorded. Discard the episode.")` **before** clearing `is_recording` when the count is zero, so the episode stays open and can still be discarded. Without this, an operator who presses Save during the handover would get an empty save, and it is unclear what the LeRobot writer does with one.
-- Carry `origin` with the open episode. On `origin="human_correction"`, require a loaded model and leader as well as a loaded dataset, and do not mark an episode until a non-empty save succeeds.
+- `RecordingState.start(task, intervention)` stores the flag for the open episode; `add_frame` passes it through to the mutation. `start_recording` with `intervention=True` also requires a loaded model and a leader, not just a loaded dataset.
 
-### `backend/src/runtime/contract.py`, `backend/src/internal_datasets/`, `backend/src/schemas/dataset.py`
+### `backend/src/runtime/contract.py`, `backend/src/runtime/dataset_features.py`, `backend/src/internal_datasets/`, `backend/src/schemas/dataset.py`
 
-- Add the optional `origin` field to `StartRecordingCommand`. Keep the recording and frame feature schema unchanged: appending an `intervention` column to an existing LeRobot dataset would require migration.
-- Store correction episode indices in a small `studio/episode_origins.json` sidecar inside the dataset root, written into the recording mutation's cache after a successful save and copied back on finalization. A missing entry means `demonstration`, so existing and imported datasets work without a conversion. Use an atomic replace when writing the sidecar so interruption cannot truncate it. After the LeRobot save, retain a pending `(episode_index, origin)` in the recording mutation until the sidecar write succeeds. If that write fails, return an error, let a repeated `save_episode` retry **the marker only** (not the already-saved episode), and refuse copy-back/finalization until it succeeds; never delete the cache or report an unlabeled correction as saved. Test this injected-failure path and recovery.
-- Return `origin` (default `demonstration`) in both `EpisodeInfo` and `Episode`, using `InternalLeRobotDataset.get_episode_infos()` and `_build_episode_from_metadata()`. `DeleteEpisodesMutation` uses LeRobot's episode-deletion tool, which renumbers survivors and does not preserve Studio sidecars: remap surviving labels from old to new indices before overwriting the dataset. The sidecar travels with dataset copy, snapshot, download, and Studio import; absence on a foreign LeRobot import is expected.
+- Add `intervention: bool = False` to `StartRecordingCommand`.
+- `build_lerobot_dataset_features` adds the `intervention` feature, so every newly created dataset has it.
+- **Migrate existing datasets on load.** LeRobot validates frame keys strictly (`validate_frame` rejects extra features), so a dataset created before this change cannot accept `intervention` frames. This is what breaks Ronald's branch: `start_recording_mutation` only uses the features dict when *creating* a dataset, existing ones are copied and resumed with their old schema, every frame then fails validation, and `RecordingCallback.on_tick` swallows the exception, so frames are silently dropped. Fix it in `InternalLeRobotDataset.start_recording_mutation`: when the source dataset lacks `intervention`, build the cache with LeRobot's `lerobot.datasets.dataset_tools.add_features(dataset, {"intervention": (np.zeros((total_frames, 1), dtype=bool), feature_info)}, output_dir=cache_dir)` instead of `shutil.copytree`, then resume the cache for writing. The recording flow already copies the whole dataset into the cache every session, so this adds no extra copy: it rewrites the parquet data and copies the videos without re-encoding. The migrated cache replaces the original on finalize like any other recording, so each dataset is migrated once, the first time someone records into it.
+- `_process_frame` adds `"intervention": np.array([flag], dtype=bool)` to each frame, and `DatasetClient.add_frame`/`RecordingMutation.add_frame` take the flag.
+- Add `intervention: bool` to both `EpisodeInfo` and `Episode`: `True` when any frame in the episode is `True`, `False` when the column is missing (older or imported datasets that nobody has recorded into). Read it from the `intervention` column (`hf_dataset.select_columns(["episode_index", "intervention"])`, grouped once per request), not from per-episode stats, because migrated episodes may not have stats for the new feature.
+- Episode deletion needs no change: LeRobot's `delete_episodes` copies every column, so the flags stay with their frames when episodes are renumbered.
 
 ### Tests (`backend/tests/runtime/`)
 
@@ -74,7 +77,12 @@ This PR is useful without the UI because it fixes the takeover jump and the labe
   - New: a failed leader read reports origin `hold`, even in `teleop`.
 - `test_action_source_policy.py`: `start_task` is rejected with `recording_in_progress` while a recording is open and allowed after save or discard.
 - `test_recording_callback.py`: switch the helper to `action_origin`. Frames are written only for `teleop`. `handover`, `policy`, and `hold` are skipped. Saving an empty episode raises and leaves the episode open, and discard still works.
-- Dataset/episode tests: a saved correction appears as `human_correction` in both API shapes; a normal episode and an imported dataset without a sidecar appear as `demonstration`. Discard does not mark an episode; after deleting and renumbering episodes, the correct survivors keep their labels. Confirm the label survives cache copy-back and dataset export/import, while the action feature schema stays unchanged.
+- Dataset/episode tests (`backend/tests/internal_datasets/`):
+  - Recording with `intervention=True` into a **pre-existing dataset without the column** migrates it, saves the frames, and after finalize the dataset has the column, all old frames `False`, all new frames `True`. This is the regression test for the silent frame drop in Ronald's branch.
+  - A new dataset gets the column at creation; a normal recording writes `False`.
+  - `EpisodeInfo` and `Episode` report `intervention` correctly, and `False` for a dataset without the column.
+  - After deleting an earlier episode, the surviving correction episodes still report `intervention=True`.
+  - The migrated dataset still trains: build a `LeRobotDataModule` on it and run one `fast_dev_run` batch with ACT, confirming the aggregated stats load and the column ends up in `Observation.extra` only.
 
 ### Done when
 
@@ -103,7 +111,7 @@ The existing recording and inference tests still pass unchanged, except for the 
 ### `ui/src/features/robots/runtime-session-provider.tsx`
 
 - `onOpen`: send `setFollowerSource('teleop')` only when a dataset is given **without** a model. The recording page keeps its behavior, and the collection page starts in `hold`.
-- `startEpisode` keeps its current call shape but sends `origin: 'human_correction'` in `start_recording` only when the provider is in correction-collection mode; other recording requests use the default `demonstration`.
+- `startEpisode` keeps its current call shape but sends `intervention: true` in `start_recording` only when the provider is in correction-collection mode; the recording page keeps sending the default `false`.
 
 ### `ui/src/features/models/inference/inference-viewer.tsx`
 
@@ -120,14 +128,14 @@ With `collect` set:
 
 ### Dataset episode display: `ui/src/features/datasets/episodes/episode-tag.tsx` and `ui/src/routes/datasets/`
 
-- After API types are regenerated, show a compact "Human correction" badge next to the episode number/duration in the existing shared `EpisodeTag` so it appears in the episode list and detail header. Plain demonstrations keep their current display. The label is episode-level: there are no mixed-control frames to shade within a correction episode.
+- After API types are regenerated, show a compact "Human correction" badge next to the episode number/duration in the existing shared `EpisodeTag` when `episode.intervention` is true, so it appears in the episode list and detail header. Plain demonstrations keep their current display. Correction episodes are all-human, so there is nothing to shade inside one; if mixed episodes are added later, Ronald's `EpisodeChart` segment shading on his branch is ready to reuse with the per-frame column.
 
 ### Tests
 
 - Episode list and viewer tests: the badge survives a refresh from `EpisodeInfo` and `Episode`, and never appears for demonstrations or missing legacy metadata.
 - `inference-viewer.test.tsx`: in collect mode, Take over sends teleop then start_recording in order, Save sends save then hold, Play is disabled while recording, and a leaderless session disables the controls. Without collect mode the page is unchanged: the switch is present and nothing records.
 - A `start-inference-dialog` test: the checkbox adds `collect=1`.
-- A provider test, if one exists: model plus dataset does not auto-teleop; only correction collection sets `origin: 'human_correction'` on `start_recording`.
+- A provider test, if one exists: model plus dataset does not auto-teleop; only correction collection sets `intervention: true` on `start_recording`.
 
 ### Done when
 
@@ -160,6 +168,6 @@ Before step 7, confirm the dataset page shows the new episodes. The session copi
 ## Out of scope
 
 - **Original DAgger:** labeling states the policy visits without taking control. That needs a separate expert-query UI, and it's unclear whether a person can give reliable labels without driving.
-- **Recording autonomous frames** with an `intervention` flag, like LeRobot's `record_autonomous=true`. Add it only if you need the policy's frames for analysis. It needs a dataset feature migration, and training would have to filter those frames out.
+- **Recording autonomous frames**, like LeRobot's `record_autonomous=true` and Ronald's branch. The `intervention` column already supports it (policy frames would be `False` inside a mixed episode), but training would then have to drop non-intervention frames from correction episodes, and neither Studio's nor LeRobot's trainer does that today. Add it only if you need the policy's frames for analysis.
 - **Moving the leader to the follower** on actuated leaders (LeRobot's smooth handover). The follower-side ramp works with any leader. Add the leader-side move if operators find it uncomfortable to match the follower by hand.
 - Automatic takeover detection, intervention-rate dashboards, weighted losses, and remote retraining from a base model.
