@@ -13,6 +13,8 @@ import {
     Text,
 } from '@geti-ui/ui';
 
+import type { TrainingStepRange } from './training-steps';
+
 export const MIN_BATCH_SIZE_EXPONENT = 0;
 export const MAX_BATCH_SIZE_EXPONENT = 8;
 
@@ -46,6 +48,7 @@ interface TrainingParametersProps {
     maxEpochs: number;
     onMaxEpochsChange: (value: number) => void;
     batchSize: number;
+    trainingStepRange?: TrainingStepRange;
     onBatchSizeChange: (value: number) => void;
     numWorkers: Key | null;
     onNumWorkersChange: (value: Key | null) => void;
@@ -83,6 +86,7 @@ export const TrainingParameters = ({
     maxEpochs,
     onMaxEpochsChange,
     batchSize,
+    trainingStepRange,
     onBatchSizeChange,
     numWorkers,
     onNumWorkersChange,
@@ -164,6 +168,19 @@ export const TrainingParameters = ({
         <Flex direction='row' gap='size-150' width='100%'>
             <NumberField
                 label='Max Epochs'
+                description={
+                    trainingStepRange === undefined
+                        ? undefined
+                        : autoScaleBatchSize
+                          ? 'Training steps: set when training starts (Auto batch size)'
+                          : `Training steps: ${
+                                trainingStepRange.min === trainingStepRange.max
+                                    ? trainingStepRange.min.toLocaleString()
+                                    : [trainingStepRange.min, trainingStepRange.max]
+                                          .map((steps) => steps.toLocaleString())
+                                          .join('–')
+                            }`
+                }
                 value={maxEpochs}
                 onChange={onMaxEpochsChange}
                 minValue={1}
@@ -176,7 +193,9 @@ export const TrainingParameters = ({
                         <Content>
                             <Text>
                                 Total number of training epochs. Training will stop after this many full passes through
-                                the dataset. We recommend training for 5 to 10 epochs
+                                the dataset. We recommend training for 5 to 10 epochs. The step count excludes
+                                validation episodes and incomplete batches; validation episodes are selected at random,
+                                so the count may vary.
                             </Text>
                         </Content>
                     </ContextualHelp>
