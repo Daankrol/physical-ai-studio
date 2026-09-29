@@ -200,7 +200,7 @@ describe('TrainModelDialog', () => {
         await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
         await user.click(screen.getByRole('button', { name: 'Next' }));
 
-        expect(await screen.findByText('Training steps: 60')).toBeInTheDocument();
+        expect(await screen.findByText('Estimated training steps: 60')).toBeInTheDocument();
     });
 
     it('offers remote trainers when training a new model', async () => {

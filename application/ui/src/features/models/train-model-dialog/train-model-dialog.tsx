@@ -18,7 +18,7 @@ import { formatBytes, MODELS } from './policies';
 import { SetupStep } from './setup-step';
 import { TrainingDeviceInfo } from './training-device-info';
 import { MIN_EPOCHS_FOR_SNAPFLOW, TrainingParameters } from './training-parameters';
-import { getTrainingStepRange, TRAINING_VAL_SPLIT } from './training-steps';
+import { getEstimatedTrainingSteps, TRAINING_VAL_SPLIT } from './training-steps';
 import { TrainingSummaryNote } from './training-summary-note';
 import { useExportBackends } from './use-export-backends';
 import { useFeatureMapping } from './use-feature-mapping';
@@ -131,11 +131,11 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     // always runs the full max_epochs before distillation extends the run), so it
     // needs no clamp against max_epochs.
     const isSnapflowRequested = isSnapflowSupported && snapflowEnabled && maxEpochs >= MIN_EPOCHS_FOR_SNAPFLOW;
-    const trainingStepRange = useMemo(
+    const trainingSteps = useMemo(
         () =>
             selectedDatasetEpisodes === undefined
                 ? undefined
-                : getTrainingStepRange(
+                : getEstimatedTrainingSteps(
                       selectedDatasetEpisodes.map(({ length }) => length),
                       batchSize,
                       maxEpochs + (isSnapflowRequested ? snapflowDistillEpochs : 0)
@@ -390,7 +390,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                                 maxEpochs={maxEpochs}
                                 onMaxEpochsChange={setMaxEpochs}
                                 batchSize={batchSize}
-                                trainingStepRange={trainingStepRange}
+                                trainingSteps={trainingSteps}
                                 onBatchSizeChange={setBatchSize}
                                 numWorkers={numWorkers}
                                 onNumWorkersChange={setNumWorkers}
