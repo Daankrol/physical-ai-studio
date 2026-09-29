@@ -20,7 +20,7 @@ Latency was measured separately with Runtime's `InferenceLatencyBenchmark` on ex
 
 The run targeted 30k steps with a 30k-step LR decay schedule. Training stopped at step 27,647, after the 20k evaluation. No 30k checkpoint or result was produced.
 
-## Artifacts and reproduction
+## Artifacts and evaluation requirements
 
 The gated [Daankrol/pi05-snapflow-libero Hub repository](https://huggingface.co/Daankrol/pi05-snapflow-libero) holds the [10k checkpoint](https://huggingface.co/Daankrol/pi05-snapflow-libero/blob/main/checkpoints/snapflow-step010000.ckpt), [20k checkpoint](https://huggingface.co/Daankrol/pi05-snapflow-libero/blob/main/checkpoints/snapflow-step020000.ckpt), [result JSON files](https://huggingface.co/Daankrol/pi05-snapflow-libero/tree/main/results), [benchmark script](https://huggingface.co/Daankrol/pi05-snapflow-libero/blob/main/benchmark/benchmark_snapflow_libero.py), resolved training config, and Gemma license notice. The evaluated 20k checkpoint SHA-256 is `eec7419542f4b0cb5e2ab57948eb5e03c7ccad141db4d679c6716ee8a050322b`.
 
