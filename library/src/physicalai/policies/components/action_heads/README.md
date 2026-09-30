@@ -75,6 +75,14 @@ only `timesteps` and `step` differ:
 | XR0, RLDX1, MolmoAct2 | `t = 0`  | `t = 1` | `actions - noise` |
 | Pi05, SmolVLA         | `t = 1`  | `t = 0` | `noise - actions` |
 
+## `DiffusionActionHead`
+
+A ready-made `IterativeActionHead` for DDPM / DDIM diffusion; a subclass only
+writes `denoise`. It adds `enable_graph_replay()`, which replays `sample` from
+a CUDA or XPU graph at inference. Its [README](./diffusion/README.md) has the
+arguments, a tiny runnable head with a graph of its predictions, and measured
+timings, dtypes and graph replay.
+
 ## Pretrained weights
 
 The base classes register no parameters, buffers or submodules. A module's
