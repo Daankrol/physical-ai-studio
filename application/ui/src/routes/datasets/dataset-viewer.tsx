@@ -20,7 +20,7 @@ import { keepPreviousData } from '@tanstack/react-query';
 import { $api } from '../../api/client';
 import { useDeleteEpisodeQuery } from '../../features/datasets/episodes/use-episodes';
 import { useProjectId } from '../../features/projects/use-project';
-import { paths } from '../../router';
+import { paths } from '../../paths';
 import { pluralize } from '../../utils';
 import { ReactComponent as EmptyIllustration } from './../../assets/illustration.svg';
 import { useDataset } from './dataset-provider';
