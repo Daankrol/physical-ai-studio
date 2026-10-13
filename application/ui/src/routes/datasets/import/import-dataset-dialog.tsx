@@ -97,7 +97,7 @@ const useOnImportDone = (importJob: SchemaDatasetImportJob | undefined, onImport
         if (completedDatasetId) {
             onImportDoneEvent(completedDatasetId);
         }
-    }, [completedDatasetId, onImportDoneEvent]);
+    }, [completedDatasetId]);
 };
 
 const InternalImportDatasetDialog = ({

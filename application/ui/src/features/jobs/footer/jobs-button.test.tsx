@@ -82,7 +82,7 @@ describe('JobsButton', () => {
         await user.click(await screen.findByRole('menuitem', { name: 'Logs' }));
 
         // Logs is fullscreen and Jobs is gone.
-        expect(await screen.findByRole('heading', { name: 'Logs' })).toBeInTheDocument();
+        expect(await screen.findByRole('dialog', { name: 'Logs' })).toBeInTheDocument();
         expect(screen.queryByRole('tab', { name: /all jobs/i })).not.toBeInTheDocument();
 
         await user.click(screen.getByRole('button', { name: 'Close' }));
@@ -90,7 +90,7 @@ describe('JobsButton', () => {
         // Back on Jobs, with the previously-selected tab still selected.
         const runningTab = await screen.findByRole('tab', { name: /running jobs/i });
         expect(runningTab).toHaveAttribute('aria-selected', 'true');
-        expect(screen.queryByRole('heading', { name: 'Logs' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('dialog', { name: 'Logs' })).not.toBeInTheDocument();
     });
 
     it('resets to "All jobs" when Jobs is closed and reopened', async () => {

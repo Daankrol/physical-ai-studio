@@ -43,6 +43,15 @@ export default defineConfig({
     },
     tools: {
         rspack: {
+            // Scalar intentionally imports user-provided plugins at runtime. Rspack
+            // cannot statically resolve that expression, but it is not bundled and
+            // does not affect the API reference's normal operation.
+            ignoreWarnings: [
+                {
+                    module: /@scalar[\\/]api-reference[\\/]dist[\\/]standalone[\\/]lib[\\/]load-plugins-from-urls\.js$/,
+                    message: /Critical dependency: the request of a dependency is an expression/,
+                },
+            ],
             watchOptions: {
                 ignored: ['**/src-tauri/**'],
             },

@@ -19,7 +19,7 @@ globalThis.ResizeObserver ??= ResizeObserverStub as unknown as typeof ResizeObse
 //   `fetch: baseFetch = globalThis.fetch`
 // in openapi-fetch. If we defer to beforeAll, client.ts is imported first and
 // keeps a stale reference to the pre-patch fetch.
-server.listen({ onUnhandledRequest: 'bypass' });
+server.listen({ onUnhandledFrame: 'bypass' });
 
 afterEach(() => {
     server.resetHandlers();

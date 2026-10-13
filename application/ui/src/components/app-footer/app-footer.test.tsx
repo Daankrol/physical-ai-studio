@@ -95,7 +95,7 @@ describe('AppFooter', () => {
 
         await user.click(await screen.findByRole('button', { name: 'Logs' }));
 
-        expect(await screen.findByRole('heading', { name: 'Logs' })).toBeInTheDocument();
+        expect(await screen.findByRole('dialog', { name: 'Logs' })).toBeInTheDocument();
         expect(screen.queryByRole('tab', { name: /all jobs/i })).not.toBeInTheDocument();
     });
 });
