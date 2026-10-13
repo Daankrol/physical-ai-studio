@@ -1,8 +1,9 @@
-import '@testing-library/jest-dom';
-
-import { afterAll, afterEach } from 'vitest';
+import { afterAll, afterEach, expect } from '@rstest/core';
+import * as jestDomMatchers from '@testing-library/jest-dom/matchers';
 
 import { server } from './msw-node-setup';
+
+expect.extend(jestDomMatchers);
 
 // jsdom has no ResizeObserver; stub it globally for components that construct
 // one directly (e.g. log-content.tsx's auto-scroll-on-resize effect) instead

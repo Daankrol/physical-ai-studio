@@ -1,5 +1,5 @@
+import { rs } from '@rstest/core';
 import { screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
 
 import { render } from '../../../test-utils/render';
 import { PolicySelection } from './policy-selection';
@@ -8,7 +8,7 @@ const renderWithVram = (gib: number) =>
     render(
         <PolicySelection
             selectedPolicy='pi05'
-            onSelectionChange={vi.fn()}
+            onSelectionChange={rs.fn()}
             trainingDevice={{ type: 'cuda', name: 'A100', index: 0, memory: gib * 1024 ** 3 }}
         />
     );

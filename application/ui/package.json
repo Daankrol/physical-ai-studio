@@ -18,8 +18,8 @@
         "lint": "eslint \"src/**/*.ts*\" --max-warnings 0",
         "lint:fix": "eslint --fix \"./src/**/*.ts*\"",
         "preview": "rsbuild preview",
-        "test:unit": "vitest --config vitest.config.ts",
-        "test:unit:watch": "vitest --config vitest.config.ts --reporter=verbose --watch",
+        "test:unit": "rstest --config rstest.config.ts",
+        "test:unit:watch": "rstest --config rstest.config.ts --reporters verbose --watch",
         "test:component": "npx playwright test --config=playwright.config.ts",
         "type-check": "tsc --noEmit"
     },
@@ -59,10 +59,11 @@
         "@msw/playwright": "^0.7.0",
         "@msw/source": "^0.7.0",
         "@playwright/test": "^1.63.0",
-        "@rsbuild/core": "^2.1.6",
-        "@rsbuild/plugin-babel": "^2.0.1",
-        "@rsbuild/plugin-react": "^2.1.0",
+        "@rsbuild/core": "^2.2.11",
+        "@rsbuild/plugin-react": "^2.1.1",
         "@rsbuild/plugin-svgr": "^2.0.5",
+        "@rstest/adapter-rsbuild": "^0.12.3",
+        "@rstest/core": "^0.12.3",
         "@tanstack/eslint-plugin-query": "^5.101.3",
         "@testing-library/jest-dom": "^7.0.0",
         "@testing-library/react": "^16.3.2",
@@ -75,9 +76,6 @@
         "@types/uuid": "^11.0.0",
         "@typescript-eslint/eslint-plugin": "^8.71.1",
         "@typescript-eslint/parser": "^8.71.1",
-        "@vitejs/plugin-react": "^6.1.2",
-        "babel-plugin-react-compiler": "^1.0.0",
-        "babel-preset-react-app": "^10.1.0",
         "eslint": "^9.39.5",
         "eslint-import-resolver-typescript": "^4.4.5",
         "eslint-plugin-header": "^3.1.1",
@@ -96,9 +94,6 @@
         "openapi-typescript": "^7.13.0",
         "prettier": "^3.9.9",
         "typescript": "^5.8.3",
-        "typescript-eslint": "^8.71.1",
-        "vite": "^8.3.3",
-        "vite-plugin-svgr": "^5.2.0",
-        "vitest": "^4.1.10"
+        "typescript-eslint": "^8.71.1"
     }
 }

@@ -1,7 +1,7 @@
+import { rs } from '@rstest/core';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { HttpResponse } from 'msw';
-import { vi } from 'vitest';
 
 import { SchemaTrainJob } from '../../../api/openapi-spec';
 import { http } from '../../../api/utils';
@@ -41,11 +41,11 @@ const renderButton = () => render(<JobsButton />, { route: '/', path: '/' });
 
 describe('JobsButton', () => {
     beforeEach(() => {
-        vi.stubGlobal('EventSource', ImmediatelyClosingEventSource);
+        rs.stubGlobal('EventSource', ImmediatelyClosingEventSource);
     });
 
     afterEach(() => {
-        vi.unstubAllGlobals();
+        rs.unstubAllGlobals();
     });
 
     it('renders an enabled "Jobs" trigger even with an empty jobs list', async () => {
