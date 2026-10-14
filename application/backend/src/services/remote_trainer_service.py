@@ -1,4 +1,8 @@
 import asyncio
+import errno
+import socket
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from time import perf_counter
 from uuid import UUID, uuid4
@@ -13,11 +17,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.security import get_ssh_feature_availability
 from db.schema import JobDB
 from exceptions import (
+    InvalidResourceError,
     ResourceAlreadyExistsError,
     ResourceInUseError,
     ResourceNotFoundError,
     ResourceType,
+    SshAgentRequiredError,
+    SshAuthenticationError,
+    SshConnectionError,
     SshFeatureDisabledError,
+    SshHostKeyMismatchError,
+    SshHostKeyUnknownError,
 )
 from repositories.remote_trainer_repo import RemoteTrainerRepository
 from schemas.base_job import JobStatus, JobType
@@ -31,7 +41,9 @@ from schemas.remote_trainer import (
     RemoteTrainerUpdate,
 )
 from services import remote_trainer_tunnel_manager
-from services.ssh import persistent_trainer
+from services.ssh import host_installer, persistent_trainer
+from services.ssh.transport import SshTransport
+from training.policy_catalog import PolicyCatalog
 
 _HEALTH_CHECK_TIMEOUT_S = 5.0
 
@@ -46,12 +58,26 @@ _inflight_checks: dict[UUID, asyncio.Task[RemoteTrainerHealth]] = {}
 # Background trainer-container launches (see `_start_persistent_trainer_in_background`),
 # kept referenced so asyncio never garbage-collects a task mid-flight.
 _background_launches: dict[UUID, asyncio.Task[None]] = {}
+# Installation/reboot state is process-local; persist jobs if setup must survive Studio restarts.
+_background_installs: dict[UUID, asyncio.Task[None]] = {}
+# One process-wide lock serializes brief setup/job submissions; use per-trainer locks if contention matters.
+_setup_lock = asyncio.Lock()
+# Serialize local-port selection through tunnel binding across requests in this process.
+_port_allocation_lock = asyncio.Lock()
 
 
 # Fields whose column is nullable, so an explicit null in an update means "clear it"
 # rather than "not provided".
 _NULLABLE_UPDATE_FIELDS = frozenset({"ssh_host_alias", "ssh_connection", "ssh_remote_port", "ssh_local_port"})
 _CONNECTION_FIELDS = {"connection_mode", "url", "ssh_host_alias", "ssh_connection", "ssh_remote_port", "ssh_local_port"}
+
+
+def _local_port_conflict(port: int | None) -> ResourceAlreadyExistsError:
+    return ResourceAlreadyExistsError(
+        "Local port",
+        f"{port} is already in use on this Studio host. "
+        "Choose another local port under Advanced settings or leave it blank to assign one automatically.",
+    )
 
 
 class RemoteTrainerService:
@@ -71,6 +97,17 @@ class RemoteTrainerService:
         if remote_trainer is None:
             raise ResourceNotFoundError(ResourceType.REMOTE_TRAINER, str(remote_trainer_id))
         return remote_trainer
+
+    async def get_policy_catalog(self, remote_trainer_id: UUID) -> PolicyCatalog:
+        """Ask the registered trainer what its own Python environment can train."""
+        trainer = await self.get_remote_trainer(remote_trainer_id)
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False) as client:
+                response = await client.get(f"{str(trainer.url).rstrip('/')}/policies")
+                response.raise_for_status()
+                return PolicyCatalog.model_validate(response.json())
+        except (httpx.HTTPError, ValueError) as exc:
+            raise InvalidResourceError("remote trainer", "Cannot verify available policies") from exc
 
     async def check_remote_trainer(self, remote_trainer_id: UUID) -> RemoteTrainerHealth:
         """Check a configured trainer's liveness and available compute devices.
@@ -172,7 +209,7 @@ class RemoteTrainerService:
             # A trainer whose launch attempt began recently is given the
             # benefit of the doubt: it may simply still be pulling its image
             # or warming up its own health endpoint, not genuinely broken.
-            status, reason_code = "starting", "Waiting for the trainer container to come online…"
+            status, reason_code = "starting", "Waiting for the trainer container to come online"
 
         return RemoteTrainerHealth(
             remote_trainer_id=remote_trainer_id,
@@ -205,6 +242,18 @@ class RemoteTrainerService:
         except (httpx.HTTPError, ValidationError, ValueError):
             return None
 
+    async def _assign_local_port(self, config: RemoteTrainerCreate) -> RemoteTrainerCreate:
+        """Choose a stable, available loopback port before persisting the trainer URL."""
+        if config.connection_mode is not RemoteTrainerConnectionMode.SSH or config.ssh_local_port is not None:
+            return config
+        reserved = {trainer.ssh_local_port for trainer in await self.repo.list_ordered()}
+        while True:
+            with socket.socket() as listener:
+                listener.bind(("127.0.0.1", 0))
+                port = listener.getsockname()[1]
+            if port not in reserved:
+                return RemoteTrainerCreate.model_validate({**config.model_dump(), "ssh_local_port": port})
+
     async def _ensure_unique_ssh_remote_port(self, remote_trainer: RemoteTrainer) -> None:
         """Reject two managed containers that would bind the same host port."""
         if remote_trainer.connection_mode is not RemoteTrainerConnectionMode.SSH:
@@ -219,7 +268,8 @@ class RemoteTrainerService:
             ):
                 raise ResourceAlreadyExistsError(
                     "Remote trainer",
-                    f"SSH host already has a trainer using remote port {remote_trainer.ssh_remote_port}.",
+                    f"Remote port {remote_trainer.ssh_remote_port} is already used on this SSH host. "
+                    "Choose a different remote port under Advanced settings.",
                 )
 
     async def _require_no_active_jobs(self, remote_trainer_id: UUID) -> None:
@@ -234,6 +284,25 @@ class RemoteTrainerService:
         )
         if result.scalar_one_or_none() is not None:
             raise ResourceInUseError(ResourceType.REMOTE_TRAINER, remote_trainer_id)
+
+    @staticmethod
+    @asynccontextmanager
+    async def allow_job_submission(remote_trainer_id: UUID | None) -> AsyncIterator[None]:
+        """Keep setup checks and job persistence atomic for managed trainers."""
+        if remote_trainer_id is None:
+            yield
+            return
+        async with _setup_lock:
+            if remote_trainer_id in _background_installs or persistent_trainer.get_launch_failure(
+                remote_trainer_id
+            ) in {
+                "reboot_required",
+                "relogin_required",
+                "reboot_blocked_active_containers",
+                "nvidia_driver_unavailable",
+            }:
+                raise ResourceInUseError(ResourceType.REMOTE_TRAINER, remote_trainer_id)
+            yield
 
     @staticmethod
     async def _cancel_launch(remote_trainer_id: UUID) -> None:
@@ -281,29 +350,171 @@ class RemoteTrainerService:
         task.add_done_callback(_clear)
 
     async def create_remote_trainer(
-        self, config: RemoteTrainerCreate, accepted_host_key_fingerprint: str | None = None
+        self,
+        config: RemoteTrainerCreate,
+        accepted_host_key_fingerprint: str | None = None,
+        install_prerequisites: bool = False,
     ) -> RemoteTrainer:
-        """Persist a trainer endpoint, requiring SSH availability for managed trainers."""
+        """Persist a trainer endpoint, optionally installing prerequisites before launching it."""
+        if install_prerequisites and config.connection_mode is not RemoteTrainerConnectionMode.SSH:
+            raise InvalidResourceError("remote_trainer", "Prerequisite installation requires an SSH trainer")
         self._require_ssh_feature_if_tunneled(config.connection_mode)
-        remote_trainer = RemoteTrainer(id=uuid4(), **config.model_dump())
-        await self._ensure_unique_ssh_remote_port(remote_trainer)
-        try:
-            saved = await self.repo.save(remote_trainer)
-        except IntegrityError as error:
-            await self.session.rollback()
-            raise ResourceAlreadyExistsError(
-                "Remote trainer",
-                "A trainer with this URL is already configured.",
-            ) from error
-        try:
-            await remote_trainer_tunnel_manager.sync_tunnel(saved, accepted_host_key_fingerprint)
-        except Exception:
-            await self.repo.delete_by_id(saved.id)
-            raise
-        self._start_persistent_trainer_in_background(saved, accepted_host_key_fingerprint)
+        async with _port_allocation_lock:
+            for attempt in range(3):
+                assigned = await self._assign_local_port(config)
+                remote_trainer = RemoteTrainer(id=uuid4(), **assigned.model_dump())
+                await self._ensure_unique_ssh_remote_port(remote_trainer)
+                try:
+                    saved = await self.repo.save(remote_trainer)
+                except IntegrityError as error:
+                    await self.session.rollback()
+                    if config.connection_mode is RemoteTrainerConnectionMode.SSH:
+                        if config.ssh_local_port is None and attempt < 2:
+                            continue
+                        if config.ssh_local_port is not None:
+                            raise _local_port_conflict(config.ssh_local_port) from error
+                    raise ResourceAlreadyExistsError(
+                        "Remote trainer",
+                        "A trainer with this URL is already configured.",
+                    ) from error
+                try:
+                    await remote_trainer_tunnel_manager.sync_tunnel(saved, accepted_host_key_fingerprint)
+                    break
+                except Exception as error:
+                    await self.repo.delete_by_id(saved.id)
+                    if isinstance(error, OSError) and error.errno == errno.EADDRINUSE:
+                        if config.ssh_local_port is None and attempt < 2:
+                            continue
+                        raise _local_port_conflict(saved.ssh_local_port) from error
+                    raise
+        if install_prerequisites:
+            await self.install_remote_trainer(saved.id)
+        else:
+            self._start_persistent_trainer_in_background(saved, accepted_host_key_fingerprint)
         return saved
 
-    async def update_remote_trainer(
+    @staticmethod
+    async def _install_ssh_prerequisites(trainer: RemoteTrainer) -> str:
+        target = persistent_trainer._ssh_target(trainer)
+        async with SshTransport(target) as transport:
+            outcome = await host_installer.install(transport)
+        if outcome == "relogin_required":
+            # New SSH logins inherit group changes; the install session cannot.
+            async with SshTransport(target) as transport:
+                return await host_installer.install(transport, check_only=True)
+        return outcome
+
+    async def install_remote_trainer(self, remote_trainer_id: UUID) -> None:
+        """Start a user-requested prerequisite installation; report progress via health."""
+        trainer = await self.get_remote_trainer(remote_trainer_id)
+        if trainer.connection_mode is not RemoteTrainerConnectionMode.SSH:
+            raise InvalidResourceError("remote_trainer", "Prerequisite installation requires an SSH trainer")
+        self._require_ssh_feature_if_tunneled(trainer.connection_mode)
+
+        async def _install() -> None:
+            try:
+                outcome = await self._install_ssh_prerequisites(trainer)
+                if outcome == "ready":
+                    await persistent_trainer.start(trainer)
+                else:
+                    persistent_trainer.set_install_failure(remote_trainer_id, outcome)
+            except (SshHostKeyMismatchError, SshHostKeyUnknownError):
+                persistent_trainer.set_install_failure(remote_trainer_id, "ssh_install_host_key_failed")
+                logger.exception("SSH host key validation failed for trainer '{}'", trainer.name)
+            except (SshAuthenticationError, SshAgentRequiredError):
+                persistent_trainer.set_install_failure(remote_trainer_id, "ssh_install_auth_failed")
+                logger.exception("SSH authentication failed for trainer '{}'", trainer.name)
+            except SshConnectionError:
+                persistent_trainer.set_install_failure(remote_trainer_id, "ssh_install_connection_failed")
+                logger.exception("SSH connection or transfer failed for trainer '{}'", trainer.name)
+            except Exception:
+                persistent_trainer.set_install_failure(remote_trainer_id, "installation_failed")
+                logger.exception("Failed to install prerequisites for SSH trainer '{}'", trainer.name)
+            finally:
+                persistent_trainer.set_install_phase(remote_trainer_id, None)
+                if _background_installs.get(remote_trainer_id) is asyncio.current_task():
+                    _background_installs.pop(remote_trainer_id, None)
+
+        async with _setup_lock:
+            if remote_trainer_id in _background_installs:
+                raise ResourceInUseError(ResourceType.REMOTE_TRAINER, remote_trainer_id)
+            await self._require_no_active_jobs(remote_trainer_id)
+            await self._cancel_launch(remote_trainer_id)
+            persistent_trainer.set_install_failure(remote_trainer_id, None)
+            persistent_trainer.set_install_phase(remote_trainer_id, "Installing host prerequisites")
+            _background_installs[remote_trainer_id] = asyncio.create_task(_install())
+
+    async def reboot_installed_host(self, remote_trainer_id: UUID) -> None:  # noqa: PLR0915 - safety checks stay together.
+        """Reboot only after driver installation explicitly requested it and the user confirms."""
+        trainer = await self.get_remote_trainer(remote_trainer_id)
+        self._require_ssh_feature_if_tunneled(trainer.connection_mode)
+
+        async def _reboot() -> None:  # noqa: PLR0912 - reboot safety checks stay in one workflow.
+            try:
+                target = persistent_trainer._ssh_target(trainer)
+                async with SshTransport(target) as transport:
+                    containers = await transport.run_command(
+                        ["sh", "-c", 'if [ "$(id -u)" -eq 0 ]; then docker ps -q; else sudo -n docker ps -q; fi']
+                    )
+                    if not containers.ok:
+                        persistent_trainer.set_install_failure(remote_trainer_id, "docker_unavailable")
+                        return
+                    if containers.stdout.strip():
+                        persistent_trainer.set_install_failure(remote_trainer_id, "reboot_blocked_active_containers")
+                        return
+                    before = await transport.run_command(["cat", "/proc/sys/kernel/random/boot_id"])
+                    if not before.ok:
+                        raise RuntimeError("Could not read remote boot ID")
+                    try:
+                        reboot = await transport.run_command(["sudo", "-n", "reboot"])
+                        if not reboot.ok:
+                            persistent_trainer.set_install_failure(remote_trainer_id, "reboot_failed")
+                            return
+                    except SshConnectionError:
+                        # A successful reboot often drops the SSH channel before it reports an exit status.
+                        pass
+                for _ in range(300):
+                    await asyncio.sleep(2)
+                    try:
+                        async with SshTransport(target) as transport:
+                            after = await transport.run_command(["cat", "/proc/sys/kernel/random/boot_id"])
+                            if not after.ok or after.first_line() == before.first_line():
+                                continue
+                            persistent_trainer.set_install_phase(remote_trainer_id, "Verifying installed prerequisites")
+                            outcome = await host_installer.install(transport)
+                            break
+                    except SshConnectionError:
+                        pass  # The host is expected to be offline while rebooting.
+                else:
+                    persistent_trainer.set_install_failure(remote_trainer_id, "reboot_failed")
+                    return
+                if outcome == "relogin_required":
+                    outcome = await self._install_ssh_prerequisites(trainer)
+                if outcome == "ready":
+                    await persistent_trainer.start(trainer)
+                else:
+                    persistent_trainer.set_install_failure(remote_trainer_id, outcome)
+            except Exception:
+                persistent_trainer.set_install_failure(remote_trainer_id, "reboot_failed")
+                logger.exception("Could not reboot SSH trainer '{}' after installation", trainer.name)
+            finally:
+                persistent_trainer.set_install_phase(remote_trainer_id, None)
+                if _background_installs.get(remote_trainer_id) is asyncio.current_task():
+                    _background_installs.pop(remote_trainer_id, None)
+
+        async with _setup_lock:
+            if (
+                trainer.connection_mode is not RemoteTrainerConnectionMode.SSH
+                or persistent_trainer.get_launch_failure(remote_trainer_id)
+                not in {"reboot_required", "reboot_blocked_active_containers", "nvidia_driver_unavailable"}
+                or remote_trainer_id in _background_installs
+            ):
+                raise InvalidResourceError("remote_trainer", "No rebootable host setup state is available")
+            await self._require_no_active_jobs(remote_trainer_id)
+            persistent_trainer.set_install_phase(remote_trainer_id, "Waiting for SSH host to reboot")
+            _background_installs[remote_trainer_id] = asyncio.create_task(_reboot())
+
+    async def update_remote_trainer(  # noqa: PLR0912 - handle explicit local-port conflicts on save and bind
         self,
         remote_trainer_id: UUID,
         update: RemoteTrainerUpdate,
@@ -313,46 +524,62 @@ class RemoteTrainerService:
         remote_trainer = await self.repo.get_by_id(remote_trainer_id)
         if remote_trainer is None:
             raise ResourceNotFoundError(ResourceType.REMOTE_TRAINER, str(remote_trainer_id))
-        try:
-            # exclude_unset (not exclude_none) so an explicit null clears an existing
-            # tunnel field instead of being dropped as "not provided".
-            data = update.model_dump(exclude_unset=True)
-            data = {k: v for k, v in data.items() if v is not None or k in _NULLABLE_UPDATE_FIELDS}
-            validated = RemoteTrainerCreate.model_validate(
-                {
-                    **remote_trainer.model_dump(),
-                    **data,
-                }
-            )
-            should_normalize_connection = (
-                "connection_mode" in data
-                or "url" in data
-                or any(data.get(field) is not None for field in _CONNECTION_FIELDS - {"connection_mode", "url"})
-            )
-            if should_normalize_connection:
-                self._require_ssh_feature_if_tunneled(validated.connection_mode)
-                data.update(validated.model_dump(include=_CONNECTION_FIELDS))
-            connection_changed = any(
-                getattr(remote_trainer, field) != getattr(validated, field) for field in _CONNECTION_FIELDS
-            )
-            if connection_changed and (
-                remote_trainer.connection_mode is RemoteTrainerConnectionMode.SSH
-                or validated.connection_mode is RemoteTrainerConnectionMode.SSH
-            ):
-                await self._require_no_active_jobs(remote_trainer_id)
-            await self._ensure_unique_ssh_remote_port(remote_trainer.model_copy(update=validated.model_dump()))
-            saved = await self.repo.update(remote_trainer, data)
-        except IntegrityError as error:
-            await self.session.rollback()
-            raise ResourceAlreadyExistsError(
-                "Remote trainer",
-                "A trainer with this URL is already configured.",
-            ) from error
-        try:
-            await remote_trainer_tunnel_manager.sync_tunnel(saved, accepted_host_key_fingerprint)
-        except Exception:
-            await self.repo.update(saved, remote_trainer.model_dump(include={"name", *_CONNECTION_FIELDS}))
-            raise
+        if remote_trainer_id in _background_installs:
+            raise ResourceInUseError(ResourceType.REMOTE_TRAINER, remote_trainer_id)
+        async with _port_allocation_lock:
+            for attempt in range(3):
+                auto_port = False
+                validated: RemoteTrainerCreate = remote_trainer
+                try:
+                    # Keep explicit nulls for nullable tunnel fields.
+                    data = update.model_dump(exclude_unset=True)
+                    data = {k: v for k, v in data.items() if v is not None or k in _NULLABLE_UPDATE_FIELDS}
+                    validated = RemoteTrainerCreate.model_validate({**remote_trainer.model_dump(), **data})
+                    auto_port = (
+                        validated.connection_mode is RemoteTrainerConnectionMode.SSH
+                        and validated.ssh_local_port is None
+                    )
+                    validated = await self._assign_local_port(validated)
+                    should_normalize_connection = (
+                        "connection_mode" in data
+                        or "url" in data
+                        or any(data.get(field) is not None for field in _CONNECTION_FIELDS - {"connection_mode", "url"})
+                        or auto_port
+                    )
+                    if should_normalize_connection:
+                        self._require_ssh_feature_if_tunneled(validated.connection_mode)
+                        data.update(validated.model_dump(include=_CONNECTION_FIELDS))
+                    connection_changed = any(
+                        getattr(remote_trainer, field) != getattr(validated, field) for field in _CONNECTION_FIELDS
+                    )
+                    if connection_changed and (
+                        remote_trainer.connection_mode is RemoteTrainerConnectionMode.SSH
+                        or validated.connection_mode is RemoteTrainerConnectionMode.SSH
+                    ):
+                        await self._require_no_active_jobs(remote_trainer_id)
+                    await self._ensure_unique_ssh_remote_port(remote_trainer.model_copy(update=validated.model_dump()))
+                    saved = await self.repo.update(remote_trainer, data)
+                except IntegrityError as error:
+                    await self.session.rollback()
+                    if auto_port and attempt < 2:
+                        continue
+                    if validated.connection_mode is RemoteTrainerConnectionMode.SSH and not auto_port:
+                        raise _local_port_conflict(validated.ssh_local_port) from error
+                    raise ResourceAlreadyExistsError(
+                        "Remote trainer",
+                        "A trainer with this URL is already configured.",
+                    ) from error
+                try:
+                    await remote_trainer_tunnel_manager.sync_tunnel(saved, accepted_host_key_fingerprint)
+                    break
+                except Exception as error:
+                    await self.repo.update(saved, remote_trainer.model_dump(include={"name", *_CONNECTION_FIELDS}))
+                    if isinstance(error, OSError) and error.errno == errno.EADDRINUSE:
+                        if auto_port and attempt < 2:
+                            continue
+                        await remote_trainer_tunnel_manager.sync_tunnel(remote_trainer)
+                        raise _local_port_conflict(saved.ssh_local_port) from error
+                    raise
         if remote_trainer.connection_mode is RemoteTrainerConnectionMode.SSH:
             await self._cancel_launch(remote_trainer_id)
             host_changed = (
@@ -376,6 +603,8 @@ class RemoteTrainerService:
         remote_trainer = await self.repo.get_by_id(remote_trainer_id)
         if remote_trainer is None:
             raise ResourceNotFoundError(ResourceType.REMOTE_TRAINER, str(remote_trainer_id))
+        if remote_trainer_id in _background_installs:
+            raise ResourceInUseError(ResourceType.REMOTE_TRAINER, remote_trainer_id)
         if remote_trainer.connection_mode is RemoteTrainerConnectionMode.SSH:
             await self._require_no_active_jobs(remote_trainer_id)
         await self._cancel_launch(remote_trainer_id)

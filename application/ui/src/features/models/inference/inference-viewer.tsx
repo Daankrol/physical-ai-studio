@@ -1,9 +1,11 @@
 import { useCallback, useState } from 'react';
 
 import {
+    AlertDialog,
     Button,
     ButtonGroup,
     ComboBox,
+    DialogContainer,
     Flex,
     Heading,
     Item,
@@ -16,7 +18,7 @@ import {
 import { Back, DownloadIcon, Pause, Play } from '@geti-ui/ui/icons';
 
 import { $api } from '../../../api/client';
-import { paths } from '../../../router';
+import { paths } from '../../../paths';
 import { formatKeyCombo, getEffectiveBindings } from '../../hotkeys/key-combo';
 import { useHotkey } from '../../hotkeys/use-hotkey';
 import { useProjectId } from '../../projects/use-project';
@@ -35,8 +37,10 @@ const errorMessage = (error: unknown) => (error instanceof Error ? error.message
 
 export const InferenceViewer = ({ tasks, collect = false, defaultTask }: InferenceViewerProps) => {
     const { project_id } = useProjectId();
+    // Keep the typed prompt when the field loses focus; dataset tasks are suggestions.
     const [task, setTask] = useState<string>(defaultTask ?? tasks[0] ?? '');
     const [actionError, setActionError] = useState<string>();
+    const [isEmptyPromptDialogOpen, setIsEmptyPromptDialogOpen] = useState(false);
 
     const {
         model,
@@ -208,9 +212,9 @@ export const InferenceViewer = ({ tasks, collect = false, defaultTask }: Inferen
                         <Back fill='white' />
                     </Link>
                     <Heading>Model Run {model?.name}</Heading>
-                    <ComboBox flex isRequired allowsCustomValue={false} inputValue={task} onInputChange={setTask}>
-                        {tasks.map((taskText, index) => (
-                            <Item key={index}>{taskText}</Item>
+                    <ComboBox flex aria-label='Task prompt' allowsCustomValue inputValue={task} onInputChange={setTask}>
+                        {tasks.map((taskText) => (
+                            <Item key={taskText}>{taskText}</Item>
                         ))}
                     </ComboBox>
                     {collect ? (
@@ -280,7 +284,9 @@ export const InferenceViewer = ({ tasks, collect = false, defaultTask }: Inferen
                                 variant='primary'
                                 isDisabled={!canResumePolicy}
                                 isPending={startTask.isPending}
-                                onPress={() => startTask.mutate(task)}
+                                onPress={() =>
+                                    task.trim() === '' ? setIsEmptyPromptDialogOpen(true) : startTask.mutate(task)
+                                }
                             >
                                 <Play fill='white' />
                                 Play
@@ -312,6 +318,26 @@ export const InferenceViewer = ({ tasks, collect = false, defaultTask }: Inferen
                 {actionError && <div role='alert'>{actionError}</div>}
                 <RobotControlView environment={environment} isReady={state.connected} joints={observation} />
             </Flex>
+            <DialogContainer onDismiss={() => setIsEmptyPromptDialogOpen(false)}>
+                {isEmptyPromptDialogOpen && (
+                    <AlertDialog
+                        title='Start without a task prompt?'
+                        variant='warning'
+                        primaryActionLabel='Start anyway'
+                        secondaryActionLabel='Cancel'
+                        onPrimaryAction={() => {
+                            setIsEmptyPromptDialogOpen(false);
+                            startTask.mutate(task);
+                        }}
+                        onSecondaryAction={() => setIsEmptyPromptDialogOpen(false)}
+                    >
+                        <Text>
+                            The task prompt is empty. Policies that follow language instructions, such as Pi0.5, will
+                            run without an instruction.
+                        </Text>
+                    </AlertDialog>
+                )}
+            </DialogContainer>
         </RobotModelsProvider>
     );
 };

@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 from core.backend_instance import get_backend_instance_id
+from exceptions import TrainerContainerLaunchError
 from schemas.hardware import DeviceType
 from schemas.remote_trainer import RemoteTrainer
 from services.ssh import docker_ops
@@ -59,6 +60,22 @@ def get_launch_failure(remote_trainer_id: UUID) -> str | None:
     return _launch_failure.get(remote_trainer_id)
 
 
+def set_install_phase(remote_trainer_id: UUID, phase: str | None) -> None:
+    """Report or clear the phase of an explicitly requested host installation."""
+    if phase is None:
+        _launch_phase.pop(remote_trainer_id, None)
+    else:
+        _launch_phase[remote_trainer_id] = phase
+
+
+def set_install_failure(remote_trainer_id: UUID, reason: str | None) -> None:
+    """Expose a safe installation result through the existing trainer health endpoint."""
+    if reason is None:
+        _launch_failure.pop(remote_trainer_id, None)
+    else:
+        _launch_failure[remote_trainer_id] = reason
+
+
 def is_within_startup_grace_period(remote_trainer_id: UUID) -> bool:
     """True while a launch is running, or recently began and hasn't been confirmed reachable yet."""
     if remote_trainer_id in _launch_phase:
@@ -86,7 +103,7 @@ def _ssh_target(remote_trainer: RemoteTrainer) -> AliasTarget | DirectTarget:
     return DirectTarget(connection.hostname, connection.port, connection.user, connection.identity_file)
 
 
-async def start(remote_trainer: RemoteTrainer, accepted_host_key_fingerprint: str | None = None) -> None:
+async def start(remote_trainer: RemoteTrainer, accepted_host_key_fingerprint: str | None = None) -> None:  # noqa: PLR0915
     """Ensure an SSH trainer has a running container."""
     if remote_trainer.connection_mode.value != "ssh":
         return
@@ -98,12 +115,12 @@ async def start(remote_trainer: RemoteTrainer, accepted_host_key_fingerprint: st
     name = _container_name(remote_trainer.id)
     _launch_started_at[remote_trainer.id] = datetime.now(UTC)
     _launch_failure.pop(remote_trainer.id, None)
-    _launch_phase[remote_trainer.id] = f"Connecting to '{target.name}'…"
+    _launch_phase[remote_trainer.id] = f"Connecting to '{target.name}'"
     try:
         async with SshTransport(
             target, settings, accepted_host_key_fingerprint=accepted_host_key_fingerprint
         ) as transport:
-            _launch_phase[remote_trainer.id] = "Checking Docker…"
+            _launch_phase[remote_trainer.id] = "Checking Docker"
             docker = await transport.run_command(["docker", "version", "--format", "{{.Server.Version}}"])
             if not docker.ok:
                 _launch_failure[remote_trainer.id] = "docker_unavailable"
@@ -114,19 +131,22 @@ async def start(remote_trainer: RemoteTrainer, accepted_host_key_fingerprint: st
             if existing:
                 await docker_ops.stop_and_remove_container(transport, name, settings.ssh_container_stop_timeout_s)
             backend_instance_id = get_backend_instance_id()
-            _launch_phase[remote_trainer.id] = "Detecting accelerator…"
+            _launch_phase[remote_trainer.id] = "Detecting accelerator"
             cuda = await transport.run_command(["nvidia-smi", "-L"])
-            xpu = await transport.run_command(["xpu-smi", "discovery"])
+            xpu = await transport.run_command(["clinfo", "-l"])
 
-            device = DeviceType.CUDA if cuda.ok else DeviceType.XPU if xpu.ok else None
+            intel_gpu = xpu.ok and any(
+                "Device #" in line and "Intel" in line and "CPU" not in line for line in xpu.stdout.splitlines()
+            )
+            device = DeviceType.CUDA if cuda.ok else DeviceType.XPU if intel_gpu else None
             if device is None:
                 _launch_failure[remote_trainer.id] = "accelerator_unavailable"
                 raise ValueError("No supported CUDA or XPU accelerator found on SSH trainer")
-            _launch_phase[remote_trainer.id] = "Resolving trainer image…"
+            _launch_phase[remote_trainer.id] = "Resolving trainer image"
             image = await docker_ops.resolve_protocol_image(transport, device, DEFAULT_PROTOCOL_VERSION, settings)
-            _launch_phase[remote_trainer.id] = "Verifying trainer image…"
+            _launch_phase[remote_trainer.id] = "Verifying trainer image"
             await verify_image_signature(image, settings)
-            _launch_phase[remote_trainer.id] = "Pulling trainer image…"
+            _launch_phase[remote_trainer.id] = "Pulling trainer image"
             await docker_ops.pull_image(transport, image, settings)
             labels = docker_ops.management_labels(
                 job_id=str(remote_trainer.id),
@@ -149,7 +169,7 @@ async def start(remote_trainer: RemoteTrainer, accepted_host_key_fingerprint: st
             )
             # The tunnel needs a stable loopback port for the reusable trainer container.
             argv[argv.index("127.0.0.1::8001")] = f"127.0.0.1:{remote_port}:8001"
-            _launch_phase[remote_trainer.id] = "Starting trainer container…"
+            _launch_phase[remote_trainer.id] = "Starting trainer container"
             # A leftover container from a previous attempt for this trainer (crash,
             # retried save, deleted-then-recreated trainer) can still hold this
             # exact port; `docker run` refuses to bind it a second time. Only ever
@@ -158,7 +178,12 @@ async def start(remote_trainer: RemoteTrainer, accepted_host_key_fingerprint: st
             await docker_ops.remove_stale_containers_on_port(
                 transport, remote_port, backend_instance_id, str(remote_trainer.id)
             )
-            await docker_ops.launch_container(transport, argv, remote_trainer.name)
+            try:
+                await docker_ops.launch_container(transport, argv, remote_trainer.name)
+            except TrainerContainerLaunchError as error:
+                if any(marker in error.message.lower() for marker in ("already allocated", "address already in use")):
+                    _launch_failure[remote_trainer.id] = "remote_port_in_use"
+                raise
     finally:
         _launch_phase.pop(remote_trainer.id, None)
 

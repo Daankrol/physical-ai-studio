@@ -4,6 +4,7 @@ import {
     ActionButton,
     Button,
     ButtonGroup,
+    Checkbox,
     Content,
     Dialog,
     DialogTrigger,
@@ -34,6 +35,9 @@ import { useSshHostAliases } from './use-ssh-host-aliases';
 
 import classes from './remote-trainer-form.module.css';
 
+const SSH_HOST_SETUP_URL =
+    'https://github.com/open-edge-platform/physical-ai-studio/blob/main/' +
+    'application/docs/07-remote-training.md#prepare-an-ssh-host';
 const AWS_STACK_TEMPLATE_URL = encodeURIComponent(
     'https://physical-ai-studio.s3.eu-west-1.amazonaws.com/aws-cf-templates/remote-trainer.yaml'
 );
@@ -72,7 +76,8 @@ export const RemoteTrainerForm = ({
     );
     const [sshIdentityFile, setSshIdentityFile] = useState(remoteTrainer?.ssh_connection?.identity_file ?? '');
     const [sshRemotePort, setSshRemotePort] = useState<number | undefined>(remoteTrainer?.ssh_remote_port ?? 8001);
-    const [sshLocalPort, setSshLocalPort] = useState<number | undefined>(remoteTrainer?.ssh_local_port ?? 8001);
+    const [sshLocalPort, setSshLocalPort] = useState<number | undefined>(remoteTrainer?.ssh_local_port ?? undefined);
+    const [installPrerequisites, setInstallPrerequisites] = useState(false);
     const isEditing = remoteTrainer !== undefined;
     const { aliases } = useSshHostAliases(sshAvailable);
     const { save, reset, isPending, error } = useRemoteTrainerFormMutation(remoteTrainer);
@@ -124,6 +129,7 @@ export const RemoteTrainerForm = ({
     const submit = (acceptedHostKeyFingerprint?: string) => {
         save(values, {
             onSuccess: close,
+            installPrerequisites: !isEditing && isSsh && installPrerequisites,
             acceptedHostKeyFingerprint,
             onHostKeyConfirmationRequired: requestConfirmation,
         });
@@ -131,10 +137,7 @@ export const RemoteTrainerForm = ({
 
     const hasValidSshHost = isManual ? sshHostname.trim() !== '' : sshHostAlias.trim() !== '';
     const canSubmit =
-        name.trim() !== '' &&
-        (isSsh
-            ? sshAvailable && hasValidSshHost && Boolean(sshRemotePort) && Boolean(sshLocalPort)
-            : url.trim() !== '');
+        name.trim() !== '' && (isSsh ? sshAvailable && hasValidSshHost && Boolean(sshRemotePort) : url.trim() !== '');
 
     const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
@@ -199,38 +202,6 @@ export const RemoteTrainerForm = ({
                             {isSsh && !sshAvailable && <Text>SSH is unavailable in this environment.</Text>}
                             {isSsh && sshAvailable && (
                                 <Flex direction='column' gap='size-100'>
-                                    <div className={classes.fieldRow}>
-                                        <NumberField
-                                            isRequired
-                                            label='Remote port'
-                                            value={sshRemotePort}
-                                            onChange={setSshRemotePort}
-                                            minValue={1}
-                                            maxValue={65535}
-                                            formatOptions={{ useGrouping: false }}
-                                            contextualHelp={
-                                                <InfoHelp title='Remote port'>
-                                                    Port where the trainer listens remotely.
-                                                </InfoHelp>
-                                            }
-                                            width='100%'
-                                        />
-                                        <NumberField
-                                            isRequired
-                                            label='Local port'
-                                            value={sshLocalPort}
-                                            onChange={setSshLocalPort}
-                                            minValue={1}
-                                            maxValue={65535}
-                                            formatOptions={{ useGrouping: false }}
-                                            contextualHelp={
-                                                <InfoHelp title='Local port'>
-                                                    Loopback port the tunnel binds to on this Studio host.
-                                                </InfoHelp>
-                                            }
-                                            width='100%'
-                                        />
-                                    </div>
                                     <Tabs
                                         selectedKey={sshHostSource}
                                         onSelectionChange={(key) => setSshHostSource(key as SshHostSource)}
@@ -318,6 +289,65 @@ export const RemoteTrainerForm = ({
                                                     />
                                                 )}
                                             </DialogTrigger>
+                                        </Flex>
+                                    )}
+                                    <details>
+                                        <summary className={classes.advancedSettingsToggle}>Advanced settings</summary>
+                                        <div className={classes.fieldRow}>
+                                            <NumberField
+                                                label='Remote port'
+                                                value={sshRemotePort}
+                                                onChange={setSshRemotePort}
+                                                minValue={1}
+                                                maxValue={65535}
+                                                formatOptions={{ useGrouping: false }}
+                                                contextualHelp={
+                                                    <InfoHelp title='Remote port'>
+                                                        Port on the SSH host where the trainer is exposed. Change it if
+                                                        the port is already in use.
+                                                    </InfoHelp>
+                                                }
+                                                width='100%'
+                                            />
+                                            <NumberField
+                                                label='Local port'
+                                                value={sshLocalPort}
+                                                onChange={setSshLocalPort}
+                                                minValue={1}
+                                                maxValue={65535}
+                                                formatOptions={{ useGrouping: false }}
+                                                contextualHelp={
+                                                    <InfoHelp title='Local port'>
+                                                        Port on this Studio host for the SSH tunnel. Leave blank to
+                                                        assign one automatically.
+                                                    </InfoHelp>
+                                                }
+                                                width='100%'
+                                            />
+                                        </div>
+                                    </details>
+                                    {!isEditing && (
+                                        <Flex alignItems='center' gap='size-50'>
+                                            <Checkbox
+                                                isSelected={installPrerequisites}
+                                                onChange={setInstallPrerequisites}
+                                            >
+                                                Set up Docker and GPU support
+                                            </Checkbox>
+                                            <InfoHelp title='SSH host setup'>
+                                                On Ubuntu 24.04 or 26.04, Studio checks the selected SSH host and
+                                                installs missing Docker and NVIDIA or Intel GPU packages before pulling
+                                                the trainer image. Missing prerequisites require passwordless sudo. A
+                                                reboot needs separate confirmation; SSH re-login may also be needed.
+                                                Docker access grants root-equivalent privileges.{' '}
+                                                <Link
+                                                    href={SSH_HOST_SETUP_URL}
+                                                    target='_blank'
+                                                    rel='noopener noreferrer'
+                                                >
+                                                    How to prepare an SSH host
+                                                </Link>
+                                            </InfoHelp>
                                         </Flex>
                                     )}
                                 </Flex>

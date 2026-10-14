@@ -1,6 +1,6 @@
+import { rs } from '@rstest/core';
 import { act, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SchemaModel } from '../../api/openapi-spec';
 import useWebSocketWithResponse from '../../components/websockets/use-websocket-with-response';
@@ -9,9 +9,9 @@ import { getMockedEnvironment } from '../../test-utils/mocks/mock-environment';
 import { render } from '../../test-utils/render';
 import { RuntimeSessionProvider, useRuntimeSession } from './runtime-session-provider';
 
-vi.mock('../../components/websockets/use-websocket-with-response', () => ({ default: vi.fn() }));
+rs.mock('../../components/websockets/use-websocket-with-response', () => ({ default: rs.fn() }));
 
-const sendJsonMessageAndWait = vi.fn(async () => ({ event: 'state', data: { is_recording: true } }));
+const sendJsonMessageAndWait = rs.fn(async () => ({ event: 'state', data: { is_recording: true } }));
 const environment = getMockedEnvironment({
     robots: [
         {
@@ -59,7 +59,7 @@ const renderProvider = (collect: boolean, withModel = false, withDataset = withM
             model={withModel ? model : undefined}
             dataset={withDataset ? getMockedDataset() : undefined}
             inferenceDevice={withModel ? ({ backend: 'pytorch', device: 'cpu' } as never) : undefined}
-            onError={vi.fn()}
+            onError={rs.fn()}
         >
             <StartEpisode />
         </RuntimeSessionProvider>,
@@ -68,9 +68,9 @@ const renderProvider = (collect: boolean, withModel = false, withDataset = withM
 
 describe('RuntimeSessionProvider correction recording command', () => {
     beforeEach(() => {
-        vi.clearAllMocks();
-        vi.mocked(useWebSocketWithResponse).mockReturnValue({
-            sendJsonMessage: vi.fn(),
+        rs.clearAllMocks();
+        rs.mocked(useWebSocketWithResponse).mockReturnValue({
+            sendJsonMessage: rs.fn(),
             sendJsonMessageAndWait,
             readyState: 1,
         } as never);
@@ -90,7 +90,7 @@ describe('RuntimeSessionProvider correction recording command', () => {
 
     it('loads the model and its training dataset without auto-entering teleop', async () => {
         renderProvider(true, true);
-        const onOpen = vi.mocked(useWebSocketWithResponse).mock.calls[0]?.[1]?.onOpen;
+        const onOpen = rs.mocked(useWebSocketWithResponse).mock.calls[0]?.[1]?.onOpen;
 
         await act(async () => {
             onOpen?.(new Event('open'));
@@ -115,7 +115,7 @@ describe('RuntimeSessionProvider correction recording command', () => {
 
     it('requests guarded teleop for a dataset-only recording session', async () => {
         renderProvider(false, false, true);
-        const onOpen = vi.mocked(useWebSocketWithResponse).mock.calls[0]?.[1]?.onOpen;
+        const onOpen = rs.mocked(useWebSocketWithResponse).mock.calls[0]?.[1]?.onOpen;
 
         await act(async () => {
             onOpen?.(new Event('open'));

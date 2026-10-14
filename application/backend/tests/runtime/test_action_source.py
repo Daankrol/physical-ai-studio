@@ -243,7 +243,7 @@ def test_unknown_position_space_fails_closed_even_with_torque_capability() -> No
 def test_leader_read_failure_returns_hold_origin_after_successful_manual_entry() -> None:
     follower = FakeRobot([_observation([0, 0], 1)])
     leader = _PoseLeader([0, 0], observation_error="lost")
-    source, mailbox, _ = _source(follower=follower, leader=leader, fps=1)
+    source, _, _ = _source(follower=follower, leader=leader, fps=1)
     # Manually establish a confirmed mode to isolate the tick provenance behavior.
     source._follower_source = "teleop"
     source._hold_target = np.array([0, 0], dtype=np.float32)

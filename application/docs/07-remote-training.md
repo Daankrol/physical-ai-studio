@@ -4,6 +4,27 @@ Remote training executes a training job on a GPU-equipped trainer host. Studio u
 
 Use remote training when the Studio backend host does not meet the policy's GPU requirements or when training must run on dedicated infrastructure.
 
+## Prepare an SSH host
+
+If you select **Set up Docker and GPU support** for an Ubuntu SSH trainer, Studio installs missing packages and configures Docker on that host. The SSH user needs passwordless sudo for these changes (and for a separately confirmed reboot); an already-ready host does not need it for the prerequisite check. A root SSH user does not need sudo.
+
+On the **SSH host**, have an administrator grant the dedicated SSH user non-interactive sudo. For example, replace `trainer` with the SSH username you enter in Studio:
+
+```bash
+sudo visudo -f /etc/sudoers.d/physicalai-trainer
+```
+
+Add this line in the editor and save:
+
+```text
+trainer ALL=(ALL) NOPASSWD: ALL
+```
+
+Verify the file has permissions `0440` (`sudo chmod 0440 /etc/sudoers.d/physicalai-trainer` if needed), then log in as that SSH user and check `sudo -n true` succeeds without a prompt before selecting setup in Studio. If it fails, ask the host administrator to check the sudoers policy. Do not put the rule on the Studio backend host: installation runs on the trainer host.
+
+> [!WARNING]
+> `NOPASSWD: ALL` grants unrestricted root access to that SSH user. Use only a trusted, dedicated account on a host you administer; consult your administrator before enabling it. Docker group membership, which Studio may also add, is root-equivalent. If you cannot grant this access, have an administrator prepare Docker and GPU support manually instead of selecting automatic setup.
+
 ## AWS
 
 Studio can create a GPU-backed remote trainer in your AWS account and connect to it through an SSH tunnel.
@@ -58,7 +79,7 @@ Open the completed stack's **Outputs** tab, then return to the **Add remote trai
 4. Set **Key path** to the private key file corresponding to the public key passed to CloudFormation. The path is resolved on the Studio backend host.
 6. Select **Add trainer**.
 
-After adding the trainer, return to [Training Policies](./06-training-policies.md) to create and start a model training job.
+Studio automatically assigns an available local loopback port for each SSH trainer. After adding the trainer, return to [Training Policies](./06-training-policies.md) to create and start a model training job.
 
 ## Remove an AWS trainer
 

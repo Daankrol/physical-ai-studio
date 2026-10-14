@@ -24,7 +24,11 @@ describe('RemoteTrainerForm', () => {
         expect(screen.getByText('Connect through SSH when the trainer is not directly reachable.')).toBeInTheDocument();
         expect(screen.getByRole('tab', { name: /connection details/i })).toHaveAttribute('aria-selected', 'true');
         expect(screen.getByRole('textbox', { name: /^User/ })).toHaveValue('ec2-user');
-        expect(screen.getByRole('textbox', { name: /local port/i })).toHaveValue('8001');
+        expect(screen.getByRole('textbox', { name: /remote port/i })).not.toBeVisible();
+        expect(screen.getByRole('textbox', { name: /local port/i })).not.toBeVisible();
+        await user.click(screen.getByText('Advanced settings'));
+        expect(screen.getByRole('textbox', { name: /remote port/i })).toHaveValue('8001');
+        expect(screen.getByRole('textbox', { name: /local port/i })).toHaveValue('');
         expect(screen.queryByRole('textbox', { name: /trainer url/i })).not.toBeInTheDocument();
     });
 
@@ -32,6 +36,7 @@ describe('RemoteTrainerForm', () => {
         const user = userEvent.setup();
         const fingerprint = 'SHA256:first-seen-host-key';
         let created: Record<string, unknown> | undefined;
+        let requestedInstallation = false;
         let requestedConfirmation: { fingerprint: string; onConfirm: () => void } | undefined;
 
         server.use(
@@ -47,6 +52,7 @@ describe('RemoteTrainerForm', () => {
                         { status: 428 }
                     );
                 }
+                requestedInstallation = new URL(request.url).searchParams.get('install_prerequisites') === 'true';
                 created = (await request.json()) as Record<string, unknown>;
                 return HttpResponse.json(getMockedRemoteTrainer({ id: 'trainer-1' }), { status: 201 });
             })
@@ -67,6 +73,16 @@ describe('RemoteTrainerForm', () => {
         await user.clear(screen.getByRole('textbox', { name: /^User/ }));
         await user.type(screen.getByRole('textbox', { name: /^User/ }), 'trainer');
         await user.type(screen.getByRole('textbox', { name: /key path/i }), '~/.ssh/trainer');
+        const infoButtons = screen.getAllByRole('button', { name: /Information$/ });
+        await user.click(infoButtons[infoButtons.length - 1]);
+        expect(await screen.findByRole('heading', { name: 'SSH host setup' })).toBeVisible();
+        expect(screen.getByText(/missing prerequisites require passwordless sudo/i)).toBeVisible();
+        expect(screen.getByRole('link', { name: 'How to prepare an SSH host' })).toHaveAttribute(
+            'href',
+            expect.stringContaining('07-remote-training.md#prepare-an-ssh-host')
+        );
+        await user.keyboard('{Escape}');
+        await user.click(screen.getByRole('checkbox', { name: 'Set up Docker and GPU support' }));
 
         expect(screen.getByRole('button', { name: 'Add trainer' })).toBeEnabled();
         await user.click(screen.getByRole('button', { name: 'Add trainer' }));
@@ -75,6 +91,7 @@ describe('RemoteTrainerForm', () => {
         requestedConfirmation?.onConfirm();
 
         await waitFor(() => expect(created).toBeDefined());
+        expect(requestedInstallation).toBe(true);
         expect(created).toMatchObject({
             connection_mode: 'ssh',
             url: null,
@@ -86,7 +103,7 @@ describe('RemoteTrainerForm', () => {
                 identity_file: '~/.ssh/trainer',
             },
             ssh_remote_port: 8001,
-            ssh_local_port: 8001,
+            ssh_local_port: null,
         });
     });
 
@@ -106,6 +123,7 @@ describe('RemoteTrainerForm', () => {
 
         renderForm({ remoteTrainer: manualTrainer });
 
+        expect(screen.queryByRole('checkbox', { name: /Set up Docker and GPU support/i })).not.toBeInTheDocument();
         expect(await screen.findByRole('tab', { name: /connection details/i })).toHaveAttribute(
             'aria-selected',
             'true'
@@ -114,6 +132,35 @@ describe('RemoteTrainerForm', () => {
         expect(screen.getByRole('textbox', { name: /^Port/ })).toHaveValue('2,222');
         expect(screen.getByRole('textbox', { name: /^User/ })).toHaveValue('');
         expect(screen.getByRole('textbox', { name: /key path/i })).toHaveValue('~/.ssh/trainer');
+        await userEvent.setup().click(screen.getByText('Advanced settings'));
+        expect(screen.getByRole('textbox', { name: /remote port/i })).toHaveValue('8001');
+    });
+
+    it('allows editing both SSH tunnel ports', async () => {
+        const user = userEvent.setup();
+        let updated: Record<string, unknown> | undefined;
+        server.use(
+            http.patch('/api/remote-trainers/{remote_trainer_id}', async ({ request }) => {
+                updated = (await request.json()) as Record<string, unknown>;
+                return HttpResponse.json(getMockedRemoteTrainer());
+            })
+        );
+        renderForm({
+            remoteTrainer: getMockedRemoteTrainer({
+                connection_mode: 'ssh',
+                ssh_connection: { hostname: 'gpu.example.test', port: 22, user: 'trainer', identity_file: null },
+                ssh_local_port: 9012,
+            }),
+        });
+
+        await user.click(screen.getByText('Advanced settings'));
+        await user.clear(screen.getByRole('textbox', { name: /remote port/i }));
+        await user.type(screen.getByRole('textbox', { name: /remote port/i }), '8002');
+        expect(screen.getByRole('textbox', { name: /local port/i })).toHaveValue('9012');
+        await user.clear(screen.getByRole('textbox', { name: /local port/i }));
+        await user.type(screen.getByRole('textbox', { name: /local port/i }), '9013');
+        await user.click(screen.getByRole('button', { name: 'Save changes' }));
+        await waitFor(() => expect(updated).toMatchObject({ ssh_remote_port: 8002, ssh_local_port: 9013 }));
     });
 
     it('does not offer SSH actions for an existing SSH trainer when the feature is unavailable', async () => {
@@ -166,7 +213,7 @@ describe('RemoteTrainerForm', () => {
             ssh_host_alias: 'gpu-box',
             ssh_connection: null,
             ssh_remote_port: 8001,
-            ssh_local_port: 8001,
+            ssh_local_port: null,
         });
     });
 
@@ -176,6 +223,7 @@ describe('RemoteTrainerForm', () => {
         renderForm();
         await user.type(screen.getByRole('textbox', { name: /^Name/ }), 'managed-trainer');
         await user.click(screen.getByRole('tab', { name: 'Trainer URL' }));
+        expect(screen.queryByRole('checkbox', { name: /Set up Docker and GPU support/i })).not.toBeInTheDocument();
         await user.type(screen.getByRole('textbox', { name: /trainer url/i }), 'http://trainer.example.test/api');
 
         expect(
