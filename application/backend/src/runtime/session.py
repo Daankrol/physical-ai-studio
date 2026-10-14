@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from loguru import logger
 from physicalai.config import Config
 from physicalai.robot import RobotError
+from physicalai.robot.so101 import SO101, SO101Calibration
 from physicalai.runtime import RobotRuntime
 
 from internal_datasets.access_mode import DatasetAccessMode
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 # to waiting is deleting the cache without copying it back.
 RECORDING_TEARDOWN_TIMEOUT_S = 60.0
 _DEVICE_READY_TIMEOUT_S = 30.0
+_SO101_DRIVER_CLASS = "physicalai.robot.SO101"
 
 
 class _Connectable(Protocol):
@@ -54,6 +56,59 @@ def _is_connected(device: object) -> bool:
     """Return connection state for a robot (method) or camera (property)."""
     connected = getattr(device, "is_connected", False)
     return bool(connected() if callable(connected) else connected)
+
+
+def _driver_recipe(recipe: object) -> dict[str, Any] | None:
+    if not isinstance(recipe, dict):
+        return None
+    init_args = recipe.get("init_args")
+    if isinstance(init_args, dict) and isinstance(init_args.get("robot"), dict):
+        return init_args["robot"]
+    return recipe
+
+
+def _valid_so101_calibration(recipe: object, *, role: str, joint_names: list[str]) -> bool:
+    driver = _driver_recipe(recipe)
+    if driver is None or driver.get("class_path") != _SO101_DRIVER_CLASS:
+        return False
+    args = driver.get("init_args")
+    if not isinstance(args, dict) or args.get("role") != role or args.get("unit") != "normalized":
+        return False
+    calibration = args.get("calibration")
+    if not isinstance(calibration, dict) or set(calibration) != set(joint_names):
+        return False
+    if list(joint_names) != SO101.JOINT_ORDER:
+        return False
+    try:
+        SO101Calibration.from_dict(calibration)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _position_spaces_comparable(
+    follower_recipe: object,
+    leader_recipe: object,
+    follower: Robot,
+    leader: Robot | None,
+) -> bool:
+    """Trust validated SO101 recipes or an explicit opt-in on both plugin robots."""
+    if leader is None or follower.joint_names != leader.joint_names:
+        return False
+    if _valid_so101_calibration(
+        follower_recipe, role="follower", joint_names=follower.joint_names
+    ) and _valid_so101_calibration(leader_recipe, role="leader", joint_names=leader.joint_names):
+        return True
+    follower_driver = _driver_recipe(follower_recipe)
+    leader_driver = _driver_recipe(leader_recipe)
+    if follower_driver is not None and follower_driver.get("class_path") == _SO101_DRIVER_CLASS:
+        return False
+    if leader_driver is not None and leader_driver.get("class_path") == _SO101_DRIVER_CLASS:
+        return False
+    return (
+        getattr(follower, "handover_position_space_comparable", False) is True
+        and getattr(leader, "handover_position_space_comparable", False) is True
+    )
 
 
 class RuntimeSession:
@@ -89,7 +144,9 @@ class RuntimeSession:
 
     async def setup(self) -> None:
         init_args = self._document["init_args"]
-        self._follower = cast("Robot", Config.from_dict(init_args["robot"]).instantiate())
+        follower_config = init_args["robot"]
+        self._follower = cast("Robot", Config.from_dict(follower_config).instantiate())
+        leader_config = None
         action_source = init_args.get("action_source")
         if isinstance(action_source, dict):
             source_args = action_source.get("init_args", {})
@@ -102,6 +159,7 @@ class RuntimeSession:
             for key, config in init_args.get("cameras", {}).items()
         }
 
+        settings = get_settings()
         self._action_source = StudioActionSource(
             follower=self._follower,
             leader=self._leader,
@@ -109,6 +167,13 @@ class RuntimeSession:
             event_sink=self._event_sink,
             fps=float(init_args["fps"]),
             camera_keys=tuple(self._cameras),
+            position_space_comparable=_position_spaces_comparable(
+                follower_config, leader_config, self._follower, self._leader
+            ),
+            leader_alignment_speed=settings.leader_alignment_speed,
+            alignment_tolerance=settings.leader_alignment_position_tolerance,
+            alignment_timeout_s=settings.leader_alignment_timeout_s,
+            max_follower_step=settings.leader_handover_max_follower_step,
         )
         self._action_source.bind_recording(self._recording)
         action_source = self._action_source
@@ -122,7 +187,7 @@ class RuntimeSession:
         )
         self._recording_callback = RecordingCallback(
             recording=self._recording,
-            follower_source=lambda: action_source.follower_source,
+            action_origin=lambda: action_source.last_action_source,
         )
 
     def build_runtime(self) -> RobotRuntime:
@@ -211,15 +276,28 @@ class RuntimeSession:
             self._recording_callback.close()
         # Device lifetime belongs to the session, not to a disposable runtime view.
         # Stop the policy worker before dropping devices it may still be reading.
+        leader_torque_safe = True
         if self._action_source is not None:
+            leader_torque_safe = self._action_source.shutdown_handover()
             self._action_source.shutdown_policy()
+        if not leader_torque_safe:
+            logger.error("Leader torque-off is uncertain; preserving the leader connection for operator cleanup")
+            self._event_sink.emit(
+                ErrorEvent(
+                    message=(
+                        "Leader torque-off could not be confirmed. The leader connection is being kept open; "
+                        "inspect the arm before disconnecting."
+                    ),
+                    error_code="leader_torque_off_failed",
+                )
+            )
         # Cameras first so a wedged publisher cannot strand the arm connected.
         for key, camera in self._cameras.items():
             try:
                 camera.disconnect()
             except Exception as exc:
                 logger.warning("Camera {} disconnect failed: {}", key, exc)
-        if self._leader is not None:
+        if self._leader is not None and leader_torque_safe:
             try:
                 self._leader.disconnect()
             except Exception as exc:
@@ -279,7 +357,9 @@ class RuntimeSession:
         """
         if not self._recording.is_recording:
             return
-        mutation = self._recording.stop_episode()
+        mutation = self._recording.current_mutation()
+        if mutation is None:
+            return
         logger.warning("Discarding the episode that was still open when the session was abandoned")
         try:
             mutation.discard_buffer()

@@ -79,6 +79,19 @@ def _drain_until_source(client: RuntimeSessionClient, source: str, timeout: floa
     pytest.fail(f"Did not observe follower_source={source!r}")
 
 
+def _drain_until_handover(client: RuntimeSessionClient, state: str, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            event = client.get_nowait()
+        except queue.Empty:
+            time.sleep(0.01)
+            continue
+        if isinstance(event, StateEvent) and event.data.handover_state == state:
+            return
+    pytest.fail(f"Did not observe handover_state={state!r}")
+
+
 def _follower_source(metadata: dict[str, Any]) -> str | None:
     state = metadata.get("state")
     if not isinstance(state, dict):
@@ -365,10 +378,15 @@ def test_stop_runtime_session_terminates_a_live_child() -> None:
 
 def test_losing_the_last_subscriber_switches_to_hold() -> None:
     name = _name()
-    document = _document_with_leader()
+    document = _document_with_leader(
+        handover_position_space_comparable=True,
+        leader_kwargs={"handover_position_space_comparable": True},
+    )
     owner, client = _connect_owner(name, document, idle_timeout_s=5.0, leader_name="leader")
     try:
         client.apply(SetFollowerSourceCommand(follower_source="teleop"))
+        _drain_until_handover(client, "manual_required")
+        client.apply(SetFollowerSourceCommand(follower_source="teleop", confirm_manual_alignment=True))
         _drain_until_source(client, "teleop")
         client.close()
         time.sleep(0.4)

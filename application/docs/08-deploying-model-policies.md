@@ -13,6 +13,20 @@ On the Models screen, click Run model for a trained policy, then select the infe
 When you start the model, Studio loads the environment used to record the dataset the model was trained on.
 After the environment and model load, you will see a screen similar to the recording view. Pick the task the model should perform and click Play.
 
+## Collect human corrections
+
+To collect recovery demonstrations while running a policy, choose **Collect corrections into the training dataset** when launching the model. Studio loads the model's original training dataset into the same robot session. The screen needs a leader arm as well as the follower.
+
+1. Click **Play** to run the policy.
+2. When the policy needs correction, click **Take over** or use the configured Start episode hotkey. The follower holds while Studio aligns the leader.
+3. If Studio reports **Manual alignment required**, move the leader to match the held follower, then confirm. Keep the follower in hold until Studio reports teleoperation is ready. Studio rejects the handover if the fresh robot poses do not match within tolerance.
+4. Demonstrate the recovery. Only fresh human teleoperation frames are recorded. The policy's actions, alignment movement and hold ticks are not correction labels.
+5. Click **Save correction** or **Discard**. Saved episodes show a **Human correction** badge in the dataset. Click **Play** to return control to the policy and repeat without resetting the scene.
+
+The original demonstrations stay in the dataset. Retrain from the model on that dataset so training sees both the original task demonstrations and the new recovery examples. Studio currently uses the human-gated variant of DAgger: it records corrections when a person takes over, not expert labels for every state the policy visits. The intervention flag identifies frames in the dataset; it is not a reward or training-loss function.
+
+**Hardware note:** the physicalai revision currently pinned by Studio cannot move an SO101 leader through `SharedRobot`. Until a compatible physicalai update is installed, align the leader manually and confirm the pose. Keep a hand on the stop control and test takeover in a clear workspace; this workflow has not been validated on hardware.
+
 ## Next
 
 - For training, see [Training Policies](./06-training-policies.md).

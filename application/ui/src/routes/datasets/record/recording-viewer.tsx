@@ -1,4 +1,4 @@
-import { FormEvent, useState } from 'react';
+import { FormEvent, useCallback, useState } from 'react';
 
 import {
     Button,
@@ -29,6 +29,7 @@ export const RecordingViewer = () => {
         dataset,
         state,
         startEpisode,
+        setFollowerSource,
         discardEpisode,
         saveEpisode,
         readyForRecording,
@@ -45,21 +46,44 @@ export const RecordingViewer = () => {
     const { data: settings } = $api.useSuspenseQuery('get', '/api/settings');
     const bindings = getEffectiveBindings(settings.hotkeys.bindings);
 
-    useHotkey(bindings['recording.start_episode'], () => startEpisode.mutate(task), !state.is_recording && task !== '');
+    const alignedForTeleop = state.follower_source === 'teleop' && state.handover_state === 'idle';
+    const finishEpisode = useCallback(
+        async (save: boolean) => {
+            try {
+                if (
+                    state.follower_source !== 'hold' ||
+                    state.handover_state === 'aligning' ||
+                    state.handover_state === undefined
+                ) {
+                    await setFollowerSource.mutateAsync('hold');
+                }
+                await (save ? saveEpisode : discardEpisode).mutateAsync();
+            } catch {
+                // The provider reports runtime failures to its configured toast handler.
+            }
+        },
+        [discardEpisode, saveEpisode, setFollowerSource, state.follower_source, state.handover_state]
+    );
+
+    useHotkey(
+        bindings['recording.start_episode'],
+        () => startEpisode.mutate(task),
+        alignedForTeleop && !state.is_recording && task !== ''
+    );
     useHotkey(
         bindings['recording.accept_episode'],
-        () => saveEpisode.mutate(),
-        state.is_recording && !saveEpisode.isPending
+        () => void finishEpisode(true),
+        state.is_recording && !saveEpisode.isPending && !discardEpisode.isPending && !setFollowerSource.isPending
     );
     useHotkey(
         bindings['recording.discard_episode'],
-        () => discardEpisode.mutate(),
-        state.is_recording && !saveEpisode.isPending
+        () => void finishEpisode(false),
+        state.is_recording && !discardEpisode.isPending && !saveEpisode.isPending && !setFollowerSource.isPending
     );
 
     const onStart = (e: FormEvent) => {
         e.preventDefault();
-        if (task !== '') {
+        if (task !== '' && alignedForTeleop) {
             startEpisode.mutate(task);
         }
     };
@@ -108,16 +132,22 @@ export const RecordingViewer = () => {
                         {state.is_recording ? (
                             <ButtonGroup>
                                 <Button
-                                    isDisabled={saveEpisode.isPending}
+                                    isDisabled={
+                                        saveEpisode.isPending || discardEpisode.isPending || setFollowerSource.isPending
+                                    }
                                     variant={'negative'}
-                                    onPress={() => discardEpisode.mutate()}
+                                    onPress={() => void finishEpisode(false)}
                                 >
                                     <Text>Discard</Text>
                                     <Keyboard UNSAFE_className={classes.hotkey}>
                                         {formatKeyCombo(bindings['recording.discard_episode'])}
                                     </Keyboard>
                                 </Button>
-                                <Button isPending={saveEpisode.isPending} onPress={() => saveEpisode.mutate()}>
+                                <Button
+                                    isDisabled={discardEpisode.isPending || setFollowerSource.isPending}
+                                    isPending={saveEpisode.isPending}
+                                    onPress={() => void finishEpisode(true)}
+                                >
                                     <Text>Accept</Text>
                                     <Keyboard UNSAFE_className={classes.hotkey}>
                                         {formatKeyCombo(bindings['recording.accept_episode'])}
@@ -125,7 +155,7 @@ export const RecordingViewer = () => {
                                 </Button>
                             </ButtonGroup>
                         ) : (
-                            <Button type={'submit'}>
+                            <Button type={'submit'} isDisabled={!alignedForTeleop || startEpisode.isPending}>
                                 <Text>Start episode</Text>
                                 <Keyboard UNSAFE_className={classes.hotkey}>
                                     {formatKeyCombo(bindings['recording.start_episode'])}
@@ -134,6 +164,24 @@ export const RecordingViewer = () => {
                         )}
                     </Flex>
                 </Form>
+                {state.handover_state === 'aligning' && <div role='status'>Aligning leader; follower is holding.</div>}
+                {state.handover_state === 'manual_required' && (
+                    <Flex alignItems='center' gap='size-100'>
+                        <Text>
+                            Manual alignment required: move the leader to match the held follower, then confirm.
+                        </Text>
+                        <Button
+                            isDisabled={setFollowerSource.isPending}
+                            isPending={setFollowerSource.isPending}
+                            onPress={() =>
+                                setFollowerSource.mutate({ follower_source: 'teleop', confirm_manual_alignment: true })
+                            }
+                        >
+                            Confirm manual alignment
+                        </Button>
+                    </Flex>
+                )}
+                {!state.has_leader && <div role='alert'>Recording needs a leader arm.</div>}
                 <RobotControlView
                     environment={environment}
                     isReady={state.connected}

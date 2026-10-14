@@ -19,5 +19,6 @@ export const useInferenceParams = () => {
         model_id,
         backend: backend ?? defaultBackend,
         device: searchParams.get('device') ?? undefined,
+        collect: searchParams.get('collect') === '1',
     };
 };

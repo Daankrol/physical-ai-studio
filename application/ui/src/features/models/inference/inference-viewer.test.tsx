@@ -1,6 +1,6 @@
 import { createRef } from 'react';
 
-import { screen } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -39,66 +39,89 @@ const model = {
     snapflow_enabled: false,
 } as SchemaModel;
 
-const followerRobot = {
-    id: 'follower-1',
-    name: 'Follower',
-    type: 'SO101_Follower' as const,
-    payload: { connection_string: '', serial_number: 'SO101-001', calibration: {} },
-};
-
 const environmentWithLeader = getMockedEnvironment({
     robots: [
         {
-            robot: followerRobot,
+            robot: {
+                id: 'follower-1',
+                name: 'Follower',
+                type: 'SO101_Follower' as const,
+                payload: { connection_string: '', serial_number: 'SO101-001', calibration: {} },
+            },
             tele_operator: { type: 'robot', robot_id: 'leader-1' },
         },
     ],
 });
 
-const mutation = () => ({
+type MockResult = { data: { follower_source?: string; handover_state?: string; [key: string]: unknown } };
+
+const mutation = (
+    mutateAsync = vi.fn(async (): Promise<MockResult> => ({
+        data: { follower_source: 'teleop', handover_state: 'idle' },
+    }))
+) => ({
     mutate: vi.fn(),
+    mutateAsync,
     isPending: false,
 });
+
+type SessionOptions = {
+    followerSource?: 'hold' | 'teleop' | 'policy';
+    hasLeader?: boolean;
+    readyForInference?: boolean;
+    readyForRecording?: boolean;
+    handoverState?: 'idle' | 'aligning' | 'manual_required';
+    isRecording?: boolean;
+    episodesRecorded?: number;
+};
 
 const mockSession = ({
     followerSource = 'hold',
     hasLeader = true,
     readyForInference = true,
-}: {
-    followerSource?: 'hold' | 'teleop' | 'policy';
-    hasLeader?: boolean;
-    readyForInference?: boolean;
-} = {}) => {
+    readyForRecording = true,
+    handoverState = 'idle',
+    isRecording = false,
+    episodesRecorded = 0,
+}: SessionOptions = {}) => {
     const startTask = mutation();
     const stopTask = mutation();
     const setFollowerSource = mutation();
+    const startEpisode = mutation();
+    const saveEpisode = mutation();
+    const discardEpisode = mutation();
 
     vi.mocked(useRuntimeSession).mockReturnValue({
         model,
         readyForInference,
+        readyForRecording,
         state: {
             connected: true,
             follower_source: followerSource,
             has_leader: hasLeader,
             model_loaded: true,
             task: null,
-            dataset_loaded: false,
-            is_recording: false,
-            episodes_recorded: 0,
+            dataset_loaded: readyForRecording,
+            is_recording: isRecording,
+            episodes_recorded: episodesRecorded,
+            handover_state: handoverState,
         },
         startTask,
         stopTask,
         setFollowerSource,
+        startEpisode,
+        saveEpisode,
+        discardEpisode,
         environment: environmentWithLeader,
         observation: createRef<Record<string, number> | undefined>(),
         inferenceDevice: { backend: 'pytorch', device: 'cpu' },
     } as unknown as ReturnType<typeof useRuntimeSession>);
 
-    return { startTask, stopTask, setFollowerSource };
+    return { startTask, stopTask, setFollowerSource, startEpisode, saveEpisode, discardEpisode };
 };
 
-const renderViewer = () =>
-    render(<InferenceViewer tasks={['pick the cube']} />, {
+const renderViewer = (props: { collect?: boolean } = {}) =>
+    render(<InferenceViewer tasks={['pick the cube']} {...props} />, {
         route: `/projects/${PROJECT_ID}/models/model-1/inference/pytorch`,
         path: '/projects/:project_id/models/:model_id/inference/:backend',
     });
@@ -144,29 +167,27 @@ describe('InferenceViewer', () => {
         expect(screen.getByRole('button', { name: /stop/i })).toBeInTheDocument();
     });
 
-    it('switches the follower source to teleop and hold', async () => {
+    it('requests guarded teleop for the ordinary inference switch', async () => {
         const user = userEvent.setup();
         const { setFollowerSource } = mockSession();
-
         renderViewer();
 
         await user.click(await screen.findByRole('switch', { name: 'Teleoperate' }));
 
-        expect(setFollowerSource.mutate).toHaveBeenCalledWith('teleop');
+        expect(setFollowerSource.mutateAsync).toHaveBeenCalledWith('teleop');
     });
 
-    it('switches back to hold when teleoperation is turned off', async () => {
+    it('requests hold when ordinary teleoperation is turned off', async () => {
         const user = userEvent.setup();
         const { setFollowerSource } = mockSession({ followerSource: 'teleop' });
-
         renderViewer();
 
         await user.click(await screen.findByRole('switch', { name: 'Teleoperate' }));
 
-        expect(setFollowerSource.mutate).toHaveBeenCalledWith('hold');
+        expect(setFollowerSource.mutateAsync).toHaveBeenCalledWith('hold');
     });
 
-    it('takes over from policy inference when teleoperate is enabled', async () => {
+    it('takes over from policy without issuing an unsafe resume or separate stop', async () => {
         const user = userEvent.setup();
         const { setFollowerSource, stopTask } = mockSession({ followerSource: 'policy' });
 
@@ -174,7 +195,160 @@ describe('InferenceViewer', () => {
 
         await user.click(await screen.findByRole('switch', { name: 'Teleoperate' }));
 
-        expect(setFollowerSource.mutate).toHaveBeenCalledWith('teleop');
+        expect(setFollowerSource.mutateAsync).toHaveBeenCalledWith('teleop');
         expect(stopTask.mutate).not.toHaveBeenCalled();
+    });
+
+    it('waits for confirmed alignment before starting a correction episode', async () => {
+        const user = userEvent.setup();
+        const order: string[] = [];
+        const { setFollowerSource, startEpisode } = mockSession();
+        setFollowerSource.mutateAsync.mockImplementation(async () => {
+            order.push('teleop-confirmed');
+            return { data: { follower_source: 'teleop', handover_state: 'idle' } };
+        });
+        startEpisode.mutateAsync.mockImplementation(async () => {
+            order.push('recording-started');
+            return { data: {} };
+        });
+
+        renderViewer({ collect: true });
+        await user.click(await screen.findByRole('button', { name: /take over/i }));
+
+        await waitFor(() => expect(order).toEqual(['teleop-confirmed', 'recording-started']));
+        expect(setFollowerSource.mutateAsync).toHaveBeenCalledWith('teleop');
+        expect(startEpisode.mutateAsync).toHaveBeenCalledWith('pick the cube');
+    });
+
+    it('waits for the teleop confirmation before starting the correction', async () => {
+        const user = userEvent.setup();
+        let finishAlignment:
+            ((value: { data: { follower_source: string; handover_state: string } }) => void) | undefined;
+        const { setFollowerSource, startEpisode } = mockSession();
+        setFollowerSource.mutateAsync.mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    finishAlignment = resolve;
+                })
+        );
+
+        renderViewer({ collect: true });
+        await user.click(await screen.findByRole('button', { name: /take over/i }));
+        expect(startEpisode.mutateAsync).not.toHaveBeenCalled();
+
+        finishAlignment?.({ data: { follower_source: 'teleop', handover_state: 'idle' } });
+        await waitFor(() => expect(startEpisode.mutateAsync).toHaveBeenCalledWith('pick the cube'));
+    });
+
+    it('shows the aligning state and blocks take over and policy resume', async () => {
+        mockSession({ handoverState: 'aligning' });
+        renderViewer({ collect: true });
+
+        expect(screen.getByRole('status')).toHaveTextContent('Aligning leader');
+        expect(screen.getByRole('button', { name: /take over/i })).toBeDisabled();
+        expect(screen.getByRole('button', { name: /play/i })).toBeDisabled();
+    });
+
+    it('confirms passive manual alignment before starting the correction', async () => {
+        const user = userEvent.setup();
+        const { setFollowerSource, startEpisode } = mockSession({ handoverState: 'manual_required' });
+        renderViewer({ collect: true });
+
+        expect(screen.getByText(/match the held follower/i)).toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Confirm manual alignment' }));
+
+        expect(setFollowerSource.mutateAsync).toHaveBeenCalledWith({
+            follower_source: 'teleop',
+            confirm_manual_alignment: true,
+        });
+        await waitFor(() => expect(startEpisode.mutateAsync).toHaveBeenCalledWith('pick the cube'));
+    });
+
+    it('does not start recording after a failed alignment', async () => {
+        const user = userEvent.setup();
+        const { setFollowerSource, startEpisode } = mockSession();
+        setFollowerSource.mutateAsync.mockRejectedValue(new Error('leader alignment failed'));
+        renderViewer({ collect: true });
+
+        await user.click(await screen.findByRole('button', { name: /take over/i }));
+
+        expect(await screen.findByRole('alert')).toHaveTextContent('leader alignment failed');
+        expect(startEpisode.mutateAsync).not.toHaveBeenCalled();
+    });
+
+    it('holds and waits for confirmation before saving or discarding a correction', async () => {
+        const user = userEvent.setup();
+        const order: string[] = [];
+        const { setFollowerSource, saveEpisode, discardEpisode } = mockSession({
+            followerSource: 'teleop',
+            isRecording: true,
+        });
+        setFollowerSource.mutateAsync.mockImplementation(async () => {
+            order.push('hold-confirmed');
+            return { data: { follower_source: 'hold', handover_state: 'idle' } };
+        });
+        saveEpisode.mutateAsync.mockImplementation(async () => {
+            order.push('saved');
+            return { data: {} };
+        });
+
+        renderViewer({ collect: true });
+        await user.click(await screen.findByRole('button', { name: /save correction/i }));
+        await waitFor(() => expect(order).toEqual(['hold-confirmed', 'saved']));
+        expect(discardEpisode.mutateAsync).not.toHaveBeenCalled();
+    });
+
+    it('keeps discard available in hold after a failed save', async () => {
+        const user = userEvent.setup();
+        const { setFollowerSource, saveEpisode } = mockSession({ followerSource: 'teleop', isRecording: true });
+        setFollowerSource.mutateAsync.mockResolvedValue({
+            data: { follower_source: 'hold', handover_state: 'idle' },
+        });
+        saveEpisode.mutateAsync.mockRejectedValue(new Error('save failed'));
+
+        renderViewer({ collect: true });
+        await user.click(await screen.findByRole('button', { name: /save correction/i }));
+
+        expect(await screen.findByRole('alert')).toHaveTextContent('save failed');
+        expect(screen.getByRole('button', { name: /discard/i })).toBeEnabled();
+    });
+
+    it('holds before discarding a correction', async () => {
+        const user = userEvent.setup();
+        const order: string[] = [];
+        const { setFollowerSource, discardEpisode } = mockSession({ followerSource: 'teleop', isRecording: true });
+        setFollowerSource.mutateAsync.mockImplementation(async () => {
+            order.push('hold-confirmed');
+            return { data: { follower_source: 'hold', handover_state: 'idle' } };
+        });
+        discardEpisode.mutateAsync.mockImplementation(async () => {
+            order.push('discarded');
+            return { data: {} };
+        });
+
+        renderViewer({ collect: true });
+        await user.click(await screen.findByRole('button', { name: /discard/i }));
+
+        await waitFor(() => expect(order).toEqual(['hold-confirmed', 'discarded']));
+    });
+
+    it('requires a leader for correction collection and disables its controls', async () => {
+        mockSession({ hasLeader: false });
+        renderViewer({ collect: true });
+
+        expect(await screen.findByText('Collecting corrections needs a leader arm.')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /take over/i })).toBeDisabled();
+        expect(screen.getByRole('button', { name: /play/i })).toBeDisabled();
+    });
+
+    it('disables policy resume while recording or alignment is in progress', async () => {
+        mockSession({ isRecording: true });
+        const { unmount } = renderViewer({ collect: true });
+        expect(await screen.findByRole('button', { name: /play/i })).toBeDisabled();
+        unmount();
+
+        mockSession({ handoverState: 'aligning' });
+        renderViewer({ collect: true });
+        expect(await screen.findByRole('button', { name: /play/i })).toBeDisabled();
     });
 });

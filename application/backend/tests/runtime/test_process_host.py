@@ -73,7 +73,11 @@ def test_process_host_runs_session_and_streams_connected_state() -> None:
 
 def test_mode_command_crosses_process_boundary() -> None:
     name = runtime_session_name(UUID("c6ffef31-0e82-4da4-8b19-cfc4be33e097"))
-    host, client = _start_host(name, _document_with_leader())
+    document = _document_with_leader(
+        handover_position_space_comparable=True,
+        leader_kwargs={"handover_position_space_comparable": True},
+    )
+    host, client = _start_host(name, document)
     try:
         while True:
             try:
@@ -89,10 +93,11 @@ def test_mode_command_crosses_process_boundary() -> None:
             except queue.Empty:
                 time.sleep(0.01)
                 continue
-            if isinstance(event, StateEvent) and event.data.follower_source == "teleop":
+            if isinstance(event, StateEvent) and event.data.handover_state == "manual_required":
+                assert event.data.follower_source == "hold"
                 break
         else:
-            pytest.fail("Teleop state did not cross the process boundary")
+            pytest.fail("Manual alignment state did not cross the process boundary")
     finally:
         _stop_host(host, client)
 

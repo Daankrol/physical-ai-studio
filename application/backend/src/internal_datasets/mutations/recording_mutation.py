@@ -24,8 +24,8 @@ class RecordingMutation:
         self.source_dataset = source_dataset
         self.cache_dataset.prepare_for_writing()
 
-    def add_frame(self, obs: dict, act: dict, task: str) -> None:
-        self.cache_dataset.add_frame(obs, act, task)
+    def add_frame(self, obs: dict, act: dict, task: str, intervention: bool = False) -> None:
+        self.cache_dataset.add_frame(obs, act, task, intervention)
 
     def save_episode(self) -> None:
         """Save current recording buffer as episode."""

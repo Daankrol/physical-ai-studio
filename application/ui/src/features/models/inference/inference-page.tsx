@@ -7,7 +7,7 @@ import { InferenceViewer } from './inference-viewer';
 import { useInferenceParams } from './use-inference-params';
 
 export const InferencePage = () => {
-    const { project_id, model_id, backend, device } = useInferenceParams();
+    const { project_id, model_id, backend, device, collect } = useInferenceParams();
 
     const {
         data: { model },
@@ -41,10 +41,12 @@ export const InferencePage = () => {
         <RuntimeSessionProvider
             environment={initialEnvironment}
             model={model}
+            dataset={collect ? dataset : undefined}
+            collect={collect}
             inferenceDevice={inferenceDevice}
             onError={ToastQueue.negative}
         >
-            <InferenceViewer tasks={tasks} />
+            <InferenceViewer tasks={tasks} collect={collect} defaultTask={dataset.default_task} />
         </RuntimeSessionProvider>
     );
 };

@@ -14,7 +14,14 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from runtime.contract import CommandAdapter, LoadDatasetCommand, LoadModelCommand
+from runtime.contract import (
+    CommandAdapter,
+    LoadDatasetCommand,
+    LoadModelCommand,
+    SetFollowerSourceCommand,
+    StartRecordingCommand,
+    StateData,
+)
 from schemas import InferenceBackend
 
 
@@ -71,6 +78,19 @@ def test_load_dataset_carries_an_id() -> None:
 
     assert isinstance(command, LoadDatasetCommand)
     assert command.dataset_id == dataset_id
+
+
+def test_handover_and_correction_fields_keep_the_shared_contract_names() -> None:
+    teleop = SetFollowerSourceCommand(follower_source="teleop")
+    recording = StartRecordingCommand(task="recover")
+    state = StateData(connected=True, follower_source="hold")
+
+    assert teleop.confirm_manual_alignment is False
+    assert recording.intervention is False
+    assert state.handover_state == "idle"
+    assert set(teleop.model_dump()) >= {"follower_source", "confirm_manual_alignment"}
+    assert set(recording.model_dump()) >= {"task", "intervention"}
+    assert state.model_dump()["handover_state"] == "idle"
 
 
 def test_commands_round_trip_through_json() -> None:

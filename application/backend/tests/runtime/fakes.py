@@ -80,6 +80,7 @@ class FakeRobot:
         observation_error: str | None = None,
         connect_delay: float = 0.0,
         disconnect_error: str | None = None,
+        handover_position_space_comparable: bool = False,
         name: str = "fake_robot",
     ) -> None:
         if observations is None:
@@ -89,12 +90,14 @@ class FakeRobot:
             ]
         self._observations = observations
         self._observation_index = 0
+        self._last_timestamp = float("-inf")
         self._connected = False
         self._joint_names = joint_names or [f"joint_{index}" for index in range(len(observations[0].joint_positions))]
         self._connect_error = connect_error
         self._observation_error = observation_error
         self._connect_delay = connect_delay
         self._disconnect_error = disconnect_error
+        self.handover_position_space_comparable = handover_position_space_comparable
         self.name = name
         self.sent_actions: list[np.ndarray] = []
 
@@ -111,7 +114,16 @@ class FakeRobot:
             raise ConnectionError(self._observation_error)
         observation = self._observations[min(self._observation_index, len(self._observations) - 1)]
         self._observation_index += 1
-        return observation
+        timestamp = float(observation.timestamp)
+        if timestamp <= self._last_timestamp:
+            timestamp = self._last_timestamp + 1.0
+        self._last_timestamp = timestamp
+        return FakeObservation(
+            np.array(observation.joint_positions, dtype=np.float32, copy=True),
+            timestamp,
+            sensor_data=observation.sensor_data,
+            images=observation.images,
+        )
 
     def send_action(self, action: np.ndarray, *, goal_time: float = 0.1) -> None:
         self.sent_actions.append(np.array(action, copy=True))

@@ -135,7 +135,7 @@ A session sharing the name grabs the lock the robot's owner needs and binds the 
 Studio separates them three ways:
 
 - The name carries the `rt-` prefix, checked by `_SESSION_NAME_RE`. Upstream's `validate_name` allows letters, digits, `_` and `-`, so it passes.
-- `derive_endpoint_port` hashes into 10000–19999. Physicalai robots use 20000–59999.
+- `derive_endpoint_port` hashes into 10,000 to 19,999. Physicalai robots use 20,000 to 59,999.
 - The lock hashes `f"{SESSION_LOCK_KIND}:{identity}"`, which changes the kind as well as the identity. Upstream's `_lock.py` is private, so Studio carries its own copy.
 
 ## One request, end to end
@@ -227,7 +227,7 @@ sequenceDiagram
   RT->>RT: sleep to hold fps
 ```
 
-Two consequences. Commands drain at the top of `update()` before the action is decided, so a mode change takes effect on the tick it arrives. The recording callback also sees `TickEvent`, which carries the observation and the action that was sent, so recording never reads the robot separately.
+Commands drain at the top of `update()` before the action is decided. The recording callback also sees `TickEvent`, which carries the observation and the action sent on that tick. It uses an action-origin snapshot recorded by `StudioActionSource.update()`, so a concurrent policy or mode-state change cannot relabel the action.
 
 ## Modes
 
@@ -236,7 +236,7 @@ Teleoperation and policy execution are modes of one session. `StudioActionSource
 | Mode | Action sent |
 | --- | --- |
 | `hold` | a target latched when the mode was entered |
-| `teleop` | leader joint positions, plus efforts to the leader |
+| `teleop` | fresh leader joint positions sent to the follower |
 | `policy` | next action from `PolicySource` |
 
 `hold` exists because `ActionSource.update()` must return an action every tick. The protocol has no way to send nothing.
@@ -245,27 +245,15 @@ Teleoperation and policy execution are modes of one session. `StudioActionSource
 
 **A policy failure drops to `hold` with a fresh latch** instead of stopping the loop. The arm holds where it is and the session stays alive to report the error.
 
-### Modes rather than session types
+### Modes and guarded human takeover
 
-The delegates are live simultaneously, and the mode selects whose output wins:
+The policy and leader are both attached to one `StudioActionSource`; `FollowerSource` selects `hold`, `teleop`, or `policy`. A separate `handover_state` reports `idle`, `aligning`, or `manual_required` while the action source guards the transition into teleop.
 
-```python
-policy_action = self._policy.update(...) if self._policy else None
-leader_action = self._read_leader(robot_state) if self._leader else None
-return self._arbitrate(mode, policy_action, leader_action, robot_state)
-```
+Every takeover first latches the follower's last commanded target in `hold`. When the leader supports torque and position control and both robots declare comparable joint coordinates, a worker aligns the leader to the held follower with bounded steps. The action source waits for fresh matching poses, turns leader torque off, then changes `follower_source` to `teleop`. The control loop keeps returning the held follower target throughout alignment. Unsupported leaders require an explicit manual pose match, which the runtime checks against fresh observations. Incompatible or unknown coordinate spaces fail closed.
 
-The alternative forecloses human-in-the-loop by leaving the policy idle and its queue stale:
+The `physicalai` revision currently pinned by Studio does not expose torque control through `SharedRobot` and rejects position commands to an SO101 leader. Automatic SO101 alignment therefore remains unavailable until the upstream support is merged and Studio updates its lockfile. Comparable calibrated setups can use the manual alignment confirmation in the meantime. No hardware validation is implied by these software checks.
 
-```python
-match mode:
-    case "teleop": return self._leader_action(robot_state)
-    case "policy": return self._policy.update(...)
-```
-
-Human-in-the-loop puts a person and a policy in control during the same episode, which two session types cannot express. Committing to modes now makes HIL an arbitration change later instead of a restructuring. Nothing implements it yet, and `FollowerSource` is `hold | teleop | policy`. Adding it would not change the shape.
-
-Both delegates are optional. Dataset recording runs with no model loaded, so `policy_action is None` happens routinely.
+The action source records the origin of each returned tick action (`hold`, `handover`, `teleop`, or `policy`). `RecordingCallback` saves only fresh human-controlled teleop actions. It does not treat policy actions, alignment steps, or holds as expert labels. Both policy and leader remain optional; dataset-only recording still runs without a model.
 
 ## Session lifecycle and ownership
 
@@ -419,6 +407,7 @@ Each of these has cost someone time.
 - **`StudioActionSource.disconnect()` must not disconnect the leader.** The session owns it. Upstream's `TeleopSource.disconnect()` does disconnect its leader, so read that class for reference and do not subclass it.
 - **Treat `stop()` then `run()` as a session boundary.** Every `run()` ends by calling `_bus.close()`, which closes every callback. Stateful callbacks do not survive a second run: `JsonlCallback` writes to a closed file and logs a traceback every tick, while `AsyncCallback` joins its worker with no restart path and loses telemetry silently.
 - **`hold` must latch.** Resending the measured position sags the arm. See [Modes](#modes).
+- **Do not move the follower toward an unaligned leader on takeover.** The leader may still be in its rest pose while the policy has reached a failure state. Align a torque-capable leader to the held follower; otherwise require a fresh manual pose match. Unknown or incompatible joint coordinate spaces must stay in hold. The pinned physicalai revision cannot perform automatic SO101 alignment yet.
 - **Camera feature keys must match the dataset the model was trained on**, which is not always the current environment's camera names. They diverge the moment someone renames a camera between recording and inference. `InferenceModel._prepare_inputs` raises `KeyError` on a missing input, so inference stops at the first tick. The error names the missing key and leaves you to work out why.
 - **Model input collapses to a bare `images` key when there is exactly one camera**, discarding the name. With two or more it emits `images.<name>`. Single-camera setups are therefore insensitive to naming, and multi-camera setups are not.
 - **The browser addresses camera panels by `camera.id`, not by feature key.** Any stream payload carrying per-camera values needs a name-to-UUID mapping alongside it.

@@ -15,3 +15,7 @@
 .episodeDuration.variantSmall {
     font-size: var(--spectrum-global-dimension-font-size-50);
 }
+
+.correctionBadge {
+    font-size: var(--spectrum-global-dimension-font-size-50);
+}

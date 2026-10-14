@@ -2,13 +2,15 @@ import asyncio
 import queue
 import threading
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from physicalai.config import Config
+from physicalai.robot.so101 import SO101
 
 from runtime.contract import DisconnectCommand, QueueEventSink
-from runtime.session import RuntimeSession
-from tests.runtime.fakes import max_concurrent_connects, reset_connect_tracking
+from runtime.session import RuntimeSession, _position_spaces_comparable
+from tests.runtime.fakes import FakeRobot, max_concurrent_connects, reset_connect_tracking
 
 
 def _fake_robot_args(**kwargs: Any) -> dict[str, Any]:
@@ -58,6 +60,91 @@ def _document_with_leader(*, leader_kwargs: dict[str, Any] | None = None, **foll
         },
     }
     return document
+
+
+def _so101_recipe(role: str, *, unit: str = "normalized", calibrated: bool = True, offset: int = 0) -> dict:
+    names = SO101.JOINT_ORDER
+    calibration = {
+        name: {
+            "id": index + 1,
+            "drive_mode": 0,
+            "homing_offset": offset,
+            "range_min": 0,
+            "range_max": 4095,
+        }
+        for index, name in enumerate(names)
+    }
+    return {
+        "class_path": "physicalai.robot.SharedRobot",
+        "init_args": {
+            "robot": {
+                "class_path": "physicalai.robot.SO101",
+                "init_args": {
+                    "role": role,
+                    "unit": unit,
+                    "calibration": calibration if calibrated else None,
+                },
+            }
+        },
+    }
+
+
+def test_so101_position_space_requires_valid_normalized_calibrations() -> None:
+    joints = SO101.JOINT_ORDER
+    follower = FakeRobot(positions=[[0] * len(joints)], joint_names=joints)
+    leader = FakeRobot(positions=[[0] * len(joints)], joint_names=joints)
+
+    assert _position_spaces_comparable(
+        _so101_recipe("follower", offset=3), _so101_recipe("leader", offset=17), follower, leader
+    )
+    assert not _position_spaces_comparable(
+        _so101_recipe("follower", calibrated=False), _so101_recipe("leader"), follower, leader
+    )
+    assert not _position_spaces_comparable(
+        _so101_recipe("follower", unit="ticks"), _so101_recipe("leader"), follower, leader
+    )
+    assert not _position_spaces_comparable(
+        _so101_recipe("follower"), _so101_recipe("leader", unit="ticks"), follower, leader
+    )
+    assert not _position_spaces_comparable(
+        _so101_recipe("follower"),
+        _so101_recipe("leader"),
+        follower,
+        FakeRobot(positions=[[0] * len(joints)], joint_names=list(reversed(joints))),
+    )
+
+
+def test_unknown_plugin_position_space_requires_opt_in_from_both_robots() -> None:
+    recipe = {"class_path": "plugin.SharedRobot", "init_args": {}}
+    follower = FakeRobot(positions=[[0]], joint_names=["joint"])
+    leader = FakeRobot(positions=[[0]], joint_names=["joint"])
+
+    assert not _position_spaces_comparable(recipe, recipe, follower, leader)
+    follower.handover_position_space_comparable = True
+    leader.handover_position_space_comparable = True
+    assert _position_spaces_comparable(recipe, recipe, follower, leader)
+
+
+async def test_teardown_keeps_leader_connected_when_torque_off_is_uncertain() -> None:
+    events = QueueEventSink()
+    session = RuntimeSession(_document_with_leader(), event_sink=events)
+    await session.setup()
+    assert session._leader is not None
+    assert session._action_source is not None
+    session._action_source.shutdown_handover = MagicMock(return_value=False)
+    session._action_source.shutdown_policy = MagicMock()
+    session._leader.disconnect = MagicMock()
+
+    await session.teardown()
+
+    session._leader.disconnect.assert_not_called()
+    emitted = []
+    while True:
+        try:
+            emitted.append(events.get_nowait())
+        except queue.Empty:
+            break
+    assert any(getattr(event, "error_code", None) == "leader_torque_off_failed" for event in emitted)
 
 
 async def test_session_runs_until_stop_signal() -> None:

@@ -1,4 +1,6 @@
 import copy
+import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -6,8 +8,11 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
+import pandas as pd
 import torch
+from lerobot.datasets.dataset_tools import add_features as lerobot_add_features
 from lerobot.datasets.dataset_tools import delete_episodes as lerobot_delete_episodes
+from lerobot.datasets.io_utils import load_stats, write_stats
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.processor import make_default_processors
 from lerobot.processor.pipeline import RobotProcessorPipeline
@@ -174,11 +179,27 @@ class InternalLeRobotDataset(DatasetClient):
         if not isinstance(source, InternalLeRobotDataset):
             raise ValueError(f"Cannot overwrite lerobot dataset with {source.__class__}")
 
-        if self.path.is_dir():
-            shutil.rmtree(self.path)
-
-        shutil.copytree(source.path, self.path)
-        self.load_dataset()
+        temporary_path = self.path.with_name(f"{self.path.name}.{uuid4()}.tmp")
+        backup_path = self.path.with_name(f"{self.path.name}.{uuid4()}.backup")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copytree(source.path, temporary_path)
+            if self.path.exists():
+                os.replace(self.path, backup_path)
+            try:
+                os.replace(temporary_path, self.path)
+                self.load_dataset()
+            except Exception:
+                if self.path.exists():
+                    shutil.rmtree(self.path)
+                if backup_path.exists():
+                    os.replace(backup_path, self.path)
+                raise
+            if backup_path.exists():
+                shutil.rmtree(backup_path)
+        finally:
+            if temporary_path.exists():
+                shutil.rmtree(temporary_path)
 
     def get_episodes(self) -> list[Episode]:
         """Get episodes of dataset."""
@@ -187,7 +208,11 @@ class InternalLeRobotDataset(DatasetClient):
             return []
 
         episodes = self._get_episode_metadata_list()
-        return [self._build_episode_from_metadata(episode) for episode in episodes]
+        interventions = self._get_episode_interventions()
+        return [
+            self._build_episode_from_metadata(episode, interventions.get(episode["episode_index"], False))
+            for episode in episodes
+        ]
 
     def find_episode(self, episode_index: int) -> Episode | None:
         """Find episode by index or return None."""
@@ -198,7 +223,8 @@ class InternalLeRobotDataset(DatasetClient):
         if episode is None:
             return None
 
-        return self._build_episode_from_metadata(episode)
+        intervention = self._get_episode_interventions().get(episode_index, False)
+        return self._build_episode_from_metadata(episode, intervention)
 
     def get_episode_infos(self) -> list[EpisodeInfo]:
         """Get lightweight episode summaries."""
@@ -207,19 +233,21 @@ class InternalLeRobotDataset(DatasetClient):
 
         metadata = self._dataset.meta
         episodes = self._get_episode_metadata_list()
+        interventions = self._get_episode_interventions()
         return [
             EpisodeInfo(
                 episode_index=episode["episode_index"],
                 tasks=episode["tasks"],
                 length=episode["length"],
                 fps=metadata.fps,
+                intervention=interventions.get(episode["episode_index"], False),
             )
             for episode in episodes
         ]
 
-    def add_frame(self, obs: dict, act: dict, task: str) -> None:
+    def add_frame(self, obs: dict, act: dict, task: str, intervention: bool = False) -> None:
         """Add frame to recording buffer."""
-        frame = self._process_frame(obs, act, task)
+        frame = self._process_frame(obs, act, task, intervention)
         self._dataset.add_frame(frame)
 
     def save_episode(self) -> None:
@@ -251,13 +279,15 @@ class InternalLeRobotDataset(DatasetClient):
             self._dataset.writer.stop_image_writer()
         self._dataset.finalize()
 
-    def _process_frame(self, obs: dict, act: dict, task: str) -> dict:
+    def _process_frame(self, obs: dict, act: dict, task: str, intervention: bool = False) -> dict:
         obs_processed = self._robot_observation_processor(obs)
         act_processed_teleop = self._teleop_action_processor((act, obs))
         action_frame = build_dataset_frame(self._dataset.features, act_processed_teleop, prefix=ACTION)
         observation_frame = build_dataset_frame(self._dataset.features, obs_processed, prefix=OBS_STR)
-
-        return {**observation_frame, **action_frame, "task": task}
+        frame = {**observation_frame, **action_frame, "task": task}
+        if "intervention" in self._dataset.features:
+            frame["intervention"] = np.array([intervention], dtype=bool)
+        return frame
 
     def start_recording_mutation(self, fps: int, features: dict, robot_type: str) -> RecordingMutation:
         """Start recording mutation."""
@@ -270,8 +300,31 @@ class InternalLeRobotDataset(DatasetClient):
             streaming_encoding_settings=self._streaming_encoding_settings,
         )
         if self.exists_on_disk:
-            shutil.copytree(self.path, cache_dir)
-            cache_dataset._resume_for_writing(getattr(self._dataset, "repo_id", None))
+            try:
+                if "intervention" in self._dataset.features:
+                    shutil.copytree(self.path, cache_dir)
+                else:
+                    intervention_feature = features.get("intervention")
+                    if intervention_feature is None:
+                        raise ValueError("Cannot migrate dataset without intervention feature metadata")
+                    total_frames = int(self._dataset.meta.total_frames)
+                    lerobot_add_features(
+                        self._dataset,
+                        {
+                            "intervention": (
+                                np.zeros((total_frames, 1), dtype=bool),
+                                intervention_feature,
+                            )
+                        },
+                        output_dir=cache_dir,
+                        repo_id=getattr(self._dataset, "repo_id", None),
+                    )
+                    self._restore_migrated_metadata(self.path, cache_dir)
+                    self._add_false_intervention_stats(cache_dir, total_frames)
+                cache_dataset._resume_for_writing(getattr(self._dataset, "repo_id", None))
+            except Exception:
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                raise
         else:
             cache_dataset.create(fps=fps, features=features, robot_type=robot_type)
 
@@ -314,6 +367,7 @@ class InternalLeRobotDataset(DatasetClient):
             actions=data["action"].tolist(),
             videos=video_timestamps,
             action_keys=action_feature_names,
+            intervention=bool(np.any(data.get("intervention", False))),
         )
 
     def _build_episode_data_from_buffer(self) -> dict:
@@ -361,7 +415,7 @@ class InternalLeRobotDataset(DatasetClient):
         actions = self._dataset.hf_dataset["action"][from_idx:to_idx]
         return torch.stack(actions)
 
-    def _build_episode_from_metadata(self, episode: EpisodeMetadata) -> Episode:
+    def _build_episode_from_metadata(self, episode: EpisodeMetadata, intervention: bool = False) -> Episode:
         metadata = self._dataset.meta
         episode_index = episode["episode_index"]
         action_feature_names = self._dataset.features.get("action", {}).get("names", [])
@@ -369,6 +423,7 @@ class InternalLeRobotDataset(DatasetClient):
         return Episode(
             actions=self._get_episode_actions(episode).tolist(),
             fps=metadata.fps,
+            intervention=intervention,
             videos={
                 video_key: EpisodeVideo(
                     start=episode[f"videos/{video_key}/from_timestamp"],
@@ -390,6 +445,82 @@ class InternalLeRobotDataset(DatasetClient):
 
     def _get_episode_metadata_list(self) -> list[EpisodeMetadata]:
         return [episode for episode in self._dataset.meta.episodes if isinstance(episode, dict)]
+
+    def _get_episode_interventions(self) -> dict[int, bool]:
+        if "intervention" not in self._dataset.features:
+            return {}
+
+        interventions: dict[int, bool] = {}
+        missing_stats: set[int] = set()
+        for episode in self._get_episode_metadata_list():
+            episode_index = int(episode["episode_index"])
+            max_values = episode.get("stats/intervention/max")
+            if max_values is None:
+                missing_stats.add(episode_index)
+            elif bool(np.any(max_values)):
+                interventions[episode_index] = True
+
+        # Imported/partially converted LeRobot datasets may have the frame
+        # column but no per-episode stats. Scan only those episodes as fallback.
+        if missing_stats:
+            frames = self._dataset.hf_dataset.select_columns(["episode_index", "intervention"]).with_format(None)
+            for batch in frames.iter(batch_size=8192):
+                for episode_index, intervention in zip(batch["episode_index"], batch["intervention"], strict=True):
+                    if int(episode_index) in missing_stats and bool(np.any(intervention)):
+                        interventions[int(episode_index)] = True
+        return interventions
+
+    @staticmethod
+    def _restore_migrated_metadata(source_path: Path, migrated_path: Path) -> None:
+        """Keep LeRobot settings that add_features recreates with defaults."""
+        source_info_path = source_path / "meta/info.json"
+        migrated_info_path = migrated_path / "meta/info.json"
+        source_info = json.loads(source_info_path.read_text(encoding="utf-8"))
+        migrated_info = json.loads(migrated_info_path.read_text(encoding="utf-8"))
+
+        source_data_path = source_info.get("data_path", migrated_info["data_path"])
+        if source_data_path != migrated_info["data_path"]:
+            data_dir = migrated_path / "data"
+            for parquet_path in sorted(data_dir.glob("chunk-*/file-*.parquet")):
+                chunk_index = int(parquet_path.parent.name.removeprefix("chunk-"))
+                file_index = int(parquet_path.stem.removeprefix("file-"))
+                relative_path = Path(source_data_path.format(chunk_index=chunk_index, file_index=file_index))
+                destination = migrated_path / relative_path
+                if relative_path.is_absolute() or not destination.resolve().is_relative_to(migrated_path.resolve()):
+                    raise ValueError(f"Unsafe LeRobot data_path in dataset metadata: {source_data_path}")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(parquet_path, destination)
+            migrated_info["data_path"] = source_data_path
+
+        for key in ("codebase_version", "chunks_size", "data_files_size_in_mb", "video_files_size_in_mb", "tools"):
+            if key in source_info:
+                migrated_info[key] = source_info[key]
+            elif key == "tools":
+                migrated_info.pop(key, None)
+        migrated_info["video_path"] = source_info.get("video_path", migrated_info.get("video_path"))
+        migrated_info_path.write_text(json.dumps(migrated_info, indent=2) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _add_false_intervention_stats(dataset_path: Path, total_frames: int) -> None:
+        """Add the all-false legacy column's stats omitted by LeRobot 0.6.0 add_features."""
+        if not total_frames:
+            return
+
+        feature_stats = {
+            stat: np.array([total_frames if stat == "count" else 0.0])
+            for stat in ("min", "max", "mean", "std", "count", "q01", "q10", "q50", "q90", "q99")
+        }
+        stats = load_stats(dataset_path) or {}
+        stats["intervention"] = feature_stats
+        write_stats(stats, dataset_path)
+
+        for episodes_path in sorted((dataset_path / "meta/episodes").rglob("*.parquet")):
+            episodes = pd.read_parquet(episodes_path)
+            for stat in feature_stats:
+                episodes[f"stats/intervention/{stat}"] = [
+                    np.array([int(row["length"]) if stat == "count" else 0.0]) for _, row in episodes.iterrows()
+                ]
+            episodes.to_parquet(episodes_path, index=False)
 
     def _build_thumbnail_png_bytes(self, episode: dict, image_key: str, width: int, height: int) -> bytes | None:
         if image_key not in self._dataset.meta.camera_keys:
