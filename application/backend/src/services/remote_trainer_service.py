@@ -41,6 +41,7 @@ from schemas.remote_trainer import (
 from services import remote_trainer_tunnel_manager
 from services.ssh import host_installer, persistent_trainer
 from services.ssh.transport import SshTransport
+from training.policy_catalog import PolicyCatalog
 
 _HEALTH_CHECK_TIMEOUT_S = 5.0
 
@@ -84,6 +85,17 @@ class RemoteTrainerService:
         if remote_trainer is None:
             raise ResourceNotFoundError(ResourceType.REMOTE_TRAINER, str(remote_trainer_id))
         return remote_trainer
+
+    async def get_policy_catalog(self, remote_trainer_id: UUID) -> PolicyCatalog:
+        """Ask the registered trainer what its own Python environment can train."""
+        trainer = await self.get_remote_trainer(remote_trainer_id)
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False) as client:
+                response = await client.get(f"{str(trainer.url).rstrip('/')}/policies")
+                response.raise_for_status()
+                return PolicyCatalog.model_validate(response.json())
+        except (httpx.HTTPError, ValueError) as exc:
+            raise InvalidResourceError("remote trainer", "Cannot verify available policies") from exc
 
     async def check_remote_trainer(self, remote_trainer_id: UUID) -> RemoteTrainerHealth:
         """Check a configured trainer's liveness and available compute devices.
