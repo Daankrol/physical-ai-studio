@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from physicalai.robot.trossen import BimanualWidowXAI, WidowXAI
-from physicalai_studio_plugin import RobotAdapterOptions, RobotAsset, RobotCatalogDefinition, robot_payload_ui
+from physicalai_studio_plugin import RobotAsset, RobotCatalogDefinition, robot_payload_ui
 from pydantic import BaseModel, ConfigDict, Field
 
 from schemas.robot_type import BaseRobot
@@ -287,7 +287,6 @@ def get_definitions() -> list[RobotCatalogDefinition]:
             robot_builder=_build_trossen_single_arm_driver,
             robot_payload=TrossenSingleArmPayload,
             asset=_TROSSEN_SINGLE_ARM_ASSET,
-            adapter_options=RobotAdapterOptions(include_velocities=True, goal_time_scale=1.0, external_effort_gain=0.1),
             probe=_SINGLE_ARM_PROBE,
         ),
         RobotCatalogDefinition(
@@ -297,7 +296,6 @@ def get_definitions() -> list[RobotCatalogDefinition]:
             robot_builder=_build_trossen_single_arm_driver,
             robot_payload=TrossenSingleArmPayload,
             asset=_TROSSEN_SINGLE_ARM_ASSET,
-            adapter_options=RobotAdapterOptions(include_velocities=True, goal_time_scale=1.0, external_effort_gain=0.1),
             probe=_SINGLE_ARM_PROBE,
         ),
         RobotCatalogDefinition(
@@ -307,7 +305,6 @@ def get_definitions() -> list[RobotCatalogDefinition]:
             robot_builder=_build_trossen_bimanual_driver,
             robot_payload=TrossenBimanualPayload,
             asset=_TROSSEN_BIMANUAL_ASSET,
-            adapter_options=RobotAdapterOptions(include_velocities=True, goal_time_scale=1.0, external_effort_gain=0.1),
             probe=_BIMANUAL_PROBE,
         ),
         RobotCatalogDefinition(
@@ -317,7 +314,6 @@ def get_definitions() -> list[RobotCatalogDefinition]:
             robot_builder=_build_trossen_bimanual_driver,
             robot_payload=TrossenBimanualPayload,
             asset=_TROSSEN_BIMANUAL_ASSET,
-            adapter_options=RobotAdapterOptions(include_velocities=True, goal_time_scale=1.0, external_effort_gain=0.1),
             probe=_BIMANUAL_PROBE,
         ),
     ]

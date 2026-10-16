@@ -8,14 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from loguru import logger
 from physicalai.robot.so101 import SO101, SO101Calibration, SO101JointCalibration
 from physicalai.robot.so101.constants import TICKS_PER_REVOLUTION
-from physicalai_studio_plugin import (
-    RobotAdapterOptions,
-    RobotAsset,
-    RobotCatalogDefinition,
-    RobotProbe,
-    robot_field_ui,
-    robot_payload_ui,
-)
+from physicalai_studio_plugin import RobotAsset, RobotCatalogDefinition, RobotProbe, robot_field_ui, robot_payload_ui
 from physicalai_studio_plugin.schemas import SerialPortInfo
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -294,7 +287,6 @@ def get_definitions() -> list[RobotCatalogDefinition]:
             robot_builder=_build_so101_driver,
             robot_payload=SO101RobotPayload,
             asset=_SO101_ASSET,
-            adapter_options=RobotAdapterOptions(goal_time_scale=1.0, external_effort_gain=None),
             probe=_SO101_PROBE,
         ),
         RobotCatalogDefinition(
@@ -304,7 +296,6 @@ def get_definitions() -> list[RobotCatalogDefinition]:
             robot_builder=_build_so101_driver,
             robot_payload=SO101RobotPayload,
             asset=_SO101_ASSET,
-            adapter_options=RobotAdapterOptions(goal_time_scale=1.0, external_effort_gain=None),
             probe=_SO101_PROBE,
         ),
     ]
