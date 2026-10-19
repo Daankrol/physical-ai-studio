@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from lerobot.datasets.dataset_tools import delete_episodes as lerobot_delete_episodes
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.video_utils import VideoDecoderCache, decode_video_frames_torchcodec
 from lerobot.processor import make_default_processors
 from lerobot.processor.pipeline import RobotProcessorPipeline
 from lerobot.utils.constants import ACTION, OBS_STR
@@ -156,15 +157,19 @@ class InternalLeRobotDataset(DatasetClient):
         build_thumbnail = (
             self._cached_thumbnail_png_bytes if width <= 320 and height <= 240 else self._build_thumbnail_png_bytes
         )
-        thumbnail_png = build_thumbnail(
-            str(video_path),
-            episode[f"videos/{video_key}/from_timestamp"],
-            width,
-            height,
-            video_stat.st_mtime_ns,
-            video_stat.st_size,
-        )
-        if thumbnail_png is None:
+        try:
+            thumbnail_png = build_thumbnail(
+                str(video_path),
+                episode[f"videos/{video_key}/from_timestamp"],
+                width,
+                height,
+                video_stat.st_mtime_ns,
+                video_stat.st_size,
+                self._dataset.tolerance_s,
+            )
+        except (ImportError, RuntimeError, ValueError, OSError, cv2.error) as exc:
+            # Catch outside the PNG cache so transient decoding failures can be retried.
+            logger.warning("Could not build thumbnail from '{}': {}", video_path, exc)
             return None
 
         return thumbnail_png, video_path
@@ -410,29 +415,31 @@ class InternalLeRobotDataset(DatasetClient):
     @staticmethod
     @lru_cache(maxsize=128)
     def _cached_thumbnail_png_bytes(
-        video_path: str, start: float, width: int, height: int, mtime_ns: int, size: int
-    ) -> bytes | None:
-        return InternalLeRobotDataset._build_thumbnail_png_bytes(video_path, start, width, height, mtime_ns, size)
+        video_path: str, start: float, width: int, height: int, mtime_ns: int, size: int, tolerance_s: float
+    ) -> bytes:
+        return InternalLeRobotDataset._build_thumbnail_png_bytes(
+            video_path, start, width, height, mtime_ns, size, tolerance_s
+        )
 
     @staticmethod
     def _build_thumbnail_png_bytes(
-        video_path: str, start: float, width: int, height: int, _mtime_ns: int, _size: int
-    ) -> bytes | None:
-        capture = cv2.VideoCapture(video_path)
+        video_path: str, start: float, width: int, height: int, _mtime_ns: int, _size: int, tolerance_s: float
+    ) -> bytes:
+        # OpenCV's bundled FFmpeg can lack software AV1 decoding. Use LeRobot's
+        # CPU decoder, without its global path-only cache which can retain replaced videos.
+        decoder_cache = VideoDecoderCache(max_size=1)
         try:
-            capture.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
-            ok, frame = capture.read()
+            frames = decode_video_frames_torchcodec(
+                video_path, [start], tolerance_s, decoder_cache=decoder_cache, return_uint8=True
+            )
         finally:
-            capture.release()
-        if not ok:
-            logger.warning("Could not decode thumbnail frame from '{}' at {}s", video_path, start)
-            return None
+            decoder_cache.clear()
 
+        frame = cv2.cvtColor(frames[0].permute(1, 2, 0).numpy(), cv2.COLOR_RGB2BGR)
         resized = cv2.resize(frame, (width, height))
         encoded, imagebytes = cv2.imencode(".png", resized)
         if not encoded:
-            logger.warning("Failed to encode thumbnail PNG from '{}'", video_path)
-            return None
+            raise RuntimeError(f"Failed to encode thumbnail PNG from '{video_path}'")
 
         return imagebytes.tobytes()
 
