@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from physicalai.runtime import LifecycleEvent as RuntimeLifecycleEvent
     from physicalai.runtime import TickEvent
 
-    from runtime.contract import FollowerSource
+    from runtime.contract import ActionOrigin
 
 
 class RecordingState:
@@ -31,6 +31,8 @@ class RecordingState:
         self._is_recording = False
         self._episodes_recorded = 0
         self._task: str | None = None
+        self._intervention = False
+        self._frames_recorded = 0
         self._mutation: RecordingMutation | None = None
         self._closed = False
 
@@ -49,12 +51,14 @@ class RecordingState:
         with self._lock:
             return self._episodes_recorded
 
-    def start(self, task: str) -> bool:
+    def start(self, task: str, intervention: bool = False) -> bool:
         """Begin an episode. Return False when no dataset is loaded."""
         with self._lock:
-            if self._mutation is None or self._closed:
+            if self._mutation is None or self._closed or self._is_recording:
                 return False
             self._task = task
+            self._intervention = intervention
+            self._frames_recorded = 0
             self._is_recording = True
             return True
 
@@ -78,7 +82,8 @@ class RecordingState:
         with self._lock:
             if self._closed or not self._is_recording or self._mutation is None or self._task is None:
                 return
-            self._mutation.add_frame(observation, action, self._task)
+            self._mutation.add_frame(observation, action, self._task, self._intervention)
+            self._frames_recorded += 1
 
     def stop_episode(self) -> RecordingMutation:
         """Clear the recording flag so ticks skip, then return the mutation.
@@ -90,6 +95,8 @@ class RecordingState:
         with self._lock:
             if not self._is_recording or self._mutation is None:
                 raise RuntimeError("No episode is being recorded.")
+            if self._frames_recorded == 0:
+                raise RuntimeError("No frames were recorded. Discard the episode.")
             self._is_recording = False
             return self._mutation
 
@@ -143,10 +150,10 @@ class RecordingCallback:
         self,
         *,
         recording: RecordingState,
-        follower_source: Callable[[], FollowerSource],
+        action_origin: Callable[[], ActionOrigin],
     ) -> None:
         self._recording = recording
-        self._follower_source = follower_source
+        self._action_origin = action_origin
         self._joint_names: list[str] = []
 
     def on_lifecycle(self, event: RuntimeLifecycleEvent) -> None:
@@ -154,7 +161,7 @@ class RecordingCallback:
             self._joint_names = list(event.metadata["joint_names"])
 
     def on_tick(self, event: TickEvent) -> None:
-        if self._follower_source() == "hold":
+        if self._action_origin() != "teleop":
             return
         if event.action_sent is None or not self._joint_names:
             return

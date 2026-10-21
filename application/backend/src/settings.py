@@ -358,6 +358,20 @@ class Settings(BaseSettings):
         """Expand `~` so the default resolves to the running user's SSH config."""
         return Path(value).expanduser()
 
+    # Runtime leader handover timing and calibrated joint-position limits.
+    leader_alignment_goal_time_s: float = Field(
+        default=3.0, gt=0, allow_inf_nan=False, alias="LEADER_ALIGNMENT_GOAL_TIME_S"
+    )
+    leader_alignment_position_tolerance: float = Field(
+        default=0.5, gt=0, allow_inf_nan=False, alias="LEADER_ALIGNMENT_POSITION_TOLERANCE"
+    )
+    leader_alignment_timeout_s: float = Field(
+        default=15.0, gt=0, allow_inf_nan=False, alias="LEADER_ALIGNMENT_TIMEOUT_S"
+    )
+    leader_handover_max_follower_step: float = Field(
+        default=0.5, gt=0, allow_inf_nan=False, alias="LEADER_HANDOVER_MAX_FOLLOWER_STEP"
+    )
+
     # Runtime sessions
     # Seconds a session keeps running with no client attached before it exits by
     # itself. A websocket reconnect after a page refresh completes well under 5s,

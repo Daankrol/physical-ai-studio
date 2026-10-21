@@ -145,6 +145,21 @@ def test_hotkey_bindings_are_loaded_from_json(monkeypatch, tmp_path: Path) -> No
     assert settings.hotkeys.bindings == {"recording.discard_episode": "Shift+ArrowLeft"}
 
 
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "LEADER_ALIGNMENT_GOAL_TIME_S",
+        "LEADER_ALIGNMENT_POSITION_TOLERANCE",
+        "LEADER_ALIGNMENT_TIMEOUT_S",
+        "LEADER_HANDOVER_MAX_FOLLOWER_STEP",
+    ],
+)
+@pytest.mark.parametrize("value", [0, -1, float("inf"), float("-inf"), float("nan")])
+def test_leader_handover_limits_require_finite_positive_values(setting: str, value: float) -> None:
+    with pytest.raises(ValueError, match=setting):
+        Settings(**{setting: value})
+
+
 def test_hotkey_bindings_patch_replaces_whole_map(monkeypatch, tmp_path: Path) -> None:
     """The `bindings` dict is a single top-level key of the `hotkeys` group, so
     merge_user_settings's shallow merge replaces it wholesale rather than deep-merging

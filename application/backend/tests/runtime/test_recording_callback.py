@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 from physicalai.capture import Frame
 from physicalai.runtime import LifecycleEvent, TickEvent
 
@@ -28,7 +29,7 @@ def _tick(*, positions: list[float], action: list[float], frames: dict | None = 
 
 
 def _callback(recording: RecordingState, *, source: str = "teleop") -> RecordingCallback:
-    callback = RecordingCallback(recording=recording, follower_source=lambda: source)
+    callback = RecordingCallback(recording=recording, action_origin=lambda: source)
     callback.on_lifecycle(
         LifecycleEvent(session_id="test", timestamp=1, event="start", metadata={"joint_names": ["joint"]})
     )
@@ -55,12 +56,13 @@ def test_frames_are_written_only_while_recording() -> None:
     mutation.add_frame.assert_not_called()
 
 
-def test_hold_ticks_are_not_recorded() -> None:
+@pytest.mark.parametrize("source", ["hold", "handover", "policy"])
+def test_non_teleop_ticks_are_not_recorded(source: str) -> None:
     mutation = MagicMock()
     recording = RecordingState()
     recording.attach_mutation(mutation)
     recording.start("pick")
-    callback = _callback(recording, source="hold")
+    callback = _callback(recording, source=source)
 
     callback.on_tick(_tick(positions=[1.0], action=[9.0]))
 
@@ -76,10 +78,38 @@ def test_the_recorded_action_is_the_action_sent() -> None:
 
     callback.on_tick(_tick(positions=[1.0], action=[7.0]))
 
-    observation, action, task = mutation.add_frame.call_args.args
+    observation, action, task, intervention = mutation.add_frame.call_args.args
     assert action == {"joint.pos": 7.0}
     assert observation["joint.pos"] == 1.0
     assert task == "pick"
+    assert intervention is False
+
+
+def test_intervention_is_passed_for_every_frame() -> None:
+    mutation = MagicMock()
+    recording = RecordingState()
+    recording.attach_mutation(mutation)
+    recording.start("recover", intervention=True)
+    callback = _callback(recording)
+
+    callback.on_tick(_tick(positions=[1.0], action=[7.0]))
+
+    assert mutation.add_frame.call_args.args[3] is True
+
+
+def test_empty_save_stays_open_and_can_be_discarded() -> None:
+    mutation = MagicMock()
+    recording = RecordingState()
+    recording.attach_mutation(mutation)
+    recording.start("pick")
+
+    with pytest.raises(RuntimeError, match="No frames were recorded"):
+        recording.stop_episode()
+
+    assert recording.is_recording is True
+    assert recording.current_mutation() is mutation
+    recording.mark_discarded()
+    assert recording.is_recording is False
 
 
 def test_recorded_frames_are_rgb() -> None:

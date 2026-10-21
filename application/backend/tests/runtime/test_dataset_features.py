@@ -12,6 +12,7 @@ def test_features_come_from_joint_names() -> None:
 
     assert features["observation.state"]["names"] == expected
     assert features["action"]["names"] == expected
+    assert features["intervention"] == {"dtype": "bool", "shape": (1,), "names": None}
 
 
 def test_camera_features_use_frame_shape() -> None:

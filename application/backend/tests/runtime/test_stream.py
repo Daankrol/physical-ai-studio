@@ -29,6 +29,7 @@ def test_lifecycle_start_emits_connected_state_once() -> None:
             "dataset_loaded": None,
             "is_recording": None,
             "episodes_recorded": None,
+            "handover_state": "idle",
         },
     }
 
@@ -91,6 +92,7 @@ def test_state_and_error_events_keep_the_websocket_contract() -> None:
             "dataset_loaded": None,
             "is_recording": None,
             "episodes_recorded": None,
+            "handover_state": "idle",
         },
     }
     assert ErrorEvent(message="lost", error_code="leader_connection_lost").model_dump() == {

@@ -15,12 +15,15 @@ from physicalai.inference.constants import IMAGES, STATE
 from physicalai.runtime import ChunkedActionQueue, LerpSmoother, PolicySource, SyncExecution, WorkerDiedError
 
 from runtime.action_source import StudioActionSource
+from runtime.callbacks.recording import RecordingState
 from runtime.contract import (
     ErrorEvent,
     InMemoryCommandMailbox,
     QueueEventSink,
     SetFollowerSourceCommand,
+    StartRecordingCommand,
     StartTaskCommand,
+    StateEvent,
     StopTaskCommand,
 )
 
@@ -333,16 +336,12 @@ def test_the_model_input_is_rgb() -> None:
 
 
 def test_no_policy_is_not_an_error() -> None:
-    follower = FakeRobot([_observation([1.0, 2.0]), _observation([1.0, 2.0])])
-    leader = FakeRobot([_observation([4.0, 5.0])])
-    source, mailbox, events = _source(follower=follower, leader=leader)
+    follower = FakeRobot([_observation([1.0, 2.0])])
+    source, _, events = _source(follower=follower)
 
-    hold = source.update(follower.get_observation(), {}, 0)
-    mailbox.apply(SetFollowerSourceCommand(follower_source="teleop"))
-    teleop = source.update(follower.get_observation(), {}, 1)
+    hold = source.update(_observation([1.0, 2.0]), {}, 0)
 
     np.testing.assert_array_equal(hold, [1.0, 2.0])
-    np.testing.assert_array_equal(teleop, [4.0, 5.0])
     assert not any(isinstance(event, ErrorEvent) for event in _drain(events))
 
 
@@ -368,7 +367,89 @@ def test_set_follower_source_policy_is_allowed_when_loaded() -> None:
     action = source.update(_observation([1.0, 2.0]), {}, 1)
 
     assert source.follower_source == "policy"
+    assert source.last_action_source == "policy"
     np.testing.assert_array_equal(action, [9.0, 9.0])
+
+
+def test_start_task_is_rejected_while_recording_is_open() -> None:
+    source, mailbox, events = _source()
+    recording = RecordingState()
+    recording.attach_mutation(MagicMock())
+    source.bind_recording(recording)
+    policy = _FakePolicy()
+    source._set_policy(policy, generation=1)  # type: ignore[arg-type]
+    assert recording.start("correction")
+
+    mailbox.apply(StartTaskCommand(task="resume"))
+    source.update(_observation([0.0, 0.0], 1.0), {}, 0)
+
+    assert source.follower_source == "hold"
+    assert any(
+        isinstance(event, ErrorEvent) and event.error_code == "recording_in_progress" for event in _drain(events)
+    )
+
+    recording.mark_discarded()
+    mailbox.apply(StartTaskCommand(task="resume"))
+    source.update(_observation([0.0, 0.0], 2.0), {}, 1)
+    _wait_for_policy(source)
+    source.shutdown_policy()
+
+
+def test_correction_recording_requires_model_dataset_leader_and_confirmed_teleop() -> None:
+    follower = FakeRobot([_observation([0.0, 0.0])])
+    leader = FakeRobot([_observation([0.0, 0.0])])
+    source, mailbox, events = _source(follower=follower, leader=leader)
+    recording = RecordingState()
+    mutation = MagicMock()
+    recording.attach_mutation(mutation)
+    source.bind_recording(recording)
+
+    mailbox.apply(StartRecordingCommand(task="recover", intervention=True))
+    source.update(_observation([0.0, 0.0], 1.0), {}, 0)
+    assert not recording.is_recording
+    assert any(isinstance(event, ErrorEvent) and event.error_code == "correction_not_ready" for event in _drain(events))
+
+    source._set_policy(_FakePolicy(), generation=1)  # type: ignore[arg-type]
+    mailbox.apply(StartRecordingCommand(task="recover", intervention=True))
+    source.update(_observation([0.0, 0.0], 2.0), {}, 1)
+    assert not recording.is_recording
+    assert any(isinstance(event, ErrorEvent) and event.error_code == "correction_not_ready" for event in _drain(events))
+
+    source._follower_source = "teleop"
+    mailbox.apply(StartRecordingCommand(task="recover", intervention=True))
+    source.update(_observation([0.0, 0.0], 3.0), {}, 2)
+    assert recording.is_recording
+    source.shutdown_policy()
+
+
+def test_correction_recording_requires_leader_and_dataset() -> None:
+    follower = FakeRobot([_observation([0.0, 0.0])])
+    source, mailbox, events = _source(follower=follower)
+    source.bind_recording(RecordingState())
+    source._set_policy(_FakePolicy(), generation=1)  # type: ignore[arg-type]
+    source._follower_source = "teleop"
+
+    mailbox.apply(StartRecordingCommand(task="recover", intervention=True))
+    source.update(_observation([0.0, 0.0], 1.0), {}, 0)
+    assert any(isinstance(event, ErrorEvent) and event.error_code == "correction_not_ready" for event in _drain(events))
+
+    leader_source, leader_mailbox, leader_events = _source(
+        follower=follower,
+        leader=FakeRobot([_observation([0.0, 0.0])]),
+    )
+    dataset_state = RecordingState()
+    leader_source.bind_recording(dataset_state)
+    leader_source._set_policy(_FakePolicy(), generation=1)  # type: ignore[arg-type]
+    leader_source._follower_source = "teleop"
+    leader_mailbox.apply(StartRecordingCommand(task="recover", intervention=True))
+    leader_source.update(_observation([0.0, 0.0], 2.0), {}, 0)
+
+    assert not dataset_state.is_recording
+    assert any(
+        isinstance(event, ErrorEvent) and event.error_code == "dataset_not_loaded" for event in _drain(leader_events)
+    )
+    source.shutdown_policy()
+    leader_source.shutdown_policy()
 
 
 def test_a_policy_that_failed_inference_is_not_reused() -> None:
@@ -395,7 +476,11 @@ def test_a_policy_that_failed_inference_is_not_reused() -> None:
 
     assert source.follower_source == "hold"
     assert source._loaded_identity is None
-    errors = [event for event in _drain(events) if isinstance(event, ErrorEvent)]
+    events_after_failure = _drain(events)
+    states = [event.data for event in events_after_failure if isinstance(event, StateEvent)]
+    assert states[-1].follower_source == "hold"
+    assert states[-1].model_loaded is False
+    errors = [event for event in events_after_failure if isinstance(event, ErrorEvent)]
     assert [error.error_code for error in errors] == ["policy_inference_failed"]
 
 

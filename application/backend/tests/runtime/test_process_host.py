@@ -90,6 +90,7 @@ def test_mode_command_crosses_process_boundary() -> None:
                 time.sleep(0.01)
                 continue
             if isinstance(event, StateEvent) and event.data.follower_source == "teleop":
+                assert event.data.handover_state == "idle"
                 break
         else:
             pytest.fail("Teleop state did not cross the process boundary")

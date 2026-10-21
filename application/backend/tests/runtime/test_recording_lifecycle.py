@@ -24,6 +24,9 @@ class _FakeMutation:
         self.order: list[str] = []
         self._save_delay = save_delay
 
+    def add_frame(self, observation: dict, action: dict, task: str, intervention: bool = False) -> None:
+        return None
+
     def save_episode(self) -> None:
         time.sleep(self._save_delay)
         self.has_mutation = True
@@ -76,6 +79,10 @@ class _FakeIdleSession:
         self.calls.append("finalize")
 
 
+def _record_one_frame(recording: RecordingState) -> None:
+    recording.add_frame({}, {})
+
+
 def _wait_until(predicate, timeout: float = 2.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -114,12 +121,14 @@ def test_save_discard_save_produces_two_episodes() -> None:
     recording = RecordingState()
     recording.attach_mutation(mutation)
     recording.start("pick")
+    _record_one_frame(recording)
     mutation.save_episode()
     recording.mark_saved()
     recording.start("pick")
     mutation.discard_buffer()
     recording.mark_discarded()
     recording.start("pick")
+    _record_one_frame(recording)
     mutation.save_episode()
     recording.mark_saved()
 
@@ -196,6 +205,7 @@ def test_idle_exit_after_save_finalizes_the_cache() -> None:
     mutation = _FakeMutation()
     session._recording.attach_mutation(mutation)
     session._recording.start("pick")
+    _record_one_frame(session._recording)
     mutation.save_episode()
     session._recording.mark_saved()
 
@@ -211,6 +221,7 @@ def test_finalizing_twice_tears_the_mutation_down_once() -> None:
     mutation = _FakeMutation()
     session._recording.attach_mutation(mutation)
     session._recording.start("pick")
+    _record_one_frame(session._recording)
     mutation.save_episode()
     session._recording.mark_saved()
 
@@ -244,6 +255,7 @@ def test_finalizing_runs_behind_an_in_flight_save() -> None:
     mutation = _FakeMutation(save_delay=0.15)
     session._recording.attach_mutation(mutation)
     session._recording.start("pick")
+    _record_one_frame(session._recording)
 
     session._command_worker.submit("save_episode", session._save_episode)
     session.finalize_recording()
@@ -259,6 +271,7 @@ def test_finalizing_resets_the_session_episode_count() -> None:
     mutation = _FakeMutation()
     session._recording.attach_mutation(mutation)
     session._recording.start("pick")
+    _record_one_frame(session._recording)
     session._recording.mark_saved()
     assert session._recording.episodes_recorded == 1
 
@@ -307,6 +320,7 @@ def test_handle_request_acks_save_and_discard_with_their_request_ids() -> None:
     mutation = _FakeMutation()
     session._recording.attach_mutation(mutation)
     session._recording.start("pick")
+    _record_one_frame(session._recording)
 
     session.handle_request(SaveEpisodeCommand(request_id="save-1"))
     session._recording.start("pick")
@@ -329,6 +343,7 @@ def test_save_episode_stops_recording_before_the_mutation_writes() -> None:
     mutation = _OrderCheckingMutation()
     recording.attach_mutation(mutation)
     recording.start("pick")
+    _record_one_frame(recording)
     session._save_episode()
 
     assert mutation.saved == 1
@@ -392,6 +407,7 @@ def test_teardown_leaves_the_mutation_to_a_worker_that_did_not_drain(monkeypatch
     mutation = _FakeMutation(save_delay=0.5)
     session._recording.attach_mutation(mutation)
     session._recording.start("pick")
+    _record_one_frame(session._recording)
     session._command_worker.submit("save_episode", session._save_episode)
 
     asyncio.run(session.teardown())
@@ -409,6 +425,7 @@ def test_a_failed_save_publishes_the_stopped_state() -> None:
     mutation = _FailingSaveMutation()
     session._recording.attach_mutation(mutation)
     session._recording.start("pick")
+    _record_one_frame(session._recording)
 
     with pytest.raises(RuntimeError, match="video encoding failed"):
         session._save_episode()
@@ -425,6 +442,7 @@ def test_discard_clears_the_buffer_after_a_failed_save() -> None:
     mutation = _FailingSaveMutation()
     session._recording.attach_mutation(mutation)
     session._recording.start("pick")
+    _record_one_frame(session._recording)
     with pytest.raises(RuntimeError):
         session._save_episode()
 

@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 FollowerSource = Literal["hold", "teleop", "policy"]
+ActionOrigin = Literal["hold", "handover", "teleop", "policy"]
+HandoverState = Literal["idle", "aligning", "awaiting_release", "alignment_failed", "manual_required"]
 
 
 class CommandBase(BaseModel):
@@ -23,6 +25,9 @@ class CommandBase(BaseModel):
 class SetFollowerSourceCommand(CommandBase):
     command: Literal["set_follower_source"] = "set_follower_source"
     follower_source: FollowerSource
+    auto_align_leader: bool = False
+    confirm_manual_alignment: bool = False
+    release_alignment: bool = False
 
 
 class DisconnectCommand(CommandBase):
@@ -66,6 +71,7 @@ class StopTaskCommand(CommandBase):
 class StartRecordingCommand(CommandBase):
     command: Literal["start_recording"] = "start_recording"
     task: str
+    intervention: bool = False
 
 
 class SaveEpisodeCommand(BaseModel):
@@ -109,6 +115,7 @@ class StateData(BaseModel):
     dataset_loaded: bool | None = None
     is_recording: bool | None = None
     episodes_recorded: int | None = None
+    handover_state: HandoverState = "idle"
 
 
 class StateEvent(BaseModel):

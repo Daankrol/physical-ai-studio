@@ -13,6 +13,7 @@ class EpisodeInfo(BaseModel):
     tasks: list[str]
     length: int
     fps: int
+    intervention: bool = False
 
 
 class EpisodeVideo(BaseModel):
@@ -26,6 +27,7 @@ class Episode(BaseModel):
     length: int
     fps: int
     tasks: list[str]
+    intervention: bool = False
     actions: list[list[float]]
     action_keys: list[str]
     videos: dict[str, EpisodeVideo]

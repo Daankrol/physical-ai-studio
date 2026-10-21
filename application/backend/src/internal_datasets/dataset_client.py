@@ -64,7 +64,7 @@ class DatasetClient(ABC):
         """Copy over repo without given episode_indices to output_path."""
 
     @abstractmethod
-    def add_frame(self, obs: dict, act: dict, task: str) -> None:
+    def add_frame(self, obs: dict, act: dict, task: str, intervention: bool = False) -> None:
         """Add frame to recording buffer."""
 
     @abstractmethod

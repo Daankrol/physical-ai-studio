@@ -34,7 +34,7 @@ def build_lerobot_dataset_features(
     for camera_key, spec in camera_specs.items():
         observation_features[camera_key] = spec
 
-    return combine_feature_dicts(
+    features = combine_feature_dicts(
         aggregate_pipeline_dataset_features(
             pipeline=teleop_action_processor,
             initial_features=create_initial_features(action=action_features),
@@ -46,3 +46,5 @@ def build_lerobot_dataset_features(
             use_videos=use_videos,
         ),
     )
+    features["intervention"] = {"dtype": "bool", "shape": (1,), "names": None}
+    return features

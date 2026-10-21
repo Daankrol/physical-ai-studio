@@ -377,6 +377,25 @@ def test_a_failed_load_does_not_leave_a_matching_identity(tmp_path, monkeypatch:
     source.shutdown_policy()
 
 
+def test_a_cached_model_request_holds_existing_ordinary_teleop(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    model_id = uuid4()
+    _export_dir(tmp_path, model_id)
+    monkeypatch.setattr("physicalai.inference.InferenceModel", FakeInferenceModel)
+    source, mailbox, _events, follower = _source(models_dir=tmp_path)
+    _load_and_wait(source, mailbox, follower, LoadModelCommand(model_id=model_id, inference_device=_DEVICE), 0)
+    source._follower_source = "teleop"
+    attached = source._policy
+    requested = _count_load_requests(source)
+
+    mailbox.apply(LoadModelCommand(model_id=model_id, inference_device=_DEVICE))
+    source.update(follower.get_observation(), {}, 1)
+
+    assert source.follower_source == "hold"
+    assert requested == []
+    assert source._policy is attached
+    source.shutdown_policy()
+
+
 def test_a_skipped_load_leaves_a_running_policy_alone(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     model_id = uuid4()
     _export_dir(tmp_path, model_id)

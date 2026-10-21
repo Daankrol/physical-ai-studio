@@ -14,7 +14,14 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from runtime.contract import CommandAdapter, LoadDatasetCommand, LoadModelCommand
+from runtime.contract import (
+    CommandAdapter,
+    LoadDatasetCommand,
+    LoadModelCommand,
+    SetFollowerSourceCommand,
+    StartRecordingCommand,
+    StateData,
+)
 from schemas import InferenceBackend
 
 
@@ -71,6 +78,50 @@ def test_load_dataset_carries_an_id() -> None:
 
     assert isinstance(command, LoadDatasetCommand)
     assert command.dataset_id == dataset_id
+
+
+def test_handover_and_correction_fields_keep_the_shared_contract_names() -> None:
+    teleop = SetFollowerSourceCommand(follower_source="teleop")
+    recording = StartRecordingCommand(task="recover")
+    state = StateData(connected=True, follower_source="hold")
+
+    assert teleop.auto_align_leader is False
+    assert teleop.confirm_manual_alignment is False
+    assert teleop.release_alignment is False
+    assert recording.intervention is False
+    assert state.handover_state == "idle"
+    assert set(teleop.model_dump()) >= {"follower_source", "auto_align_leader", "confirm_manual_alignment"}
+    assert set(recording.model_dump()) >= {"task", "intervention"}
+    assert state.model_dump()["handover_state"] == "idle"
+
+
+def test_manual_model_takeover_preserves_the_powered_alignment_opt_out() -> None:
+    command = SetFollowerSourceCommand(follower_source="teleop", auto_align_leader=False, confirm_manual_alignment=True)
+
+    restored = CommandAdapter.validate_python(command.model_dump(mode="json"))
+
+    assert isinstance(restored, SetFollowerSourceCommand)
+    assert restored == command
+    assert restored.auto_align_leader is False
+
+
+def test_model_takeover_preserves_the_powered_alignment_opt_in() -> None:
+    command = SetFollowerSourceCommand(follower_source="teleop", auto_align_leader=True)
+
+    restored = CommandAdapter.validate_python(command.model_dump(mode="json"))
+
+    assert isinstance(restored, SetFollowerSourceCommand)
+    assert restored == command
+    assert restored.auto_align_leader is True
+
+
+def test_explicit_alignment_release_round_trips() -> None:
+    command = SetFollowerSourceCommand(follower_source="teleop", release_alignment=True)
+
+    restored = CommandAdapter.validate_python(command.model_dump(mode="json"))
+
+    assert restored == command
+    assert restored.release_alignment is True
 
 
 def test_commands_round_trip_through_json() -> None:
