@@ -70,6 +70,14 @@ class JobService:
         """Return pending training jobs in submission order."""
         return await self.repo.get_pending_jobs_by_type(JobType.TRAINING)
 
+    async def claim_pending_train_job(self, job_id: UUID) -> Job | None:
+        """Claim a training job before preparation unless it has already been canceled."""
+        return await self.repo.transition_pending_train_job(job_id, JobStatus.RUNNING)
+
+    async def cancel_pending_train_job(self, job_id: UUID) -> Job | None:
+        """Cancel unclaimed jobs unless a persisted remote execution needs worker cancellation."""
+        return await self.repo.transition_pending_train_job(job_id, JobStatus.CANCELED)
+
     async def update_job_payload(
         self,
         job_id: UUID,
@@ -97,9 +105,6 @@ class JobService:
             updates["end_time"] = datetime.datetime.now(tz=datetime.UTC)
 
         return await self.repo.update(job, updates)
-
-    async def transition_pending_train_job(self, job_id: UUID, status: JobStatus) -> bool:
-        return await self.repo.transition_pending_train_job(job_id, status)
 
     async def update_job_status(
         self,

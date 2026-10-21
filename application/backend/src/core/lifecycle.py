@@ -126,7 +126,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # Ideally RobotHardwareManager would have a shutdown_all method too.
     # For now, we assume active workers unregistering will trigger releases.
 
-    app_scheduler.shutdown()
+    # Keep draining worker events while shutdown waits for child processes to exit.
+    await asyncio.to_thread(app_scheduler.shutdown)
     app.state.event_processor.shutdown()
     logger.info("Application shutdown completed")
 

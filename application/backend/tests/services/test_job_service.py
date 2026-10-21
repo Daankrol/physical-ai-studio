@@ -180,7 +180,7 @@ async def test_only_one_pending_train_job_transition_wins(first: JobStatus) -> N
         await connection.execute(
             text(
                 "CREATE TABLE jobs (id TEXT, type TEXT, status TEXT, message TEXT, "
-                "start_time DATETIME, end_time DATETIME)"
+                "start_time DATETIME, end_time DATETIME, payload JSON)"
             )
         )
         await connection.execute(
@@ -190,8 +190,13 @@ async def test_only_one_pending_train_job_transition_wins(first: JobStatus) -> N
         async with AsyncSession(engine) as session:
             service = JobService(session)
             other = JobStatus.CANCELED if first is JobStatus.RUNNING else JobStatus.RUNNING
-            assert await service.transition_pending_train_job(job_id, first)
-            assert not await service.transition_pending_train_job(job_id, other)
+            transitions = {
+                JobStatus.RUNNING: service.claim_pending_train_job,
+                JobStatus.CANCELED: service.cancel_pending_train_job,
+            }
+            with patch.object(service.repo, "get_by_id", AsyncMock(return_value=_job(status=first))):
+                assert await transitions[first](job_id) is not None
+                assert await transitions[other](job_id) is None
             result = await session.execute(
                 text("SELECT status, start_time, end_time FROM jobs WHERE id = :id"), {"id": str(job_id)}
             )
