@@ -1,6 +1,6 @@
 import { Suspense, useState } from 'react';
 
-import { Button, ButtonGroup, Content, Dialog, Divider, Heading, ProgressCircle } from '@geti-ui/ui';
+import { Button, ButtonGroup, Checkbox, Content, Dialog, Divider, Flex, Heading, ProgressCircle } from '@geti-ui/ui';
 import { createSearchParams, useNavigate } from 'react-router';
 
 import { $api } from '../../../api/client';
@@ -30,6 +30,7 @@ interface StartInferenceDialogProps {
 export const StartInferenceDialog = ({ close, model }: StartInferenceDialogProps) => {
     const initialBackend = getDefaultbackend(model);
     const [selectedInferenceDevice, setSelectedInferenceDevice] = useState<InferenceDevice | undefined>();
+    const [collectCorrections, setCollectCorrections] = useState(false);
 
     const { data: inferenceDevices = [], isLoading } = $api.useQuery('get', '/api/system/devices/inference');
     const backend = selectedInferenceDevice?.backend ?? initialBackend;
@@ -52,7 +53,10 @@ export const StartInferenceDialog = ({ close, model }: StartInferenceDialogProps
                 model_id: model.id!,
                 backend,
             }),
-            search: createSearchParams({ device: inferenceDevice.device }).toString(),
+            search: createSearchParams({
+                device: inferenceDevice.device,
+                ...(collectCorrections ? { collect: '1' } : {}),
+            }).toString(),
         });
     };
 
@@ -61,14 +65,19 @@ export const StartInferenceDialog = ({ close, model }: StartInferenceDialogProps
             <Heading>Select your inference backend</Heading>
             <Divider />
             <Content>
-                <Suspense fallback={<ProgressCircle aria-label='Loading backends' isIndeterminate size='S' />}>
-                    <BackendSelection
-                        model={model}
-                        inferenceDevice={inferenceDevice}
-                        inferenceDevices={inferenceDevices}
-                        setInferenceDevice={setSelectedInferenceDevice}
-                    />
-                </Suspense>
+                <Flex direction='column' gap='size-200'>
+                    <Suspense fallback={<ProgressCircle aria-label='Loading backends' isIndeterminate size='S' />}>
+                        <BackendSelection
+                            model={model}
+                            inferenceDevice={inferenceDevice}
+                            inferenceDevices={inferenceDevices}
+                            setInferenceDevice={setSelectedInferenceDevice}
+                        />
+                    </Suspense>
+                    <Checkbox isEmphasized isSelected={collectCorrections} onChange={setCollectCorrections}>
+                        Collect corrections into the training dataset
+                    </Checkbox>
+                </Flex>
             </Content>
             <ButtonGroup>
                 <Button variant='secondary' onPress={close}>

@@ -1,8 +1,11 @@
 .hotkey {
-    background: rgba(0, 0, 0, 0.25);
-    border-radius: 4px;
-    padding: 1px 6px;
-    margin-right: 10px;
+    margin-inline-start: var(--spectrum-global-dimension-size-100);
+    padding: var(--spectrum-global-dimension-size-25) var(--spectrum-global-dimension-size-75);
+    border: var(--spectrum-alias-border-size-thin) solid color-mix(in srgb, currentColor 30%, transparent);
+    border-radius: var(--spectrum-global-dimension-size-50);
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    font-size: var(--spectrum-global-dimension-font-size-50);
+    white-space: nowrap;
 }
 
 .toolbarStatus {

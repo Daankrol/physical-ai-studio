@@ -23,6 +23,7 @@ export interface RuntimeSessionState {
     dataset_loaded: boolean;
     is_recording: boolean;
     episodes_recorded: number;
+    handover_state?: 'idle' | 'aligning' | 'awaiting_release' | 'alignment_failed' | 'manual_required';
 }
 
 const createRuntimeSessionState = (): RuntimeSessionState => ({
@@ -34,6 +35,7 @@ const createRuntimeSessionState = (): RuntimeSessionState => ({
     dataset_loaded: false,
     is_recording: false,
     episodes_recorded: 0,
+    handover_state: undefined,
 });
 
 interface RuntimeApiJsonResponse<T = RuntimeSessionState> {
@@ -51,9 +53,18 @@ interface RuntimeSessionProviderProps {
     dataset?: SchemaDatasetOutput;
     inferenceDevice?: InferenceDevice;
     onError: (error: string) => void;
+    collect?: boolean;
 }
 
 type MutationResult<TVariables = void> = UseMutationResult<RuntimeApiJsonResponse, Error, TVariables>;
+type FollowerSourceRequest =
+    | FollowerSource
+    | {
+          follower_source: FollowerSource;
+          auto_align_leader?: boolean;
+          confirm_manual_alignment?: boolean;
+          release_alignment?: boolean;
+      };
 
 type RuntimeSessionContextValue = {
     observation: RefObject<Record<string, number> | undefined>;
@@ -67,7 +78,7 @@ type RuntimeSessionContextValue = {
     loadDataset: MutationResult<SchemaDatasetOutput>;
     startTask: MutationResult<string>;
     stopTask: MutationResult;
-    setFollowerSource: MutationResult<FollowerSource>;
+    setFollowerSource: MutationResult<FollowerSourceRequest>;
     startEpisode: MutationResult<string>;
     saveEpisode: MutationResult;
     discardEpisode: MutationResult;
@@ -134,7 +145,9 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
         }
         if (props.dataset) {
             loadDataset.mutate(props.dataset);
-            setFollowerSource.mutate('teleop');
+            if (!props.model) {
+                setFollowerSource.mutate({ follower_source: 'teleop', auto_align_leader: false });
+            }
         }
     };
 
@@ -159,6 +172,7 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
                     dataset_loaded: next.dataset_loaded ?? false,
                     is_recording: next.is_recording ?? false,
                     episodes_recorded: next.episodes_recorded ?? 0,
+                    handover_state: next.handover_state,
                 });
             }
             if (message.event === 'error') {
@@ -223,18 +237,27 @@ export const RuntimeSessionProvider = (props: RuntimeSessionProviderProps) => {
 
     const setFollowerSource = useMutation({
         meta: { skipInvalidation: true },
-        mutationFn: async (follower_source: FollowerSource) =>
-            socket.sendJsonMessageAndWait<RuntimeApiJsonResponse>(
-                { event: 'set_follower_source', data: { follower_source } },
-                ({ event, data }) => event === 'state' && data?.follower_source === follower_source
-            ),
+        mutationFn: async (request: FollowerSourceRequest) => {
+            const command = typeof request === 'string' ? { follower_source: request } : request;
+            return socket.sendJsonMessageAndWait<RuntimeApiJsonResponse>(
+                { event: 'set_follower_source', data: command },
+                ({ event, data }) =>
+                    event === 'state' &&
+                    ((command.follower_source === 'teleop' &&
+                        (data?.handover_state === 'manual_required' ||
+                            (!command.release_alignment &&
+                                (data?.handover_state === 'awaiting_release' ||
+                                    data?.handover_state === 'alignment_failed')))) ||
+                        (data?.follower_source === command.follower_source && data?.handover_state === 'idle'))
+            );
+        },
     });
 
     const startEpisode = useMutation({
         meta: { skipInvalidation: true },
         mutationFn: async (task: string) =>
             socket.sendJsonMessageAndWait<RuntimeApiJsonResponse>(
-                { event: 'start_recording', data: { task } },
+                { event: 'start_recording', data: { task, ...(props.collect ? { intervention: true } : {}) } },
                 ({ event, data }) => event === 'state' && data?.is_recording === true
             ),
     });

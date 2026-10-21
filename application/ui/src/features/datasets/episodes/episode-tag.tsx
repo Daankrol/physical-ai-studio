@@ -1,4 +1,4 @@
-import { Flex } from '@geti-ui/ui';
+import { Badge, Flex } from '@geti-ui/ui';
 import { clsx } from 'clsx';
 
 import { EpisodeSummary } from '../../../routes/datasets/dataset-provider';
@@ -20,6 +20,11 @@ export const EpisodeTag = ({ episode, variant }: EpisodeTagProps) => {
             <div className={clsx(classes.episodeDuration, { [classes.variantSmall]: variant === 'small' })}>
                 {toMMSS(episode.length / episode.fps)}
             </div>
+            {episode.intervention === true && (
+                <Badge variant='neutral' UNSAFE_className={classes.correctionBadge}>
+                    Human correction
+                </Badge>
+            )}
         </Flex>
     );
 };

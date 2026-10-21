@@ -3,16 +3,17 @@ import { useCallback, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router';
 
 import { paths } from '../../paths';
-import { useDataset } from './dataset-provider';
+import { EpisodeSummary, useDataset } from './dataset-provider';
 
-export function useActiveEpisode(): [number | null, (idx: number) => void] {
+export function useActiveEpisode(filteredEpisodes?: EpisodeSummary[]): [number | null, (idx: number) => void] {
     const navigate = useNavigate();
     const { project_id, dataset_id, episode_index } = useParams<{
         project_id: string;
         dataset_id: string;
         episode_index: string;
     }>();
-    const { episodes } = useDataset();
+    const { episodes: datasetEpisodes } = useDataset();
+    const episodes = filteredEpisodes ?? datasetEpisodes;
 
     if (project_id === undefined) {
         throw new Error('Unknown project_id parameter');

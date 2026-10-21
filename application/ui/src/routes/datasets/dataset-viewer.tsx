@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import {
     ActionButton,
@@ -9,7 +9,9 @@ import {
     Flex,
     Heading,
     IllustratedMessage,
+    Item,
     Loading,
+    Picker,
     Text,
     View,
 } from '@geti-ui/ui';
@@ -35,7 +37,16 @@ export const DatasetViewer = () => {
     const { project_id } = useProjectId();
 
     const { deleteEpisodes, isPending } = useDeleteEpisodeQuery(dataset.id!);
-    const [activeEpisodeIndex, setActiveEpisodeIndex] = useActiveEpisode();
+    const [episodeFilter, setEpisodeFilter] = useState<'all' | 'corrections' | 'regular'>('all');
+    const filteredEpisodes = useMemo(
+        () =>
+            episodes.filter((episode) => {
+                if (episodeFilter === 'all') return true;
+                return episodeFilter === 'corrections' ? episode.intervention === true : episode.intervention !== true;
+            }),
+        [episodes, episodeFilter]
+    );
+    const [activeEpisodeIndex, setActiveEpisodeIndex] = useActiveEpisode(filteredEpisodes);
     const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest');
 
     const { data: environment } = $api.useSuspenseQuery(
@@ -97,7 +108,12 @@ export const DatasetViewer = () => {
                 onLayoutChanged={onLayoutChanged}
             >
                 <Panel id='episode-viewer' minSize='30%' className={classes.viewerPanel}>
-                    {isEpisodeLoading || !selectedEpisode ? (
+                    {filteredEpisodes.length === 0 ? (
+                        <IllustratedMessage>
+                            <Heading>No matching episodes</Heading>
+                            <Content>Choose another episode type to see more recordings.</Content>
+                        </IllustratedMessage>
+                    ) : isEpisodeLoading || !selectedEpisode ? (
                         <Loading />
                     ) : (
                         <EpisodeViewer episode={selectedEpisode} dataset={dataset} environment={environment} />
@@ -146,8 +162,24 @@ export const DatasetViewer = () => {
                             <SortUpDown />
                         </ActionButton>
                     </Flex>
+                    <Picker
+                        label='Episode type'
+                        selectedKey={episodeFilter}
+                        onSelectionChange={(key) => {
+                            if (key === 'all' || key === 'corrections' || key === 'regular') {
+                                setEpisodeFilter(key);
+                                setSelectedEpisodes([]);
+                            }
+                        }}
+                        width='100%'
+                        marginBottom='size-200'
+                    >
+                        <Item key='all'>All episodes</Item>
+                        <Item key='corrections'>Human corrections</Item>
+                        <Item key='regular'>Regular recordings</Item>
+                    </Picker>
                     <EpisodeList
-                        episodes={episodes}
+                        episodes={filteredEpisodes}
                         onSelect={setActiveEpisodeIndex}
                         currentEpisode={activeEpisodeIndex}
                         sortOrder={sortOrder}

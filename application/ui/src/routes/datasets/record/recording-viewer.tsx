@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useState } from 'react';
 
 import {
     Button,
@@ -7,12 +7,15 @@ import {
     Flex,
     Form,
     Heading,
+    Icon,
     Item,
     Keyboard,
     ProgressCircle,
     StatusLight,
     Text,
+    View,
 } from '@geti-ui/ui';
+import { Accept, Delete, Video } from '@geti-ui/ui/icons';
 
 import { $api } from '../../../api/client';
 import { formatKeyCombo, getEffectiveBindings } from '../../../features/hotkeys/key-combo';
@@ -64,6 +67,7 @@ export const RecordingViewer = () => {
         dataset,
         state,
         startEpisode,
+        setFollowerSource,
         discardEpisode,
         saveEpisode,
         readyForRecording,
@@ -80,27 +84,63 @@ export const RecordingViewer = () => {
     const { data: settings } = $api.useSuspenseQuery('get', '/api/settings');
     const bindings = getEffectiveBindings(settings.hotkeys.bindings);
 
-    useHotkey(
-        bindings['recording.start_episode'],
-        () => startEpisode.mutate(task),
-        !state.is_recording && !startEpisode.isPending && task !== ''
+    const teleopReady = state.follower_source === 'teleop' && state.handover_state === 'idle';
+    const canStartEpisode =
+        state.has_leader &&
+        state.handover_state === 'idle' &&
+        !state.is_recording &&
+        !startEpisode.isPending &&
+        !setFollowerSource.isPending &&
+        !saveEpisode.isPending &&
+        !discardEpisode.isPending;
+    const startRecording = useCallback(async () => {
+        if (!canStartEpisode || task === '') return;
+        try {
+            if (!teleopReady) {
+                const result = await setFollowerSource.mutateAsync({
+                    follower_source: 'teleop',
+                    auto_align_leader: false,
+                });
+                if (result.data?.follower_source !== 'teleop' || result.data.handover_state !== 'idle') return;
+            }
+            startEpisode.mutate(task);
+        } catch {
+            // The provider reports runtime failures to its configured toast handler.
+        }
+    }, [canStartEpisode, setFollowerSource, startEpisode, task, teleopReady]);
+    const finishEpisode = useCallback(
+        async (save: boolean) => {
+            try {
+                if (
+                    state.follower_source !== 'hold' ||
+                    state.handover_state === 'aligning' ||
+                    state.handover_state === undefined
+                ) {
+                    await setFollowerSource.mutateAsync('hold');
+                }
+                await (save ? saveEpisode : discardEpisode).mutateAsync();
+            } catch {
+                // The provider reports runtime failures to its configured toast handler.
+            }
+        },
+        [discardEpisode, saveEpisode, setFollowerSource, state.follower_source, state.handover_state]
     );
+
+    useHotkey(bindings['recording.start_episode'], () => void startRecording(), canStartEpisode && task !== '');
     useHotkey(
         bindings['recording.accept_episode'],
-        () => saveEpisode.mutate(),
-        state.is_recording && !saveEpisode.isPending
+        () => void finishEpisode(true),
+        state.is_recording && !saveEpisode.isPending && !discardEpisode.isPending && !setFollowerSource.isPending
     );
     useHotkey(
         bindings['recording.discard_episode'],
-        () => discardEpisode.mutate(),
-        state.is_recording && !saveEpisode.isPending
+        () => void finishEpisode(false),
+        state.is_recording && !discardEpisode.isPending && !saveEpisode.isPending && !setFollowerSource.isPending
     );
 
     const onStart = (e: FormEvent) => {
         e.preventDefault();
-        if (task !== '') {
-            startEpisode.mutate(task);
-        }
+        void startRecording();
     };
 
     if (!readyForRecording) {
@@ -131,49 +171,88 @@ export const RecordingViewer = () => {
         <RobotModelsProvider>
             <Flex direction={'column'} height={'100%'} position={'relative'}>
                 <Form validationBehavior='native' onSubmit={onStart}>
-                    <Flex justifyContent={'start'} alignItems='center' gap='size-100' height='size-800'>
-                        <ComboBox
-                            isReadOnly={state.is_recording}
-                            errorMessage={'A task is required in order to record.'}
-                            name='Task'
-                            flex
-                            isRequired
-                            allowsCustomValue
-                            inputValue={task}
-                            onInputChange={setTask}
-                        >
-                            <Item key={dataset.default_task}>{dataset.default_task}</Item>
-                        </ComboBox>
-                        {state.is_recording && <ToolbarRecordingStatus />}
-                        {state.is_recording ? (
-                            <ButtonGroup>
+                    <View
+                        backgroundColor='gray-100'
+                        borderColor='gray-300'
+                        borderWidth='thin'
+                        borderRadius='regular'
+                        padding='size-150'
+                        marginBottom='size-150'
+                    >
+                        <Flex justifyContent='start' alignItems='center' gap='size-150' wrap='wrap'>
+                            <ComboBox
+                                isReadOnly={state.is_recording}
+                                errorMessage={'A task is required in order to record.'}
+                                name='Task'
+                                aria-label='Task'
+                                flex='1 1 240px'
+                                minWidth='size-2400'
+                                isRequired
+                                allowsCustomValue
+                                inputValue={task}
+                                onInputChange={setTask}
+                            >
+                                <Item key={dataset.default_task}>{dataset.default_task}</Item>
+                            </ComboBox>
+                            {state.is_recording && <ToolbarRecordingStatus />}
+                            {state.is_recording ? (
+                                <ButtonGroup>
+                                    <Button
+                                        isDisabled={
+                                            saveEpisode.isPending ||
+                                            discardEpisode.isPending ||
+                                            setFollowerSource.isPending
+                                        }
+                                        variant={'negative'}
+                                        style='outline'
+                                        isPending={discardEpisode.isPending}
+                                        onPress={() => void finishEpisode(false)}
+                                    >
+                                        <Icon size='S'>
+                                            <Delete />
+                                        </Icon>
+                                        <Text>Discard</Text>
+                                        <Keyboard UNSAFE_className={classes.hotkey}>
+                                            {formatKeyCombo(bindings['recording.discard_episode'])}
+                                        </Keyboard>
+                                    </Button>
+                                    <Button
+                                        variant='accent'
+                                        style='fill'
+                                        isDisabled={discardEpisode.isPending || setFollowerSource.isPending}
+                                        isPending={saveEpisode.isPending}
+                                        onPress={() => void finishEpisode(true)}
+                                    >
+                                        <Icon size='S'>
+                                            <Accept />
+                                        </Icon>
+                                        <Text>Accept</Text>
+                                        <Keyboard UNSAFE_className={classes.hotkey}>
+                                            {formatKeyCombo(bindings['recording.accept_episode'])}
+                                        </Keyboard>
+                                    </Button>
+                                </ButtonGroup>
+                            ) : (
                                 <Button
-                                    isDisabled={saveEpisode.isPending}
-                                    variant={'negative'}
-                                    onPress={() => discardEpisode.mutate()}
+                                    variant='accent'
+                                    style='fill'
+                                    type={'submit'}
+                                    isDisabled={!canStartEpisode}
+                                    isPending={startEpisode.isPending}
                                 >
-                                    <Text>Discard</Text>
+                                    <Icon size='S'>
+                                        <Video />
+                                    </Icon>
+                                    <Text>Start episode</Text>
                                     <Keyboard UNSAFE_className={classes.hotkey}>
-                                        {formatKeyCombo(bindings['recording.discard_episode'])}
+                                        {formatKeyCombo(bindings['recording.start_episode'])}
                                     </Keyboard>
                                 </Button>
-                                <Button isPending={saveEpisode.isPending} onPress={() => saveEpisode.mutate()}>
-                                    <Text>Accept</Text>
-                                    <Keyboard UNSAFE_className={classes.hotkey}>
-                                        {formatKeyCombo(bindings['recording.accept_episode'])}
-                                    </Keyboard>
-                                </Button>
-                            </ButtonGroup>
-                        ) : (
-                            <Button type={'submit'} isPending={startEpisode.isPending}>
-                                <Text>Start episode</Text>
-                                <Keyboard UNSAFE_className={classes.hotkey}>
-                                    {formatKeyCombo(bindings['recording.start_episode'])}
-                                </Keyboard>
-                            </Button>
-                        )}
-                    </Flex>
+                            )}
+                        </Flex>
+                    </View>
                 </Form>
+                {!state.has_leader && <div role='alert'>Recording needs a leader arm.</div>}
                 <RobotControlView
                     environment={environment}
                     isReady={state.connected}

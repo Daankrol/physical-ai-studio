@@ -8,6 +8,7 @@ type EpisodeSummary = {
     tasks: string[];
     length: number;
     fps: number;
+    intervention?: boolean;
 };
 
 type DatasetContextValue = null | {

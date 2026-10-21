@@ -100,7 +100,7 @@ const mockProjectWithRemoteTrainer = () => {
             })
         ),
         http.get('/api/dataset/{dataset_id}/episodes', () =>
-            HttpResponse.json([{ episode_index: 0, tasks: ['Test task'], length: 100, fps: 30 }])
+            HttpResponse.json([{ episode_index: 0, tasks: ['Test task'], length: 100, fps: 30, intervention: false }])
         ),
         http.get('/api/dataset/{dataset_id}/episodes/{episode_index}', () =>
             HttpResponse.json({
@@ -108,6 +108,7 @@ const mockProjectWithRemoteTrainer = () => {
                 length: 100,
                 fps: 30,
                 tasks: ['Test task'],
+                intervention: false,
                 actions: [],
                 action_keys: [],
                 videos: {
@@ -201,8 +202,8 @@ describe('TrainModelDialog', () => {
         server.use(
             http.get('/api/dataset/{dataset_id}/episodes', () =>
                 HttpResponse.json([
-                    { episode_index: 0, tasks: ['Test task'], length: 100, fps: 30 },
-                    { episode_index: 1, tasks: ['Test task'], length: 100, fps: 30 },
+                    { episode_index: 0, tasks: ['Test task'], length: 100, fps: 30, intervention: false },
+                    { episode_index: 1, tasks: ['Test task'], length: 100, fps: 30, intervention: false },
                 ])
             )
         );

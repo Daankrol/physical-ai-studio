@@ -158,7 +158,10 @@ export const useJointState = (
     const setFollowerSourceRequest = (value: FollowerSource) => {
         socket.sendJsonMessage({
             event: 'set_follower_source',
-            data: { follower_source: value },
+            data: {
+                follower_source: value,
+                ...(value === 'teleop' ? { auto_align_leader: false } : {}),
+            },
         });
     };
 

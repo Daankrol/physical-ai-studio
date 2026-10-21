@@ -107,7 +107,7 @@ const AvailableRobotCell = ({
                             </Focusable>
                             <Tooltip>
                                 {canTeleoperate
-                                    ? 'Control the follower using the leader robot'
+                                    ? 'Control the follower using the free leader robot'
                                     : 'Connect a leader robot to enable teleoperation'}
                             </Tooltip>
                         </TooltipTrigger>
