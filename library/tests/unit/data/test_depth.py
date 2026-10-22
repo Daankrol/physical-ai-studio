@@ -23,7 +23,7 @@ DEPTH = "observation.images.front_depth"
 
 
 def make_dataset(root: Path, *, depth: bool = False, cameras: tuple[str, ...] = (RGB,)) -> Path:
-    features = {
+    features: dict[str, dict[str, object]] = {
         "observation.state": {"dtype": "float32", "shape": [6], "names": None},
         "action": {"dtype": "float32", "shape": [6], "names": None},
     }

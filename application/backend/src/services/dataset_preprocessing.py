@@ -103,6 +103,7 @@ async def run_preprocessing_job(  # noqa: C901, PLR0912, PLR0915 -- shared clean
     output = root / "dataset"
     backup = root / "original"
     process = None
+    source: Dataset | None = None
     root_created = False
     last_progress = -1
 
@@ -209,6 +210,6 @@ async def run_preprocessing_job(  # noqa: C901, PLR0912, PLR0915 -- shared clean
                 process.kill()
                 await process.wait()
         if root_created and root.exists():
-            if backup.exists() and not Path(source.path).exists():
+            if source is not None and backup.exists() and not Path(source.path).exists():
                 backup.rename(source.path)
             shutil.rmtree(root)
