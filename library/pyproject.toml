@@ -9,6 +9,9 @@
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/physicalai"]
 
@@ -87,6 +90,22 @@ smolvla = [
     "safetensors>=0.4.3,<1.0.0",
 ]
 
+# LingBot-VLA 2.0 and its optional-on-use RGB/depth/video teachers.
+lingbotvla2 = [
+    "torch>=2.11.0",
+    "transformers>=5.15.1,<5.16.0",
+    "safetensors>=0.4.3,<1.0.0",
+    "peft>=0.20.0,<1.0.0",
+    "Pillow>=10.0.0,<13.0.0",
+]
+
+lingbotvla2-teachers = [
+    "physicalai-train[lingbotvla2]",
+    "omegaconf>=2.3.0,<3.0.0",
+    "scipy>=1.11.0,<2.0.0",
+    "utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183",
+]
+
 # MolmoAct2
 # Supports LoRA fine-tuning for efficient adaptation
 molmoact2 = [
@@ -135,6 +154,7 @@ policies = [
     "physicalai-train[diffusion]",
     "physicalai-train[pi05]",
     "physicalai-train[smolvla]",
+    "physicalai-train[lingbotvla2-teachers]",
     "physicalai-train[molmoact2]",
     "physicalai-train[rldx1]",
     "physicalai-train[xr0]",
@@ -255,6 +275,13 @@ ignore_missing_imports = true
 show_error_codes = true
 explicit_package_bases = true
 
+[[tool.mypy.overrides]]
+module = [
+    "physicalai.policies.lingbotvla2._vendor.*",
+    "src.physicalai.policies.lingbotvla2._vendor.*",
+]
+ignore_errors = true
+
 [tool.pyrefly]
 search-path = ["src"]
 project-includes = ["src"]
@@ -278,6 +305,7 @@ project-excludes = [
     # xr0's Qwen3-VL backbone wrapper is dynamically typed (transformers modules
     # resolve to `Module | Tensor`); same rationale as pi_gemma / qwen3_vl above.
     "src/physicalai/policies/xr0/qwen3_vlm.py",
+    "src/physicalai/policies/lingbotvla2/_vendor/**",
 ]
 
 
@@ -299,6 +327,7 @@ extend-exclude = [
     "notebooks", # Jupyter notebooks have different style requirements
     # Auto-generated from transformers' modular_qwen3_vl.py; not hand-maintained.
     "src/physicalai/policies/rldx1/components/backbone/modeling_qwen3_vl.py",
+    "src/physicalai/policies/lingbotvla2/_vendor",
 ]
 
 [tool.ruff.lint]
