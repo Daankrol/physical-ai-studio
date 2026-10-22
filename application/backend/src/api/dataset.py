@@ -1,6 +1,6 @@
 import asyncio
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
@@ -9,13 +9,26 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from api.dependencies import get_dataset_download_service, get_dataset_service, get_episode_thumbnail_service
+from api.dependencies import (
+    get_dataset_download_service,
+    get_dataset_service,
+    get_episode_thumbnail_service,
+    get_job_service,
+)
 from api.utils import safe_archive_name
 from internal_datasets.lerobot.lerobot_dataset import InternalLeRobotDataset
 from internal_datasets.mutations.delete_episode_mutation import DeleteEpisodesMutation
 from internal_datasets.utils import get_internal_read_dataset
 from schemas import Dataset, Episode, EpisodeInfo
+from schemas.dataset_preprocessing import (
+    DatasetPreprocessingInfo,
+    DatasetPreprocessingPayload,
+    DatasetPreprocessingRequest,
+)
+from schemas.job import DatasetPreprocessingJob
 from services import DatasetDownloadService, DatasetService, EpisodeThumbnailService
+from services.dataset_preprocessing import preprocessing_info, validate_preprocessing
+from services.job_service import JobService
 
 router = APIRouter(prefix="/api/dataset", tags=["Dataset"])
 
@@ -27,6 +40,41 @@ async def get_dataset(
 ) -> Dataset:
     """Get dataset by id"""
     return await dataset_service.get_dataset_by_id(dataset_id)
+
+
+@router.get("/{dataset_id}/preprocessing")
+async def get_preprocessing_info(
+    dataset_id: UUID,
+    dataset_service: Annotated[DatasetService, Depends(get_dataset_service)],
+) -> DatasetPreprocessingInfo:
+    """Describe the dataset's RGB/depth streams and preprocessing cache."""
+    dataset = await dataset_service.get_dataset_by_id(dataset_id)
+    return preprocessing_info(dataset)
+
+
+@router.post("/{dataset_id}/preprocessing", status_code=status.HTTP_202_ACCEPTED)
+async def submit_preprocessing(
+    dataset_id: UUID,
+    payload: DatasetPreprocessingRequest,
+    dataset_service: Annotated[DatasetService, Depends(get_dataset_service)],
+    job_service: Annotated[JobService, Depends(get_job_service)],
+) -> DatasetPreprocessingJob:
+    """Queue a non-destructive depth or teacher-target preprocessing job."""
+    dataset = await dataset_service.get_dataset_by_id(dataset_id)
+    try:
+        validate_preprocessing(dataset, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return cast(
+        "DatasetPreprocessingJob",
+        await job_service.create_job(
+            DatasetPreprocessingJob(
+                project_id=dataset.project_id,
+                payload=DatasetPreprocessingPayload(dataset_id=dataset_id, **payload.model_dump()),
+                message="Dataset preprocessing queued",
+            )
+        ),
+    )
 
 
 @router.get("/{dataset_id}/episodes")

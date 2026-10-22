@@ -112,6 +112,9 @@ def _convert_lerobot_dict_to_observation(lerobot_dict: dict) -> Observation:
     )
     used_keys |= used
 
+    depths, used = _collect_field(lerobot_dict, "observation.depths", ("observation.depths.", "observation.depth."))
+    used_keys |= used
+
     # Observation states
     state, used = _collect_field(lerobot_dict, "observation.state", "observation.state.")
     used_keys |= used
@@ -130,6 +133,7 @@ def _convert_lerobot_dict_to_observation(lerobot_dict: dict) -> Observation:
 
     return Observation(
         images=cast("Any", images) if images is not None else {},
+        depths=cast("Any", depths),
         state=cast("Any", state) if state is not None else None,
         action=cast("Any", action) if action is not None else None,
         task=cast("Any", task) if task is not None else None,
@@ -181,6 +185,10 @@ def _convert_observation_to_lerobot_dict(observation: Observation) -> dict[str, 
         else:
             # Single image tensor without camera name
             batch["observation.image"] = observation.images
+
+    if observation.depths:
+        for name, depth in observation.depths.items():
+            batch[name if name.startswith("observation.") else f"observation.depths.{name}"] = depth
 
     # Handle state
     if observation.state is not None:
@@ -257,6 +265,13 @@ def _flatten_collated_dict_to_lerobot(collated_dict: dict[str, Any]) -> dict[str
             elif value is not None:
                 # Single image tensor
                 result["observation.image"] = value
+
+        elif key == "depths":
+            if isinstance(value, dict):
+                result.update({
+                    name if name.startswith("observation.") else f"observation.depths.{name}": depth
+                    for name, depth in value.items()
+                })
 
         elif key == "state":
             # Handle state

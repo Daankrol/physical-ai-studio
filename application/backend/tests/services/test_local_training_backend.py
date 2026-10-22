@@ -140,6 +140,12 @@ class TestBuildSpec:
         assert spec.image_key_reorder_map == {"images.top": 0, "images.wrist": 1}
         assert spec.num_cameras == 3
 
+    def test_lingbot_robot_layout_is_forwarded(self, tmp_path):
+        payload = _payload(policy="lingbotvla2", robot_layout="bimanual_6dof", precision=TrainingPrecision.FP32)
+        spec = build_spec(_context(tmp_path, payload))
+
+        assert spec.robot_layout == "bimanual_6dof"
+
     def test_export_backends_are_forwarded_as_plain_names(self, tmp_path):
         """The spec is a wire format shared with the trainer service, so no enums ride along."""
         spec = build_spec(_context(tmp_path, _payload(export_backends=["openvino", "torch"])))

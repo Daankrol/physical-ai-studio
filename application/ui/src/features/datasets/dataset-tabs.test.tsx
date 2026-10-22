@@ -1,9 +1,14 @@
 import { rs } from '@rstest/core';
-import { screen } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { HttpResponse } from 'msw';
 import { Tabs } from 'react-aria-components';
 
 import { SchemaDatasetOutput } from '../../api/openapi-spec';
+import { http } from '../../api/utils';
+import { server } from '../../msw-node-setup';
+import { getMockedDatasetPreprocessingInfo } from '../../test-utils/mocks/mock-dataset-preprocessing-info';
+import { getMockedDatasetPreprocessingJob } from '../../test-utils/mocks/mock-dataset-preprocessing-job';
 import { render } from '../../test-utils/render';
 import { DatasetTabs } from './dataset-tabs';
 
@@ -76,6 +81,37 @@ describe('DatasetTabs', () => {
             `http://localhost:7860/api/dataset/${FIRST_DATASET_ID}/download`,
             '_blank',
             'noopener,noreferrer'
+        );
+    });
+
+    it('starts preprocessing from the selected dataset menu', async () => {
+        const submitted = rs.fn();
+        server.use(
+            http.get('/api/dataset/{dataset_id}/preprocessing', () =>
+                HttpResponse.json(getMockedDatasetPreprocessingInfo())
+            ),
+            http.get('/api/jobs', () => HttpResponse.json([])),
+            http.post('/api/dataset/{dataset_id}/preprocessing', async ({ params, request }) => {
+                submitted(params.dataset_id, await request.json());
+                return HttpResponse.json(getMockedDatasetPreprocessingJob(), { status: 202 });
+            })
+        );
+        const user = userEvent.setup();
+        renderDatasetTabs(SECOND_DATASET_ID);
+
+        const menuTrigger = screen.getByRole('tab', { selected: true }).querySelector('[aria-haspopup="true"]');
+        if (menuTrigger === null) throw new Error('Dataset menu is missing');
+        await user.click(menuTrigger);
+        await user.click(await screen.findByRole('menuitem', { name: 'Preprocess dataset' }));
+        await screen.findByRole('dialog', { name: 'Preprocess dataset' });
+        await screen.findByText(/Computes depth for all 2 RGB cameras/);
+        await user.click(screen.getByRole('button', { name: 'Compute depth maps' }));
+
+        await waitFor(() =>
+            expect(submitted).toHaveBeenCalledWith(
+                SECOND_DATASET_ID,
+                expect.objectContaining({ operation: 'depth', rgb_key: null, depth_key: null })
+            )
         );
     });
 

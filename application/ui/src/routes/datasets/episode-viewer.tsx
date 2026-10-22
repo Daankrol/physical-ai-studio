@@ -5,6 +5,7 @@ import { Disclosure, DisclosurePanel, DisclosureTitle, Divider, Flex, Text } fro
 import { SchemaDatasetOutput, SchemaEnvironmentWithRelations, SchemaEpisode } from '../../api/openapi-spec';
 import EpisodeChart from '../../components/episode-chart/episode-chart';
 import { EpisodeDockView } from '../../features/datasets/episodes/episode-dock-view';
+import { EpisodeModalityPicker } from '../../features/datasets/episodes/episode-modality-picker';
 import { EpisodeTag } from '../../features/datasets/episodes/episode-tag';
 import {
     EpisodeViewerProvider,
@@ -84,6 +85,7 @@ export const EpisodeViewer = ({ episode, dataset, environment }: EpisodeViewerPr
                         <EpisodeTag episode={episode} variant='medium' />
                         <Divider orientation='vertical' size='S' />
                         <Text>{episode.tasks.join(', ')}</Text>
+                        <EpisodeModalityPicker />
                     </Flex>
                     <Flex direction={'row'} flex gap={'size-100'}>
                         <EpisodeDockView

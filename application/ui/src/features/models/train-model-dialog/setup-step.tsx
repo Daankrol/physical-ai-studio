@@ -21,6 +21,9 @@ interface SetupStepProps {
     selectedGpuUnavailable: boolean;
     remoteUnavailable: boolean;
     selectedPolicy: string;
+    robotLayout: Key | null;
+    onRobotLayoutChange: (value: Key | null) => void;
+    isRetraining: boolean;
     availablePolicies: SchemaAvailablePolicy[];
     isLoadingPolicies: boolean;
     policiesUnavailable?: boolean;
@@ -43,6 +46,9 @@ export const SetupStep = ({
     selectedGpuUnavailable,
     remoteUnavailable,
     selectedPolicy,
+    robotLayout,
+    onRobotLayoutChange,
+    isRetraining,
     availablePolicies,
     isLoadingPolicies,
     policiesUnavailable,
@@ -128,6 +134,17 @@ export const SetupStep = ({
             isDisabled={isPolicyDisabled}
             trainingDevice={activeDevice}
         />
+        {selectedPolicy === 'lingbotvla2' && !isRetraining && (
+            <Picker
+                label='Robot joint layout'
+                selectedKey={robotLayout}
+                onSelectionChange={onRobotLayoutChange}
+                width='100%'
+            >
+                <Item key='so101'>SO-101 (5 joints, gripper)</Item>
+                <Item key='bimanual_6dof'>Bimanual (two 6-DoF arms and grippers)</Item>
+            </Picker>
+        )}
         <PolicyAccessAlert policy={selectedPolicy} />
     </Flex>
 );

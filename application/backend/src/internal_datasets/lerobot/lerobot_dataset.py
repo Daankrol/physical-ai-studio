@@ -129,7 +129,9 @@ class InternalLeRobotDataset(DatasetClient):
         return Path(metadata.root) / Path(metadata.get_video_file_path(episode, full_camera_name))
 
     def get_video_keys(self) -> list[str]:
-        return list(self._dataset.meta.video_keys)
+        """Return RGB video streams; depth remains available in LeRobot metadata."""
+        depth_keys = getattr(self._dataset.meta, "depth_keys", ())
+        return [key for key in self._dataset.meta.video_keys if key not in depth_keys]
 
     def get_episode_thumbnail_png(
         self,
@@ -313,10 +315,10 @@ class InternalLeRobotDataset(DatasetClient):
         episode_index = data["episode_index"].tolist()[0]
         video_timestamps = {
             video_key: EpisodeVideo(start=0, end=end, path="")  # TODO: Implement path
-            for video_key in self._dataset.meta.video_keys
+            for video_key in self.get_video_keys()
         }
         if episode is not None:
-            for video_key in self._dataset.meta.video_keys:
+            for video_key in self.get_video_keys():
                 offset = episode[f"videos/{video_key}/to_timestamp"][-1]
                 video_timestamps[video_key].start += offset
                 video_timestamps[video_key].end += offset
@@ -377,6 +379,22 @@ class InternalLeRobotDataset(DatasetClient):
         actions = self._dataset.hf_dataset["action"][from_idx:to_idx]
         return torch.stack(actions)
 
+    def _get_depth_previews(self, episode: EpisodeMetadata) -> dict[str, EpisodeVideo]:
+        previews = {}
+        metadata = self._dataset.meta
+        for key in getattr(metadata, "depth_keys", ()):
+            info = self._dataset.features[key].get("info") or {}
+            camera = info.get("aligned_to")
+            template = info.get("preview_path")
+            if not isinstance(camera, str) or not isinstance(template, str):
+                continue
+            relative = Path(template.replace("{episode_index:06d}", f"{episode['episode_index']:06d}"))
+            path = (self.path / relative).resolve()
+            if relative.is_absolute() or not path.is_relative_to(self.path.resolve()) or not path.is_file():
+                continue
+            previews[camera] = EpisodeVideo(start=0, end=episode["length"] / metadata.fps, path=str(relative))
+        return previews
+
     def _build_episode_from_metadata(self, episode: EpisodeMetadata) -> Episode:
         metadata = self._dataset.meta
         episode_index = episode["episode_index"]
@@ -391,9 +409,10 @@ class InternalLeRobotDataset(DatasetClient):
                     end=episode[f"videos/{video_key}/to_timestamp"],
                     path=str(metadata.get_video_file_path(episode_index, video_key)),
                 )
-                for video_key in self._dataset.meta.video_keys
+                for video_key in self.get_video_keys()
             },
             action_keys=action_feature_names,
+            depth_videos=self._get_depth_previews(episode),
             **episode,
         )
 

@@ -26,6 +26,7 @@ _HUGGINGFACE_REQUIREMENTS = {
     # `hf_hub_download`, and `Auto*from_pretrained` calls and list every default
     # repository that Studio training needs here.
     "molmoact2": (("allenai/MolmoAct2", False),),
+    "lingbotvla2": (("robbyant/lingbot-vla-v2-6b", False), ("Qwen/Qwen3-VL-4B-Instruct", False)),
     "pi05": (
         ("lerobot/pi05_base", True),
         ("google/paligemma-3b-pt-224", True),

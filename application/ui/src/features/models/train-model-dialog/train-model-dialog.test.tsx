@@ -86,6 +86,7 @@ const mockProjectWithRemoteTrainer = () => {
                 { id: 'act', name: 'ACT', description: 'ACT policy', min_vram: 2 * 1024 ** 3 },
                 { id: 'smolvla', name: 'SmolVLA', description: 'SmolVLA policy', min_vram: 3 * 1024 ** 3 },
                 { id: 'molmoact2', name: 'MolmoAct2', description: 'MolmoAct2 policy', min_vram: 80 * 1024 ** 3 },
+                { id: 'lingbotvla2', name: 'LingBot-VLA 2.0', description: 'LingBot policy', min_vram: 60 * 1024 ** 3 },
                 { id: 'pi05', name: 'Pi0.5', description: 'Pi0.5 policy', min_vram: 40 * 1024 ** 3 },
                 { id: 'rldx1', name: 'RLDX-1', description: 'RLDX-1 policy', min_vram: 40 * 1024 ** 3 },
                 { id: 'xr0', name: 'XR0', description: 'XR0 policy', min_vram: 60 * 1024 ** 3 },
@@ -97,6 +98,7 @@ const mockProjectWithRemoteTrainer = () => {
                 smolvla: ['torch', 'openvino'],
                 pi05: ['torch', 'openvino'],
                 xr0: ['torch', 'openvino'],
+                lingbotvla2: ['torch'],
             })
         ),
         http.get('/api/dataset/{dataset_id}/episodes', () =>
@@ -775,6 +777,44 @@ describe('TrainModelDialog', () => {
         await new Promise((resolve) => setTimeout(resolve, 100));
 
         expect(submitCount).toBe(1);
+    });
+
+    it('requires a LingBot joint layout and submits its camera mapping with LoRA batch one', async () => {
+        const user = userEvent.setup();
+        mockProjectWithRemoteTrainer();
+        let submitted: Record<string, unknown> | undefined;
+        server.use(
+            http.post('/api/jobs:train', async ({ request }) => {
+                submitted = (await request.json()) as Record<string, unknown>;
+                return HttpResponse.json({}, { status: 201 });
+            })
+        );
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+        await user.click(screen.getByLabelText('Select LingBot-VLA 2.0 policy'));
+        expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+        await user.click(screen.getByRole('button', { name: /robot joint layout/i }));
+        await user.click(await screen.findByRole('option', { name: /SO-101/i }));
+        await user.click(screen.getByRole('button', { name: 'Next' }));
+        expect(await screen.findByLabelText(/Overview/i, { selector: 'button' })).toHaveTextContent('top');
+        expect(screen.getByLabelText(/Left wrist/i, { selector: 'button' })).toHaveTextContent('wrist');
+        expect(screen.getByLabelText(/Right wrist/i, { selector: 'button' })).toHaveTextContent('Empty');
+        await user.click(screen.getByRole('button', { name: 'Next' }));
+        expect(await screen.findByRole('slider', { name: /batch size/i })).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', { name: 'LoRA fine-tuning' })).toBeChecked();
+        await goToLastStep(user);
+        await user.click(screen.getByRole('button', { name: 'Train' }));
+        await waitFor(() => expect(submitted).toBeDefined());
+        expect(submitted).toMatchObject({
+            policy: 'lingbotvla2',
+            robot_layout: 'so101',
+            lora_enabled: true,
+            batch_size: 1,
+            image_key_reorder_map: { top: 0, wrist: 1 },
+            num_cameras: 3,
+        });
     });
 
     it('maps the dataset cameras onto the SmolVLA camera slots in dataset order', async () => {

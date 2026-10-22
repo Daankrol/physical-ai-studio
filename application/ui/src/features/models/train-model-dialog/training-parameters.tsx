@@ -43,6 +43,7 @@ export const PRECISION_LABELS: Record<string, string> = {
 };
 
 interface TrainingParametersProps {
+    policy?: string;
     maxEpochs: number;
     onMaxEpochsChange: (value: number) => void;
     batchSize: number;
@@ -81,6 +82,7 @@ interface TrainingParametersProps {
 }
 
 export const TrainingParameters = ({
+    policy,
     maxEpochs,
     onMaxEpochsChange,
     batchSize,
@@ -220,12 +222,15 @@ export const TrainingParameters = ({
         <Flex direction='row' gap='size-200' width='100%'>
             <Picker
                 label='Precision'
+                disabledKeys={policy === 'lingbotvla2' ? ['bf16-mixed', 'bf16-true'] : []}
                 description={
-                    deviceType
-                        ? `${
-                              PRECISION_LABELS[RECOMMENDED_PRECISION[deviceType] ?? '32-true']
-                          } recommended for ${deviceType.toUpperCase()}`
-                        : undefined
+                    policy === 'lingbotvla2'
+                        ? 'FP32 is required for the upstream LingBot recipe'
+                        : deviceType
+                          ? `${
+                                PRECISION_LABELS[RECOMMENDED_PRECISION[deviceType] ?? '32-true']
+                            } recommended for ${deviceType.toUpperCase()}`
+                          : undefined
                 }
                 selectedKey={precision}
                 onSelectionChange={onPrecisionChange}
@@ -263,7 +268,12 @@ export const TrainingParameters = ({
         </Flex>
         <Flex direction='row' gap='size-200' width='100%'>
             <Flex direction='row' alignItems='center'>
-                <Checkbox isEmphasized isSelected={augmentImages} onChange={onAugmentImagesChange}>
+                <Checkbox
+                    isEmphasized
+                    isDisabled={policy === 'lingbotvla2'}
+                    isSelected={augmentImages}
+                    onChange={onAugmentImagesChange}
+                >
                     Augment images
                 </Checkbox>
                 <ContextualHelp variant='info'>

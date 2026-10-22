@@ -133,12 +133,13 @@ class TestBuildPolicy:
         available = _available_policy_classes()
         assert available
         for name, (cls, _) in available.items():
+            layout = {"robot_layout": "so101"} if name == "lingbotvla2" else {}
             specs = [
-                TrainingJobSpec(policy=name),
-                TrainingJobSpec(policy=name, image_key_reorder_map={"camera": 0}, num_cameras=1),
+                TrainingJobSpec(policy=name, **layout),
+                TrainingJobSpec(policy=name, image_key_reorder_map={"camera": 0}, num_cameras=1, **layout),
             ]
             if name in PEFT_POLICIES:
-                specs.append(TrainingJobSpec(policy=name, lora_enabled=True))
+                specs.append(TrainingJobSpec(policy=name, lora_enabled=True, **layout))
             for spec in specs:
                 with patch("physicalai.policies.get_policy") as get_policy:
                     build_policy(spec)
@@ -161,9 +162,18 @@ class TestBuildPolicy:
     def test_finetune_only_policies_start_from_pretrained_weights(self, policy_name: str) -> None:
         """These policies have no from-scratch initialization worth training."""
         with patch("physicalai.policies.get_policy") as get_policy:
-            build_policy(TrainingJobSpec(policy=policy_name))
+            build_policy(
+                TrainingJobSpec(policy=policy_name, robot_layout="so101" if policy_name == "lingbotvla2" else None)
+            )
 
         assert get_policy.call_args.kwargs["pretrained_name_or_path"] == PRETRAINED_BASE_CHECKPOINTS[policy_name]
+
+    def test_lingbot_requires_and_forwards_robot_layout(self) -> None:
+        with pytest.raises(ValueError, match="requires robot_layout"):
+            build_policy(TrainingJobSpec(policy="lingbotvla2"))
+        with patch("physicalai.policies.get_policy") as get_policy:
+            build_policy(TrainingJobSpec(policy="lingbotvla2", robot_layout="bimanual_6dof"))
+        assert get_policy.call_args.kwargs["robot_layout"] == "bimanual_6dof"
 
     def test_camera_layout_is_passed_to_a_policy_that_reads_a_fixed_order(self) -> None:
         """SmolVLA takes the dataset's cameras in the slots the mapping names."""

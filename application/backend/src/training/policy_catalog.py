@@ -28,6 +28,12 @@ _STUDIO_POLICIES = {
         description="Action Chunking with Transformers, lightweight and fast to train (BSD 3-Clause license)",
         min_vram=2 * 1024**3,
     ),
+    "lingbotvla2": AvailablePolicy(
+        id="lingbotvla2",
+        name="LingBot-VLA 2.0",
+        description="Qwen3-VL policy with a flow-matching MoE action expert (Apache 2.0 license)",
+        min_vram=60 * 1024**3,
+    ),
     "molmoact2": AvailablePolicy(
         id="molmoact2",
         name="MolmoAct2",

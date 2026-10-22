@@ -1,10 +1,12 @@
-import { screen, within } from '@testing-library/react';
+import { rs } from '@rstest/core';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { HttpResponse } from 'msw';
 
 import { SchemaTrainJob } from '../../api/openapi-spec';
 import { http } from '../../api/utils';
 import { server } from '../../msw-node-setup';
+import { getMockedDatasetPreprocessingJob } from '../../test-utils/mocks/mock-dataset-preprocessing-job';
 import { getMockedTrainJob } from '../../test-utils/mocks/mock-train-job';
 import { render } from '../../test-utils/render';
 import { JobsDialog } from './jobs-dialog';
@@ -46,6 +48,58 @@ const renderDialog = (props: Partial<Parameters<typeof JobsDialog>[0]> = {}) =>
     });
 
 describe('JobsDialog', () => {
+    it('shows running depth preprocessing as a job with progress and cancellation', async () => {
+        const depthJob = getMockedDatasetPreprocessingJob({
+            id: 'depth-job',
+            project_id: PROJECT_A,
+            status: 'running',
+            progress: 40,
+            message: 'Computing depth',
+        });
+        const interrupted = rs.fn();
+        server.use(
+            http.get('/api/jobs', () => HttpResponse.json([depthJob])),
+            http.post('/api/jobs/{job_id}:interrupt', ({ params }) => {
+                interrupted(params.job_id);
+                return new HttpResponse(null, { status: 200 });
+            })
+        );
+        renderDialog({ projectId: PROJECT_A });
+
+        expect(await screen.findByText('Compute depth maps')).toBeInTheDocument();
+        expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '40');
+        expect(screen.getByRole('tab', { name: /^running jobs1$/i })).toBeInTheDocument();
+        await userEvent.setup().click(screen.getByRole('button', { name: 'Cancel task' }));
+        await waitFor(() => expect(interrupted).toHaveBeenCalledWith('depth-job'));
+    });
+
+    it.each([
+        ['pending', 'Scheduled jobs'],
+        ['completed', 'Finished jobs'],
+        ['canceled', 'Cancelled jobs'],
+        ['failed', 'Failed jobs'],
+    ] as const)('lists %s teacher-target jobs in their status tab', async (status, tab) => {
+        const job = getMockedDatasetPreprocessingJob({
+            project_id: PROJECT_A,
+            status,
+            payload: {
+                ...getMockedDatasetPreprocessingJob().payload,
+                operation: 'teacher_targets',
+                rgb_key: 'observation.images.front',
+            },
+        });
+        server.use(http.get('/api/jobs', () => HttpResponse.json([job, otherProjectJob])));
+        const onViewLogs = rs.fn();
+        const user = userEvent.setup();
+        renderDialog({ projectId: PROJECT_A, onViewLogs });
+        await user.click(await screen.findByRole('tab', { name: new RegExp(`^${tab}1$`, 'i') }));
+        expect(await screen.findByText('Cache teacher targets')).toBeInTheDocument();
+        expect(screen.queryByText('other-project-model')).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: 'Job options' }));
+        await user.click(await screen.findByRole('menuitem', { name: 'Logs' }));
+        expect(onViewLogs).toHaveBeenCalledWith(job);
+    });
+
     it('renders all six status tabs in the agreed order with the exact labels', async () => {
         mockJobs([runningJob, completedJob]);
 

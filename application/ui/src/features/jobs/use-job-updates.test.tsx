@@ -6,6 +6,7 @@ import { act } from '@testing-library/react';
 
 import { createQueryClient } from '../../query-client/query-client';
 import { getMockedDatasetImportJob } from '../../test-utils/mocks/mock-dataset-import-job';
+import { getMockedDatasetPreprocessingJob } from '../../test-utils/mocks/mock-dataset-preprocessing-job';
 import { getMockedTrainJob } from '../../test-utils/mocks/mock-train-job';
 import { renderHook } from '../../test-utils/render';
 import { JOBS_QUERY_KEY, SchemaJob } from './use-job-cache';
@@ -148,6 +149,27 @@ describe('useJobUpdates', () => {
 
         expect(queryClient.getQueryState(otherProjectModels)?.isInvalidated).toBe(true);
         expect(queryClient.getQueryState(currentProjectModels)?.isInvalidated).toBe(false);
+    });
+
+    it('refreshes episode streams and preprocessing metadata when depth is ready', () => {
+        const queryClient = createQueryClient();
+        const episodeKey = [
+            'get',
+            '/api/dataset/{dataset_id}/episodes/{episode_index}',
+            { params: { path: { dataset_id: 'dataset-1', episode_index: 0 } } },
+        ];
+        const infoKey = ['get', '/api/dataset/{dataset_id}/preprocessing'];
+        const modelsKey = modelsQueryKey(PROJECT_ID);
+        queryClient.setQueryData(episodeKey, {});
+        queryClient.setQueryData(infoKey, {});
+        queryClient.setQueryData(modelsKey, []);
+        renderHook(() => useJobUpdates(PROJECT_ID), { queryClient });
+
+        deliver(getMockedDatasetPreprocessingJob({ status: 'completed' }));
+
+        expect(queryClient.getQueryState(episodeKey)?.isInvalidated).toBe(true);
+        expect(queryClient.getQueryState(infoKey)?.isInvalidated).toBe(true);
+        expect(queryClient.getQueryState(modelsKey)?.isInvalidated).toBe(false);
     });
 
     it('refetches jobs whenever the socket (re)connects', () => {

@@ -13,6 +13,7 @@ import { ImportDatasetDialog } from '../../routes/datasets/import/dataset-import
 import { NewDatasetForm } from '../../routes/datasets/new-dataset.component';
 import { useProjectId } from '../projects/use-project';
 import { DeleteDatasetDialog } from './delete-dataset-dialog';
+import { PreprocessDatasetDialog } from './preprocess-dataset-dialog';
 import { RenameDatasetDialog } from './rename-dataset-dialog';
 
 import styles from './dataset-tabs.module.css';
@@ -22,6 +23,7 @@ type Dataset = SchemaDatasetOutput;
 const ACTIONS = [
     { key: 'rename', label: 'Edit dataset name' },
     { key: 'export', label: 'Export dataset' },
+    { key: 'preprocess', label: 'Preprocess dataset' },
     { key: 'delete', label: 'Delete dataset' },
 ] satisfies ManagedTabAction[];
 
@@ -34,7 +36,7 @@ export const DatasetTabs = ({
 }) => {
     const { project_id } = useProjectId();
     const navigate = useNavigate();
-    const [action, setAction] = useState<null | 'rename' | 'delete' | 'create' | 'import'>(null);
+    const [action, setAction] = useState<null | 'rename' | 'delete' | 'create' | 'import' | 'preprocess'>(null);
     const selectedDataset = datasets.find((dataset) => dataset.id === selectedDatasetId);
 
     const openDatasetDownload = (datasetId: string) => {
@@ -54,6 +56,7 @@ export const DatasetTabs = ({
                 return;
             case 'delete':
             case 'rename':
+            case 'preprocess':
                 setAction(itemAction);
         }
     };
@@ -147,6 +150,9 @@ export const DatasetTabs = ({
                     <Suspense>
                         <NewDatasetForm project_id={project_id} onDone={handleCreateDataset} />
                     </Suspense>
+                )}
+                {action === 'preprocess' && selectedDataset !== undefined && (
+                    <PreprocessDatasetDialog dataset={selectedDataset} close={() => setAction(null)} />
                 )}
                 {action === 'rename' && selectedDataset !== undefined && (
                     <RenameDatasetDialog

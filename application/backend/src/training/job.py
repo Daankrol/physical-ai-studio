@@ -73,6 +73,7 @@ _DATASET_REPO_ID = "snapshot"
 
 PRETRAINED_BASE_CHECKPOINTS: dict[str, str] = {
     "molmoact2": "allenai/MolmoAct2",
+    "lingbotvla2": "robbyant/lingbot-vla-v2-6b",
     "pi05": "lerobot/pi05_base",
     "rldx1": "RLWRLD/RLDX-1-PT",
     "smolvla": "lerobot/smolvla_base",
@@ -80,7 +81,7 @@ PRETRAINED_BASE_CHECKPOINTS: dict[str, str] = {
 }
 """Hub checkpoints used to initialize policies that only fine-tune from pretrained weights."""
 
-PEFT_POLICIES = frozenset({"pi05", "molmoact2"})
+PEFT_POLICIES = frozenset({"pi05", "molmoact2", "lingbotvla2"})
 """Policies whose ``Config`` mixes in ``physicalai.policies.mixins.peft.PeftConfigMixin`` and
 support LoRA/DoRA fine-tuning."""
 
@@ -110,6 +111,11 @@ class TrainingJobSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     policy: str = Field(description="Policy name, e.g. 'act', 'pi05', 'molmoact2', or 'smolvla'.")
+    lingbot_recipe: Literal["upstream"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Fresh LingBot initialization recipe; checkpoints retain their saved objective.",
+    )
     policy_source: Literal["physicalai", "lerobot"] = Field(
         default="physicalai",
         description="Which implementation of the policy to train.",
@@ -135,6 +141,10 @@ class TrainingJobSpec(BaseModel):
     image_key_reorder_map: dict[str, int] = Field(
         default_factory=dict,
         description="Dataset image key -> camera slot index, for policies with a fixed camera order.",
+    )
+    robot_layout: Literal["so101", "bimanual_6dof"] | None = Field(
+        default=None,
+        description="Canonical joint layout for LingBot-VLA 2.0; required for a new LingBot training job.",
     )
     num_cameras: int = Field(
         default=0,
@@ -178,6 +188,15 @@ class TrainingJobSpec(BaseModel):
         description="Use DoRA (Weight-Decomposed LoRA) instead of plain LoRA. Ignored unless lora_enabled.",
     )
     run_options: RunOptions = Field(default_factory=RunOptions)
+
+    @model_validator(mode="after")
+    def default_lingbot_precision(self) -> TrainingJobSpec:
+        """Use the FP32 baseline unless a caller explicitly selected another precision."""
+        if self.policy.lower() == "lingbotvla2":
+            self.lingbot_recipe = "upstream"
+            if "precision" not in self.model_fields_set:
+                self.precision = "32-true"
+        return self
 
     @model_validator(mode="after")
     def validate_lora(self) -> TrainingJobSpec:
@@ -257,6 +276,32 @@ def build_policy(spec: TrainingJobSpec, *, resume_from: Path | str | None = None
         if pretrained is not None:
             kwargs["pretrained_name_or_path"] = pretrained
     kwargs.update(_camera_layout_kwargs(spec))
+    if spec.policy.lower() == "lingbotvla2":
+        if spec.precision != "32-true" or spec.augment_images:
+            msg = "LingBot upstream training requires FP32 and image augmentation disabled"
+            raise ValueError(msg)
+        if spec.robot_layout is None:
+            msg = "LingBot-VLA 2.0 requires robot_layout (so101 or bimanual_6dof)"
+            raise ValueError(msg)
+        import inspect
+
+        from physicalai.policies import get_physicalai_policy_class
+
+        parameters = inspect.signature(get_physicalai_policy_class("lingbotvla2").__init__).parameters
+        if not {"training_recipe", "distillation_heads"}.issubset(parameters):
+            msg = "Update this trainer's LingBot implementation to support upstream distillation"
+            raise ValueError(msg)
+        kwargs.update(
+            robot_layout=spec.robot_layout,
+            training_recipe="upstream",
+            distillation_heads=True,
+            relative_action_groups=("arm.position",),
+            normalization_mode="MEAN_STD",
+            loss_type="fm",
+            gradient_checkpointing=True,
+            optimizer_lr=5e-5,
+            scheduler_decay_lr=5e-5,
+        )
     if spec.lora_enabled:
         kwargs.update(
             lora_enabled=True,

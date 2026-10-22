@@ -5,11 +5,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.schema import JobDB
-from exceptions import DuplicateJobException, ResourceInUseError, ResourceNotFoundError, ResourceType
+from exceptions import (
+    DuplicateJobException,
+    InvalidResourceError,
+    ResourceInUseError,
+    ResourceNotFoundError,
+    ResourceType,
+)
 from repositories import JobRepository
 from schemas import Job
 from schemas.base_job import JobStatus, JobType
-from schemas.job import JobPayload, RemoteTrainJobPayload, TrainJob, TrainJobPayload
+from schemas.job import JobPayload, RemoteTrainJobPayload, TrainingPrecision, TrainJob, TrainJobPayload
 from services.remote_trainer_service import RemoteTrainerService
 from services.training_targets import get_training_target_handler
 
@@ -45,6 +51,14 @@ class JobService:
 
     async def submit_train_job(self, payload: TrainJobPayload) -> Job:
         """Validate and persist a training job with its execution target pinned."""
+        if (
+            payload.policy.lower() == "lingbotvla2"
+            and payload.base_model_id is None
+            and (payload.precision != TrainingPrecision.FP32 or payload.augment_images)
+        ):
+            raise InvalidResourceError(
+                "policy", "LingBot upstream training requires FP32 and image augmentation disabled"
+            )
         trainer_id = payload.remote_trainer_id if isinstance(payload, RemoteTrainJobPayload) else None
         async with RemoteTrainerService.allow_job_submission(trainer_id):
             handler = get_training_target_handler(payload, self.session, self.remote_trainer_service)
@@ -62,6 +76,10 @@ class JobService:
                 return await self.repo.save(job)
             except IntegrityError:
                 raise ResourceNotFoundError(resource_type=ResourceType.PROJECT, resource_id=payload.project_id)
+
+    async def get_pending_preprocessing_jobs(self) -> list[Job]:
+        """Return queued dataset preprocessing work for the local execution slot."""
+        return await self.repo.get_pending_jobs_by_type(JobType.DATASET_PREPROCESSING)
 
     async def get_pending_train_job(self) -> Job | None:
         return await self.repo.get_pending_job_by_type(JobType.TRAINING)

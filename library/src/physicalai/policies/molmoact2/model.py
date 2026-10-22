@@ -7,18 +7,16 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self, override
 
 import torch
-from safetensors.torch import load_file as load_safetensors_file
 from torch import Tensor
 from torch.nn import functional
 
 from physicalai.data.observation import ACTION, FeatureType
 from physicalai.policies.base import Model
 from physicalai.policies.mixins.peft import PeftModelMixin
+from physicalai.policies.utils.weights import load_safetensors_weights
 
 from .components import (
     ActionExpert,
@@ -29,11 +27,11 @@ from .components import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from .config import MolmoAct2Config
 
 
-_SAFE_WEIGHTS_NAME = "model.safetensors"
-_SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
 _VLM_LORA_LINEAR_LEAVES = "att_proj|attn_out|ff_proj|ff_out|wq|wk|wv|wo|w1|w2|w3|patch_embedding"
 _ACTION_EXPERT_LORA_LINEAR_LEAVES = (
     r"time_embed\.(1|3)|"
@@ -96,30 +94,6 @@ def _lora_target_modules(*, enable_action_expert: bool) -> str:
     if not enable_action_expert:
         return vlm_targets
     return f"({vlm_targets}|backbone\\.model\\.action_expert\\.(?:{_ACTION_EXPERT_LORA_LINEAR_LEAVES})$)"
-
-
-def _resolve_weights_path(weights_path: str | Path) -> Path:
-    """Resolve a checkpoint directory or safetensors file to its load entrypoint.
-
-    Returns:
-        The single-file checkpoint or sharded checkpoint index path.
-
-    Raises:
-        FileNotFoundError: If no supported checkpoint exists at the path.
-    """
-    path = Path(weights_path)
-    if path.is_dir():
-        index_path = path / _SAFE_WEIGHTS_INDEX_NAME
-        if index_path.is_file():
-            return index_path
-        single_file_path = path / _SAFE_WEIGHTS_NAME
-        if single_file_path.is_file():
-            return single_file_path
-    elif path.is_file():
-        return path
-
-    msg = f"No MolmoAct2 safetensors checkpoint found at {str(path)!r}."
-    raise FileNotFoundError(msg)
 
 
 class MolmoAct2Model(PeftModelMixin, Model):
@@ -292,48 +266,8 @@ class MolmoAct2Model(PeftModelMixin, Model):
         )
 
     def load_weights(self, weights_path: str | Path) -> None:
-        """Strictly load a single-file or sharded safetensors checkpoint.
-
-        Raises:
-            RuntimeError: If checkpoint keys do not exactly match the model.
-            TypeError: If a sharded checkpoint index has an invalid weight map.
-        """
-        resolved_path = _resolve_weights_path(weights_path)
-        if resolved_path.name != _SAFE_WEIGHTS_INDEX_NAME:
-            self.backbone.load_state_dict(load_safetensors_file(resolved_path, device="cpu"), strict=True)
-            return
-
-        with resolved_path.open(encoding="utf-8") as index_file:
-            index = json.load(index_file)
-        weight_map = index.get("weight_map")
-        if not isinstance(weight_map, dict) or not all(
-            isinstance(key, str) and isinstance(shard, str) for key, shard in weight_map.items()
-        ):
-            msg = f"Invalid safetensors weight map in {resolved_path}."
-            raise TypeError(msg)
-
-        model_keys = set(self.backbone.state_dict())
-        checkpoint_keys = set(weight_map)
-        missing = sorted(model_keys - checkpoint_keys)
-        unexpected = sorted(checkpoint_keys - model_keys)
-        if missing or unexpected:
-            msg = f"MolmoAct2 checkpoint keys mismatch. Missing: {missing[:6]} Unexpected: {unexpected[:6]}"
-            raise RuntimeError(msg)
-
-        loaded_keys: set[str] = set()
-        for shard_name in sorted(set(weight_map.values())):
-            shard_path = resolved_path.parent / shard_name
-            state_dict = load_safetensors_file(shard_path, device="cpu")
-            expected_shard_keys = {key for key, mapped_shard in weight_map.items() if mapped_shard == shard_name}
-            if set(state_dict) != expected_shard_keys:
-                msg = f"MolmoAct2 shard keys mismatch for {shard_name!r}."
-                raise RuntimeError(msg)
-            self.backbone.load_state_dict(state_dict, strict=False)
-            loaded_keys.update(state_dict)
-
-        if loaded_keys != model_keys:
-            msg = "MolmoAct2 sharded checkpoint did not load every model parameter."
-            raise RuntimeError(msg)
+        """Strictly load a single-file or sharded safetensors checkpoint."""
+        load_safetensors_weights(self.backbone, weights_path)
 
     @classmethod
     def get_default_peft_targets(cls) -> str:

@@ -80,6 +80,18 @@ def test_huggingface_access_lists_xr0_requirements(monkeypatch, tmp_path: Path) 
     ]
 
 
+def test_lingbot_access_lists_weights_and_qwen_tokenizer(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SETTINGS_FILE", str(tmp_path / "settings.json"))
+
+    with TestClient(app) as client:
+        response = client.get("/api/policies/lingbotvla2/huggingface-access")
+
+    assert [entry["repository"] for entry in response.json()["requirements"]] == [
+        "robbyant/lingbot-vla-v2-6b",
+        "Qwen/Qwen3-VL-4B-Instruct",
+    ]
+
+
 def test_huggingface_access_unknown_policy_is_404(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("SETTINGS_FILE", str(tmp_path / "settings.json"))
 
@@ -144,6 +156,7 @@ def test_available_policies_include_display_and_vram_metadata(monkeypatch, tmp_p
 
     assert response.status_code == 200
     policies = {policy["id"]: policy for policy in response.json()}
+    assert policies["lingbotvla2"]["min_vram"] == 60 * 1024**3
     assert policies["act"] == {
         "id": "act",
         "name": "ACT",
@@ -184,5 +197,5 @@ def test_backends_cover_every_selectable_policy(monkeypatch, tmp_path: Path) -> 
         response = client.get("/api/policies/backends")
 
     backends = response.json()
-    assert set(backends) == {"act", "molmoact2", "pi05", "rldx1", "smolvla", "xr0"}
+    assert set(backends) == {"act", "lingbotvla2", "molmoact2", "pi05", "rldx1", "smolvla", "xr0"}
     assert backends["xr0"]

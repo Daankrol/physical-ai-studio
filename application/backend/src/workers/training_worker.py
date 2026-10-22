@@ -7,7 +7,7 @@ import asyncio
 import datetime
 import multiprocessing as mp
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import UUID, uuid4
 
 from loguru import logger
@@ -15,10 +15,11 @@ from loguru import logger
 from core.logging.utils import job_logging_ctx
 from db import get_async_db_session_ctx
 from schemas import Job, Model, Snapshot
-from schemas.base_job import JobStatus
-from schemas.job import TrainingTarget, TrainJobPayload, TrainJobPayloadAdapter
+from schemas.base_job import JobStatus, JobType
+from schemas.job import DatasetPreprocessingJob, TrainingTarget, TrainJobPayload, TrainJobPayloadAdapter
 from schemas.model import DORA_PROPERTY, LORA_PROPERTY, SNAPFLOW_PROPERTY
 from services import DatasetService, ModelService
+from services.dataset_preprocessing import recover_preprocessing_job, run_preprocessing_job
 from services.event_processor import EventType
 from services.job_service import JobService
 from services.remote_trainer_service import RemoteTrainerService
@@ -59,13 +60,22 @@ class TrainingWorker(BaseProcessWorker):
         try:
             while not self.should_stop():
                 async with get_async_db_session_ctx() as session:
-                    pending_jobs = await JobService(session, RemoteTrainerService(session)).get_pending_train_jobs()
+                    service = JobService(session, RemoteTrainerService(session))
+                    pending_jobs = await service.get_pending_train_jobs()
+                    pending_jobs.extend(await service.get_pending_preprocessing_jobs())
+                pending_jobs.sort(key=lambda job: job.created_at or datetime.datetime.min.replace(tzinfo=datetime.UTC))
                 for job in pending_jobs:
-                    payload = TrainJobPayloadAdapter.validate_python(job.payload)
-                    target = self._target_key(payload)
+                    preprocessing = isinstance(job, DatasetPreprocessingJob)
+                    payload = None if preprocessing else TrainJobPayloadAdapter.validate_python(job.payload)
+                    target = "local" if preprocessing else self._target_key(cast("TrainJobPayload", payload))
                     if self._target_is_busy(target, self._active_training_tasks):
                         continue
-                    task = asyncio.create_task(self._run_training_job(job, payload), name=f"training-{job.id}")
+                    work = (
+                        self._run_preprocessing_job(job)
+                        if preprocessing
+                        else self._run_training_job(job, cast("TrainJobPayload", payload))
+                    )
+                    task = asyncio.create_task(work, name=f"job-{job.id}")
                     self._active_training_tasks[target] = task
                     task.add_done_callback(self._make_release_callback(target, job.id))
                 self.stop_aware_sleep(0.5)
@@ -104,6 +114,10 @@ class TrainingWorker(BaseProcessWorker):
         copy of the target-to-key mapping.
         """
         return training_target_key(payload)
+
+    async def _run_preprocessing_job(self, job: DatasetPreprocessingJob) -> None:
+        with job_logging_ctx(job_id=str(job.id)):
+            await run_preprocessing_job(job, self.queue, lambda: self._should_interrupt(job.id))
 
     async def _run_training_job(self, job: Job, payload: TrainJobPayload) -> None:
         """Prepare and execute one job after its execution target has been reserved."""
@@ -160,6 +174,21 @@ class TrainingWorker(BaseProcessWorker):
         await super().setup()
         with logger.contextualize(worker=self.__class__.__name__):
             await self._abort_orphan_jobs()
+            async with get_async_db_session_ctx() as session:
+                service = JobService(session)
+                jobs = await service.get_job_list(
+                    extra_filters={"type": JobType.DATASET_PREPROCESSING, "status": JobStatus.RUNNING}
+                )
+                for job in jobs:
+                    published = recover_preprocessing_job(cast("DatasetPreprocessingJob", job))
+                    await service.update_job_status(
+                        job.id,
+                        JobStatus.COMPLETED if published else JobStatus.FAILED,
+                        message="Preprocessing ready in this dataset"
+                        if published
+                        else "Studio restarted during preprocessing",
+                        progress=100 if published else job.progress,
+                    )
 
     async def teardown(self) -> None:
         await super().teardown()

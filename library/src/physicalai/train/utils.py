@@ -84,6 +84,10 @@ def reformat_dataset_to_match_policy(policy: Policy, datamodule: DataModule) -> 
             if key.startswith("observation.") and observation_delta_indices is not None:
                 delta_timestamps[key] = [i / lerobot_dataset.fps for i in observation_delta_indices]
 
+            image_delta_indices = _get_delta_indices(lerobot_model, "image_delta_indices")
+            if lerobot_dataset.raw_features[key].get("dtype") in {"image", "video"} and image_delta_indices is not None:
+                delta_timestamps[key] = [i / lerobot_dataset.fps for i in image_delta_indices]
+
         # in place change the lerobot dataset
         if delta_timestamps:
             check_delta_timestamps(delta_timestamps, lerobot_dataset.fps, lerobot_dataset.tolerance_s)

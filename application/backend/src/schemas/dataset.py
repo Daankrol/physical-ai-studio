@@ -29,6 +29,9 @@ class Episode(BaseModel):
     actions: list[list[float]]
     action_keys: list[str]
     videos: dict[str, EpisodeVideo]
+    depth_videos: dict[str, EpisodeVideo] = Field(
+        default_factory=dict, description="Depth previews keyed by RGB camera"
+    )
 
 
 class LeRobotDatasetInfo(BaseModel):

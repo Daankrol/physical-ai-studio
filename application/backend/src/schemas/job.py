@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_serializer
 
 from schemas.base_job import BaseJob, JobType
 from schemas.dataset_import_job import DatasetImportJobPayload
+from schemas.dataset_preprocessing import DatasetPreprocessingPayload
 from schemas.hardware import DeviceType
 from training.job import PEFT_POLICIES, SNAPFLOW_POLICIES
 
@@ -171,7 +172,7 @@ class TrainJobPayloadBase(BaseModel):
     image_key_reorder_map: dict[str, int] = Field(
         default_factory=dict,
         description=(
-            "Camera name -> camera slot index, for a policy pretrained on a fixed camera order (SmolVLA). "
+            "Camera name -> camera slot index, for a policy pretrained on a fixed camera order. "
             "Keys are bare camera names ('gripper'), not dataset feature keys: the policy sees its images "
             "as 'images.<name>'. A LeRobot 'observation.' prefix is accepted and stripped. Empty keeps the "
             "dataset's own camera order. When set it must cover every camera the dataset has, since the "
@@ -187,6 +188,22 @@ class TrainJobPayloadBase(BaseModel):
             "masked empty images. 0 keeps only the dataset's cameras."
         ),
     )
+    robot_layout: Literal["so101", "bimanual_6dof"] | None = Field(
+        default=None,
+        description="Joint layout for a new LingBot-VLA 2.0 training job; resumed jobs use the checkpoint layout.",
+    )
+
+    @model_validator(mode="after")
+    def validate_robot_layout(self) -> "TrainJobPayloadBase":
+        """New LingBot jobs need a selected layout; resumed checkpoints already have one."""
+        if self.policy.lower() == "lingbotvla2" and self.base_model_id is None:
+            if self.robot_layout is None:
+                msg = "LingBot-VLA 2.0 requires robot_layout (so101 or bimanual_6dof)"
+                raise ValueError(msg)
+            if "precision" not in self.model_fields_set:
+                self.precision = TrainingPrecision.FP32
+        return self
+
     export_backends: list[ExportBackend] | None = Field(
         default=None,
         description=(
@@ -403,10 +420,15 @@ class DatasetImportJob(BaseJob):
     payload: DatasetImportJobPayload
 
 
-JobPayload = LocalTrainJobPayload | RemoteTrainJobPayload | DatasetImportJobPayload
+class DatasetPreprocessingJob(BaseJob):
+    type: Literal[JobType.DATASET_PREPROCESSING] = JobType.DATASET_PREPROCESSING  # type: ignore[valid-type]
+    payload: DatasetPreprocessingPayload
+
+
+JobPayload = LocalTrainJobPayload | RemoteTrainJobPayload | DatasetImportJobPayload | DatasetPreprocessingPayload
 
 Job = Annotated[
-    TrainJob | DatasetImportJob,
+    TrainJob | DatasetImportJob | DatasetPreprocessingJob,
     Field(discriminator="type"),
 ]
 

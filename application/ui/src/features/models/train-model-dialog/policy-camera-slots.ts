@@ -51,6 +51,26 @@ const SMOLVLA_CAMERA_SLOTS: PolicyCameraSlot[] = [
 
 export const POLICY_CAMERA_SLOTS: Record<string, PolicyCameraSlot[]> = {
     smolvla: SMOLVLA_CAMERA_SLOTS,
+    lingbotvla2: [
+        {
+            id: 'camera_top',
+            name: 'Overview',
+            description: 'The fixed view of the workspace.',
+            isRequired: true,
+        },
+        {
+            id: 'camera_wrist_left',
+            name: 'Left wrist',
+            description: 'The left arm wrist camera, or the wrist camera on a single-arm robot.',
+            isRequired: false,
+        },
+        {
+            id: 'camera_wrist_right',
+            name: 'Right wrist',
+            description: 'The right arm wrist camera. Leave it empty for a single arm.',
+            isRequired: false,
+        },
+    ],
 };
 
 export const getPolicyCameraSlots = (policy: string): PolicyCameraSlot[] => POLICY_CAMERA_SLOTS[policy] ?? [];

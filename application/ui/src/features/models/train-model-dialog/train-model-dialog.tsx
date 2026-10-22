@@ -149,12 +149,15 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
         { enabled: selectedDataset !== null }
     );
     const [maxEpochs, setMaxEpochs] = useState<number>(defaultMaxEpochs);
-    const [batchSize, setBatchSize] = useState<number>(8);
+    const [batchSize, setBatchSize] = useState<number>(baseModel?.policy === 'lingbotvla2' ? 1 : 8);
+    const [robotLayout, setRobotLayout] = useState<'so101' | 'bimanual_6dof' | null>(null);
     const [numWorkers, setNumWorkers] = useState<Key | null>('auto');
     const [autoScaleBatchSize, setAutoScaleBatchSize] = useState<boolean>(false);
-    const [precision, setPrecision] = useState<Key | null>(bestDevice?.type === 'cuda' ? 'bf16-mixed' : '32-true');
+    const [precision, setPrecision] = useState<Key | null>(
+        baseModel?.policy === 'lingbotvla2' ? '32-true' : bestDevice?.type === 'cuda' ? 'bf16-mixed' : '32-true'
+    );
     const [compileModel, setCompileModel] = useState<boolean>(false);
-    const [loraEnabled, setLoraEnabled] = useState<boolean>(false);
+    const [loraEnabled, setLoraEnabled] = useState<boolean>(baseModel?.policy === 'lingbotvla2');
     const [loraRank, setLoraRank] = useState<number>(32);
     const [loraAlpha, setLoraAlpha] = useState<number | null>(null);
     const [loraDropout, setLoraDropout] = useState<number>(0.05);
@@ -268,6 +271,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
         isLoadingPolicies ||
         !availablePolicies.some((policy) => policy.id === selectedPolicy) ||
         targetId === null ||
+        (selectedPolicy === 'lingbotvla2' && baseModel === undefined && robotLayout === null) ||
         remoteUnavailable ||
         selectedGpuUnavailable ||
         policyAccessBlocksTraining;
@@ -374,6 +378,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                 // which the training side reads as "keep the order it already has".
                 image_key_reorder_map: hasFeatureMapping ? featureMapping.imageKeyReorderMap : {},
                 num_cameras: hasFeatureMapping ? featureMapping.numCameras : 0,
+                robot_layout: selectedPolicy === 'lingbotvla2' && baseModel === undefined ? robotLayout : null,
                 // With no formats on offer, there was nothing to choose from,
                 // so fall back to exporting every supported
                 // format rather than sending [] and exporting none.
@@ -462,10 +467,21 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                                 selectedGpuUnavailable={selectedGpuUnavailable}
                                 remoteUnavailable={remoteUnavailable}
                                 selectedPolicy={selectedPolicy}
+                                robotLayout={robotLayout}
+                                onRobotLayoutChange={(key) => setRobotLayout(key as 'so101' | 'bimanual_6dof' | null)}
+                                isRetraining={baseModel !== undefined}
                                 availablePolicies={availablePolicies}
                                 policiesUnavailable={policiesUnavailable}
                                 isLoadingPolicies={isLoadingPolicies}
-                                onSelectedPolicyChange={setSelectedPolicy}
+                                onSelectedPolicyChange={(policy) => {
+                                    setSelectedPolicy(policy);
+                                    setLoraEnabled(policy === 'lingbotvla2');
+                                    if (policy === 'lingbotvla2') {
+                                        setBatchSize(1);
+                                        setPrecision('32-true');
+                                        setAugmentImages(false);
+                                    }
+                                }}
                                 isPolicyDisabled={baseModel !== undefined}
                                 activeDevice={activeDevice}
                             />
@@ -486,6 +502,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                                 onNumWorkersChange={setNumWorkers}
                                 autoScaleBatchSize={autoScaleBatchSize}
                                 onAutoScaleBatchSizeChange={setAutoScaleBatchSize}
+                                policy={selectedPolicy}
                                 precision={precision}
                                 onPrecisionChange={setPrecision}
                                 compileModel={compileModel}

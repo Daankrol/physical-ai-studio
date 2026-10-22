@@ -11,7 +11,7 @@ from core.scheduler import Scheduler
 from exceptions import InvalidJobStateError, ResourceNotFoundError, ResourceType
 from schemas import Job
 from schemas.base_job import JobStatus
-from schemas.job import RemoteTrainJobPayload, TrainJob, TrainJobPayload
+from schemas.job import DatasetPreprocessingJob, RemoteTrainJobPayload, TrainJob, TrainJobPayload
 from services import JobService, ModelMetricsService
 from services.event_processor import EventProcessor, EventType
 
@@ -68,7 +68,7 @@ async def interrupt_job(
         return
     if job.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
         raise InvalidJobStateError("Cannot stop a finished job")
-    if job.status == JobStatus.RUNNING and isinstance(job, TrainJob):
+    if job.status == JobStatus.RUNNING and isinstance(job, (TrainJob, DatasetPreprocessingJob)):
         # Keep the job RUNNING until the worker has stopped and flushed progress.
         # Otherwise Delete can remove it while the worker still owns it.
         scheduler.job_interrupt_flags[str(job_id)] = True

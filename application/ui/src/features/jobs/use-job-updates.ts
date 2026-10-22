@@ -40,6 +40,13 @@ export const useJobUpdates = (project_id?: string) => {
 
         addJob(job);
 
+        if (job.type === 'dataset_preprocessing' && job.status === 'completed') {
+            client.invalidateQueries({
+                predicate: (query) =>
+                    typeof query.queryKey[1] === 'string' && query.queryKey[1].startsWith('/api/dataset/'),
+            });
+        }
+
         if (!isTrainJob(job)) {
             return;
         }

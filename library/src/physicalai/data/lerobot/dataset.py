@@ -115,6 +115,7 @@ class _LeRobotDatasetAdapter(Dataset):
 
     _state_columns: list[str] | None = None
     _action_columns: list[str] | None = None
+    extra_features: Callable[[int], dict[str, torch.Tensor]] | None = None
 
     def __init__(
         self,
@@ -194,6 +195,7 @@ class _LeRobotDatasetAdapter(Dataset):
             download_videos=download_videos,
             video_backend=video_backend,
             batch_encoding_size=batch_encoding_size,
+            depth_output_unit="m",
         )
 
     def __len__(self) -> int:
@@ -212,10 +214,28 @@ class _LeRobotDatasetAdapter(Dataset):
 
         Returns:
             Observation: The item from the dataset.
+
+        Raises:
+            ValueError: If a depth stream lacks explicit physical units.
         """
-        item = self._lerobot_dataset[idx]
-        item = self._combine_split_columns(item)
-        return FormatConverter.to_observation(item)
+        item = self._combine_split_columns(dict(self._lerobot_dataset[idx]))
+        for key in getattr(getattr(self._lerobot_dataset, "meta", None), "depth_keys", ()):
+            if key not in item:
+                continue
+            info = self._lerobot_dataset.features[key].get("info") or {}
+            if info.get("depth_unit") not in {"m", "mm"}:
+                msg = f"Depth feature {key!r} needs an explicit depth_unit (m or mm)"
+                raise ValueError(msg)
+            depth = item.pop(key).float()
+            unit = self._lerobot_dataset.depth_output_unit
+            if unit not in {"m", "mm"}:
+                msg = "Decoded depth must use metres or millimetres"
+                raise ValueError(msg)
+            item[f"observation.depths.{key}"] = depth / 1000 if unit == "mm" else depth
+        observation = FormatConverter.to_observation(item)
+        if self.extra_features is not None:
+            observation.extra = {**(observation.extra or {}), **self.extra_features(int(item["index"]))}
+        return observation
 
     def _combine_split_columns(self, item: dict) -> dict:
         """Return `item` with any configured split state/action sub-columns concatenated into one column."""
@@ -293,10 +313,16 @@ class _LeRobotDatasetAdapter(Dataset):
                 elif k == "observation.environment_state":
                     feature_type = FeatureType.ENV
 
-                stats = dataset_meta.stats[k]
+                is_depth = k in getattr(dataset_meta, "depth_keys", ())
+                if is_depth:
+                    feature_type = FeatureType.DEPTH
+                    feature_name = f"depths.{k}"
+                stats = (dataset_meta.stats or {}).get(k, {})
                 observation_features[feature_name] = Feature(
                     ftype=feature_type,
-                    normalization_data=NormalizationParameters(
+                    normalization_data=None
+                    if is_depth
+                    else NormalizationParameters(
                         mean=stats["mean"].tolist(),
                         std=stats["std"].tolist(),
                         min=stats["min"].tolist(),

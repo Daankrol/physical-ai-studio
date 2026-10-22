@@ -78,6 +78,19 @@ class TestCameraMapping:
         assert payload.image_key_reorder_map == {"gripper": 1, "overhead": 0}
 
 
+class TestRobotLayout:
+    def test_lingbot_layout_is_optional_for_resumed_jobs(self) -> None:
+        kwargs = _base_kwargs()
+        kwargs["policy"] = "lingbotvla2"
+        with pytest.raises(ValidationError, match="requires robot_layout"):
+            LocalTrainJobPayload(**kwargs)
+        resumed = LocalTrainJobPayload(**kwargs, base_model_id=uuid4())
+        assert resumed.robot_layout is None
+        assert LocalTrainJobPayload(**kwargs, robot_layout="so101").robot_layout == "so101"
+        with pytest.raises(ValidationError):
+            LocalTrainJobPayload(**kwargs, robot_layout="unknown")
+
+
 class TestLoraFields:
     def test_lora_disabled_by_default(self) -> None:
         payload = LocalTrainJobPayload(**_base_kwargs())

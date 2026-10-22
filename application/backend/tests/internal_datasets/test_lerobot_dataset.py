@@ -10,6 +10,38 @@ from internal_datasets.lerobot.lerobot_dataset import InternalLeRobotDataset
 from internal_datasets.lerobot.streaming_encoding_settings import StreamingEncodingSettings, _resolve_vcodec
 
 
+def test_depth_videos_are_not_rgb_policy_camera_slots() -> None:
+    dataset = InternalLeRobotDataset.__new__(InternalLeRobotDataset)
+    dataset._dataset = MagicMock()
+    dataset._dataset.meta.video_keys = ["observation.images.front", "observation.images.depth"]
+    dataset._dataset.meta.depth_keys = ["observation.images.depth"]
+    assert dataset.get_video_keys() == ["observation.images.front"]
+
+
+@pytest.mark.parametrize("template", [".physicalai/depth/episode_{episode_index:06d}.mp4", "../outside.mp4"])
+def test_depth_previews_are_aligned_to_rgb_and_confined_to_dataset(tmp_path: Path, template: str) -> None:
+    dataset = InternalLeRobotDataset.__new__(InternalLeRobotDataset)
+    dataset.path = tmp_path / "dataset"
+    preview = dataset.path / ".physicalai/depth/episode_000001.mp4"
+    preview.parent.mkdir(parents=True)
+    preview.touch()
+    (tmp_path / "outside.mp4").touch()
+    dataset._dataset = MagicMock()
+    dataset._dataset.meta.depth_keys = ["depth"]
+    dataset._dataset.meta.fps = 10
+    dataset._dataset.features = {"depth": {"info": {"aligned_to": "rgb", "preview_path": template}}}
+
+    previews = dataset._get_depth_previews({"episode_index": 1, "length": 20})
+
+    if template.startswith("../"):
+        assert previews == {}
+    else:
+        assert set(previews) == {"rgb"}
+        assert previews["rgb"].start == 0
+        assert previews["rgb"].end == 2
+        assert previews["rgb"].path == ".physicalai/depth/episode_000001.mp4"
+
+
 @pytest.fixture
 def fresh_vcodec_cache():
     _resolve_vcodec.cache_clear()

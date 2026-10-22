@@ -4,9 +4,10 @@ import { Flex, ProgressCircle, Text, View } from '@geti-ui/ui';
 import useWebSocket from 'react-use-websocket';
 
 import { fetchClient } from '../../../api/client';
-import { SchemaTrainJob } from '../../../api/openapi-spec';
+import { getJobName, VisibleJob } from '../job-name';
+import { SchemaJob } from '../use-job-cache';
 
-const TrainingJobStatus = ({ job }: { job: SchemaTrainJob }) => {
+const ActiveJobStatus = ({ job }: { job: VisibleJob }) => {
     if (job?.status !== 'pending' && job?.status !== 'running') {
         return null;
     }
@@ -27,7 +28,11 @@ const TrainingJobStatus = ({ job }: { job: SchemaTrainJob }) => {
                         color: 'var(--spectrum-global-color-gray-800)',
                     }}
                 >
-                    {job.message ? `${job.message} (${job.payload.model_name})` : `Training ${job.payload.model_name}`}
+                    {job.message
+                        ? `${job.message} (${getJobName(job)})`
+                        : job.type === 'training'
+                          ? `Training ${getJobName(job)}`
+                          : getJobName(job)}
                 </Text>
                 <Text
                     UNSAFE_style={{
@@ -42,13 +47,13 @@ const TrainingJobStatus = ({ job }: { job: SchemaTrainJob }) => {
 };
 
 export const JobStatus = () => {
-    const [job, setJob] = useState<null | SchemaTrainJob>(null);
+    const [job, setJob] = useState<null | SchemaJob>(null);
 
     const onMessage = ({ data }: WebSocketEventMap['message']) => {
         const message_data = JSON.parse(data);
 
         if (message_data.event === 'JOB_UPDATE') {
-            setJob(message_data.data as SchemaTrainJob);
+            setJob(message_data.data as SchemaJob);
         }
     };
 
@@ -57,8 +62,8 @@ export const JobStatus = () => {
         onMessage: (event: WebSocketEventMap['message']) => onMessage(event),
     });
 
-    if (job?.type === 'training') {
-        return <TrainingJobStatus job={job} />;
+    if (job?.type === 'training' || job?.type === 'dataset_preprocessing') {
+        return <ActiveJobStatus job={job} />;
     }
 
     return null;

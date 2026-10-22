@@ -96,6 +96,7 @@ def _make_job(payload: TrainJobPayload) -> MagicMock:
     job.type = JobType.TRAINING
     job.status = JobStatus.PENDING
     job.start_time = None
+    job.created_at = datetime.now(UTC)
     job.message = "Job created"
     job.payload = payload.model_dump()
     return job
@@ -150,7 +151,11 @@ def session_scope():
     async def _scope():
         yield MagicMock()
 
-    with patch(f"{MODULE}.get_async_db_session_ctx", new=_scope):
+    with (
+        patch(f"{MODULE}.get_async_db_session_ctx", new=_scope),
+        patch(f"{MODULE}.JobService.get_pending_preprocessing_jobs", new=AsyncMock(return_value=[])),
+        patch(f"{MODULE}.JobService.get_job_list", new=AsyncMock(return_value=[])),
+    ):
         yield
 
 

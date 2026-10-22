@@ -7,7 +7,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from db.schema import Base, ProjectDB
 from repositories.job_repo import JobRepository
 from repositories.mappers.job_mapper import JobMapper
-from schemas.job import RemoteTrainJobPayload, TrainJob
+from schemas.base_job import JobStatus, JobType
+from schemas.dataset_preprocessing import DatasetPreprocessingPayload
+from schemas.job import DatasetPreprocessingJob, RemoteTrainJobPayload, TrainJob
 
 
 def test_duplicate_remote_job_payload_with_uuids_is_json_serializable() -> None:
@@ -49,3 +51,33 @@ def test_duplicate_remote_job_payload_with_uuids_is_json_serializable() -> None:
         await engine.dispose()
 
     asyncio.run(check_duplicate())
+
+
+def test_preprocessing_claim_is_exclusive_and_does_not_revive_canceled_jobs() -> None:
+    async def check():
+        engine = create_async_engine("sqlite+aiosqlite://")
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as session:
+            project_id = uuid4()
+            session.add(ProjectDB(id=str(project_id), name="project"))
+            await session.commit()
+            repository = JobRepository(session)
+            payload = DatasetPreprocessingPayload(
+                dataset_id=uuid4(),
+                operation="depth",
+            )
+            job = DatasetPreprocessingJob(project_id=project_id, payload=payload, created_at=datetime.now(UTC))
+            await repository.save(job)
+            claimed = await repository.claim_pending_job(job.id, JobType.DATASET_PREPROCESSING)
+            assert claimed.status == JobStatus.RUNNING
+            assert await repository.claim_pending_job(job.id, JobType.DATASET_PREPROCESSING) is None
+            canceled = DatasetPreprocessingJob(
+                project_id=project_id, payload=payload, status=JobStatus.CANCELED, created_at=datetime.now(UTC)
+            )
+            await repository.save(canceled)
+            assert await repository.claim_pending_job(canceled.id, JobType.DATASET_PREPROCESSING) is None
+        await engine.dispose()
+
+    asyncio.run(check())

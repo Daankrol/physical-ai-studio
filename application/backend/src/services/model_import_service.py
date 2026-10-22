@@ -17,7 +17,7 @@ from settings import get_settings
 # artifacts are optional and deployment exports may target any supported backend.
 _REQUIRED_FILES = ("model.ckpt",)
 _EXPORT_BACKENDS = ("torch", "openvino", "onnx", "executorch")
-_SUPPORTED_POLICIES = frozenset({"act", "smolvla", "pi05", "rldx1", "molmoact2", "xr0"})
+_SUPPORTED_POLICIES = frozenset({"act", "smolvla", "pi05", "rldx1", "molmoact2", "lingbotvla2", "xr0"})
 
 
 class ModelReader(Protocol):

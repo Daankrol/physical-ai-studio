@@ -19,6 +19,8 @@ import { $api } from '../../../api/client';
 import { ElapsedDuration } from '../../../components/elapsed-duration.component';
 import { notify } from '../../../components/notification/notification.component';
 import { Table } from '../../../components/table/table';
+import { getJobName, VisibleJob } from '../../jobs/job-name';
+import { SchemaJob } from '../../jobs/use-job-cache';
 import { useRemoteTrainerHealth } from '../../training-targets/use-remote-trainer-health';
 import { useDatasetQuery, useEnvironmentQuery } from '../api/queries';
 import { durationBetween } from '../shared/duration';
@@ -114,7 +116,7 @@ const TrainJobStatus = ({ job }: { job: SchemaTrainJob }) => {
     }
 };
 
-const JobMenu = ({ trainJob, onViewLogs }: { trainJob: SchemaTrainJob; onViewLogs: () => void }) => {
+export const JobMenu = ({ trainJob, onViewLogs }: { trainJob: VisibleJob; onViewLogs: () => void }) => {
     const queryClient = useQueryClient();
     const deleteJobMutation = $api.useMutation('delete', '/api/jobs/{job_id}', {
         meta: {
@@ -123,12 +125,12 @@ const JobMenu = ({ trainJob, onViewLogs }: { trainJob: SchemaTrainJob; onViewLog
         onSuccess: () => {
             // Remove the job from the cache immediately instead of waiting on the
             // fire-and-forget invalidation refetch, so the row disappears right away.
-            queryClient.setQueryData<SchemaTrainJob[]>(['get', '/api/jobs'], (old = []) =>
+            queryClient.setQueryData<SchemaJob[]>(['get', '/api/jobs'], (old = []) =>
                 old.filter((job) => job.id !== trainJob.id)
             );
         },
         onError: () => {
-            notify('error', `Failed to delete ${trainJob.payload.model_name}`);
+            notify('error', `Failed to delete ${getJobName(trainJob)}`);
         },
     });
     const onAction = (key: Key) => {

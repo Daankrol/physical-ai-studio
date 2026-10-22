@@ -1,5 +1,6 @@
 import datetime
 from collections.abc import Callable
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 from sqlalchemy import func, select, update
@@ -12,6 +13,9 @@ from schemas import Job
 from schemas.base_job import JobStatus, JobType
 from schemas.dataset_import_job import ImportStep
 from schemas.job import TrainJobPayload
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import CursorResult
 
 
 class JobRepository(BaseRepository):
@@ -56,6 +60,21 @@ class JobRepository(BaseRepository):
             order_by=self.schema.created_at,
             ascending=True,
         )
+
+    async def claim_pending_job(self, job_id: UUID, job_type: JobType) -> Job | None:
+        """Reserve a queued job without reviving canceled or already claimed work."""
+        claim = (
+            update(JobDB)
+            .where(
+                JobDB.id == str(job_id),
+                JobDB.type == job_type,
+                JobDB.status == JobStatus.PENDING,
+            )
+            .values(status=JobStatus.RUNNING, start_time=datetime.datetime.now(tz=datetime.UTC))
+        )
+        result = await self.db.execute(claim)
+        await self.db.commit()
+        return await self.get_by_id(job_id) if cast("CursorResult", result).rowcount == 1 else None
 
     async def claim_pending_dataset_import_job(self) -> Job | None:
         pending_steps = [

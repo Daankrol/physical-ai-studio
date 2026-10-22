@@ -58,6 +58,8 @@ class Observation:
     task: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None = None
     state: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None = None
     images: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None = None
+    # Metric depth in metres, kept separate from RGB normalization and augmentation.
+    depths: dict[str, torch.Tensor | np.ndarray] | None = None
 
     # Inference-only Fields
     # Real-Time Chunking (RTC) inputs: the unconsumed tail of the previously predicted
@@ -86,6 +88,7 @@ class Observation:
         TASK = "task"
         STATE = "state"
         IMAGES = "images"
+        DEPTHS = "depths"
 
         PREV_CHUNK_LEFT_OVER = "prev_chunk_left_over"
         RTC_INFERENCE_DELAY = "inference_delay"
@@ -472,6 +475,7 @@ class FeatureType(StrEnum):
     """Enum for feature types."""
 
     VISUAL = "VISUAL"
+    DEPTH = "DEPTH"
     ACTION = "ACTION"
     STATE = "STATE"
     ENV = "ENV"
@@ -525,6 +529,7 @@ class NormalizationParameters:
 #
 # Using imported constants is recommended for IDE autocomplete, refactoring support, and consistency.
 ACTION = Observation.FieldName.ACTION.value
+DEPTHS = Observation.FieldName.DEPTHS.value
 EPISODE_INDEX = Observation.FieldName.EPISODE_INDEX.value
 EXTRA = Observation.FieldName.EXTRA.value
 FRAME_INDEX = Observation.FieldName.FRAME_INDEX.value
