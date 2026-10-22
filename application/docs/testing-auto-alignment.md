@@ -4,12 +4,17 @@ Studio holds the follower while a supported leader moves toward it, then waits
 for the operator to release alignment. It paces intermediate position targets
 in software. Alignment must not write servo speed registers.
 
-The pinned dependencies do not support automatic SO101 alignment. Testing that
-path requires both the Runtime torque-control update (physicalai PR #307) and
-an SO101 plugin build that permits position-only leader commands during
-explicit torque-enabled alignment. Studio uses `physicalai_so101_plugin.SO101`,
-not the old built-in Runtime driver. Updating only that old driver will not
-change the robot Studio runs.
+Handover uses plugin declarations, not robot-model checks. Both robots must
+expose matching `handover_capabilities.position_space` identifiers and ordered
+joint names, with finite positive per-joint tolerances and catch-up limits.
+Powered alignment also requires the leader to declare `supports_alignment=True`
+and provide acknowledged torque and position control. A compatible passive
+leader uses operator release without powered movement.
+
+The pinned Runtime lacks capability transport, so model takeover fails closed
+until Runtime PR #307 and compatible plugin builds are installed. For SO101,
+use the extracted `physicalai_so101_plugin` driver, not the old built-in module.
+Ordinary teleoperation and recording remain separate, unchanged control paths.
 
 Use each arm's own calibration and serial port. Stop other controllers before
 testing. A running robot owner keeps its old Python code after a Git pull:
@@ -22,27 +27,24 @@ For an NVIDIA machine, install the pinned backend environment:
 ```bash
 cd application/backend
 uv sync --frozen --extra cuda --extra tests
-uv run --no-sync python -c 'import inspect; from physicalai.robot import SharedRobot; from physicalai_so101_plugin import SO101; print(inspect.getfile(SharedRobot)); print(inspect.getfile(SO101)); print("set_torque:", hasattr(SharedRobot, "set_torque"))'
+uv run --no-sync python -c 'import inspect; from physicalai.robot import SharedRobot; print(inspect.getfile(SharedRobot)); print("handover capabilities:", hasattr(SharedRobot, "handover_capabilities")); print("set_torque:", hasattr(SharedRobot, "set_torque"))'
 ```
 
 On an Intel XPU target machine, use its existing `xpu` extra instead of `cuda`.
 Use `uv run --no-sync` for subsequent backend commands so the selected hardware
 extras are not changed.
 
-With the pinned dependencies, `set_torque` is `False` and Studio offers operator
-release without powered movement. That path can test correction collection,
-but it cannot pass the automatic-alignment checks below.
-
-Before testing powered alignment, install reviewed Runtime and SO101 plugin
-builds with the capabilities described above. Record their revisions and keep
-them unchanged during the test. Confirm the printed source paths identify those
-builds and `set_torque` is `True`. Do not patch site-packages or commit
-machine-local dependency overrides. Update Studio's lockfiles only after both
-dependency changes are reviewed.
+With the pinned dependencies, both checks are `False`; do not count this as a
+supported model takeover. Install reviewed Runtime and robot-plugin builds with
+the capabilities above before testing corrections. Record their revisions and
+keep them unchanged during the test. Interface presence alone is not enough:
+check the connected robots' declarations too. Do not patch site-packages or commit
+machine-local dependency overrides. Update Studio's lockfiles after the dependency
+changes are reviewed and published.
 
 If earlier experimental builds changed servo speed limits, inspect and restore
 them before testing powered alignment. Restart owners after installing the
-reviewed position-only plugin build.
+reviewed plugin build.
 
 ## 2. Start Studio
 
@@ -59,9 +61,10 @@ npm run start
 ```
 
 Run `npm ci` first only if UI dependencies need installing. Open
-`http://localhost:3000` on the robot machine. Configure an SO101 follower and an
-SO101 leader with valid calibrations and comparable normalized coordinates.
-Matching joint names alone does not prove the coordinates are comparable.
+`http://localhost:3000` on the robot machine. Configure a plugin-provided follower
+and leader with compatible coordinate declarations. For SO101, both arms need
+their own valid calibration and normalized coordinates. Matching joint names
+alone does not prove the coordinates are comparable.
 Back up the dataset before collecting corrections.
 
 ## 3. Check takeover before running the policy
@@ -97,12 +100,14 @@ The backend settings are:
 | ------------------------------------- | ------- | ------------------------------------------------------------------------------- |
 | `LEADER_ALIGNMENT_GOAL_TIME_S`        | `3`     | Requested software-paced move duration                                          |
 | `LEADER_ALIGNMENT_TIMEOUT_S`          | `15`    | Feedback deadline for reporting a missed tolerance; does not release torque     |
-| `LEADER_ALIGNMENT_POSITION_TOLERANCE` | `0.5`   | Maximum permitted joint-position error in calibrated units                      |
-| `LEADER_HANDOVER_MAX_FOLLOWER_STEP`   | `0.5`   | Extra catch-up movement per joint per control tick, on top of new leader motion |
+| `LEADER_ALIGNMENT_POSITION_TOLERANCE` | Plugin  | Optional tighter cap on both robots' per-joint position tolerances             |
+| `LEADER_HANDOVER_MAX_FOLLOWER_STEP`   | Plugin  | Optional tighter cap on the follower's per-joint catch-up limits                |
 
 The catch-up guard softens the initial pose mismatch; it is not an absolute
-teleop speed limit. With a stationary leader 2 units ahead, the default follower
-commands advance by 0.5 units per tick until they match. If the leader moves
+teleop speed limit. Limits use each joint's declared coordinates; a radians joint
+and a linear joint need different values. Overrides can only tighten plugin limits.
+For an SO101-style catch-up limit of 0.5 units and a stationary leader 2 units ahead,
+follower commands advance by 0.5 units per tick until they match. If the leader moves
 another 2 units between guarded ticks, the follower can move up to 2.5 units:
 2 units of leader motion plus 0.5 units of catch-up. The first step has no
 leader-motion allowance. Once caught up, the follower tracks directly. Guarded
@@ -162,7 +167,8 @@ continuing; the intended servo configuration has not been confirmed. Do not tune
 PID gains blindly. If **Automatic alignment is unavailable** appears, the leader
 is using the operator-release fallback, not automatic alignment. Take hold of
 the leader and press **Release alignment** to take over without a pose-match
-check. Do not count that as a successful automatic-alignment test.
+check. This fallback requires declared coordinate compatibility; unknown spaces
+stay in hold. Do not count it as a successful automatic-alignment test.
 
 If torque-off fails, inspect and secure the leader before continuing. Software
 acknowledgments cannot guarantee physical torque state after a hardware fault.

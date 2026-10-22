@@ -358,18 +358,18 @@ class Settings(BaseSettings):
         """Expand `~` so the default resolves to the running user's SSH config."""
         return Path(value).expanduser()
 
-    # Runtime leader handover timing and calibrated joint-position limits.
+    # Plugins provide joint-position limits; these optional caps can only tighten them.
     leader_alignment_goal_time_s: float = Field(
         default=3.0, gt=0, allow_inf_nan=False, alias="LEADER_ALIGNMENT_GOAL_TIME_S"
     )
-    leader_alignment_position_tolerance: float = Field(
-        default=0.5, gt=0, allow_inf_nan=False, alias="LEADER_ALIGNMENT_POSITION_TOLERANCE"
+    leader_alignment_position_tolerance: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False, alias="LEADER_ALIGNMENT_POSITION_TOLERANCE"
     )
     leader_alignment_timeout_s: float = Field(
         default=15.0, gt=0, allow_inf_nan=False, alias="LEADER_ALIGNMENT_TIMEOUT_S"
     )
-    leader_handover_max_follower_step: float = Field(
-        default=0.5, gt=0, allow_inf_nan=False, alias="LEADER_HANDOVER_MAX_FOLLOWER_STEP"
+    leader_handover_max_follower_step: float | None = Field(
+        default=None, gt=0, allow_inf_nan=False, alias="LEADER_HANDOVER_MAX_FOLLOWER_STEP"
     )
 
     # Runtime sessions

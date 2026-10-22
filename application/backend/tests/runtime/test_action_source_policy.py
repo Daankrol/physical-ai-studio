@@ -29,6 +29,13 @@ from runtime.contract import (
 
 from .fakes import FakeInferenceModel, FakeObservation, FakeRobot
 
+_HANDOVER_CAPABILITIES = {
+    "position_space": "test.normalized.v1",
+    "position_tolerance": (0.5, 0.5),
+    "max_position_step": (0.5, 0.5),
+    "supports_alignment": False,
+}
+
 
 def _observation(values: list[float], timestamp: float = 1.0) -> FakeObservation:
     return FakeObservation(np.array(values, dtype=np.float32), timestamp)
@@ -396,8 +403,8 @@ def test_start_task_is_rejected_while_recording_is_open() -> None:
 
 
 def test_correction_recording_requires_model_dataset_leader_and_confirmed_teleop() -> None:
-    follower = FakeRobot([_observation([0.0, 0.0])])
-    leader = FakeRobot([_observation([0.0, 0.0])])
+    follower = FakeRobot([_observation([0.0, 0.0])], handover_capabilities=_HANDOVER_CAPABILITIES)
+    leader = FakeRobot([_observation([0.0, 0.0])], handover_capabilities=_HANDOVER_CAPABILITIES)
     source, mailbox, events = _source(follower=follower, leader=leader)
     recording = RecordingState()
     mutation = MagicMock()
@@ -415,7 +422,7 @@ def test_correction_recording_requires_model_dataset_leader_and_confirmed_teleop
     assert not recording.is_recording
     assert any(isinstance(event, ErrorEvent) and event.error_code == "correction_not_ready" for event in _drain(events))
 
-    source._follower_source = "teleop"
+    mailbox.apply(SetFollowerSourceCommand(follower_source="teleop", confirm_manual_alignment=True))
     mailbox.apply(StartRecordingCommand(task="recover", intervention=True))
     source.update(_observation([0.0, 0.0], 3.0), {}, 2)
     assert recording.is_recording
@@ -423,7 +430,7 @@ def test_correction_recording_requires_model_dataset_leader_and_confirmed_teleop
 
 
 def test_correction_recording_requires_leader_and_dataset() -> None:
-    follower = FakeRobot([_observation([0.0, 0.0])])
+    follower = FakeRobot([_observation([0.0, 0.0])], handover_capabilities=_HANDOVER_CAPABILITIES)
     source, mailbox, events = _source(follower=follower)
     source.bind_recording(RecordingState())
     source._set_policy(_FakePolicy(), generation=1)  # type: ignore[arg-type]
@@ -435,12 +442,12 @@ def test_correction_recording_requires_leader_and_dataset() -> None:
 
     leader_source, leader_mailbox, leader_events = _source(
         follower=follower,
-        leader=FakeRobot([_observation([0.0, 0.0])]),
+        leader=FakeRobot([_observation([0.0, 0.0])], handover_capabilities=_HANDOVER_CAPABILITIES),
     )
     dataset_state = RecordingState()
     leader_source.bind_recording(dataset_state)
     leader_source._set_policy(_FakePolicy(), generation=1)  # type: ignore[arg-type]
-    leader_source._follower_source = "teleop"
+    leader_mailbox.apply(SetFollowerSourceCommand(follower_source="teleop", confirm_manual_alignment=True))
     leader_mailbox.apply(StartRecordingCommand(task="recover", intervention=True))
     leader_source.update(_observation([0.0, 0.0], 2.0), {}, 0)
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -95,17 +97,26 @@ def _source(
     mailbox = InMemoryCommandMailbox()
     events = QueueEventSink()
     kwargs.setdefault("leader_alignment_goal_time_s", 0.02)
+    for robot in (follower, leader):
+        if robot is not None and robot.handover_capabilities is None:
+            robot.handover_capabilities = SimpleNamespace(
+                position_space="test.normalized.v1" if position_space_comparable else None,
+                position_tolerance=(0.5,) * len(robot.joint_names),
+                max_position_step=(0.5,) * len(robot.joint_names),
+                supports_alignment=isinstance(robot, _ActivePoseLeader),
+            )
     source = StudioActionSource(
         follower=follower,
         leader=leader,
         mailbox=mailbox,
         event_sink=events,
         fps=fps,
-        position_space_check=lambda: position_space_comparable,
         **kwargs,
     )
     source.connect(bus=object(), session_id="test")
     source._model_loaded = model_loaded
+    # Manual ticks are the follower's hardware feedback in these tests.
+    follower.get_observation = MagicMock(side_effect=lambda: source._last_robot_state)  # type: ignore[method-assign]
     return source, mailbox, events
 
 
@@ -581,8 +592,7 @@ def test_torque_off_failure_blocks_policy_until_cleanup_settles() -> None:
     _tick_until(source, lambda: source.state_data().handover_state == "awaiting_release")
     mailbox.apply(SetFollowerSourceCommand(follower_source="teleop", release_alignment=True))
     source.update(_observation([0, 0], time.monotonic()), {}, 0)
-    _wait_until(lambda: len(leader.torque_commands) >= 2)
-    assert _has_error(events, "leader_torque_off_failed")
+    _wait_until(lambda: _has_error(events, "leader_torque_off_failed"))
     mailbox.apply(StartTaskCommand(task="resume"))
     source.update(_observation([0, 0], time.monotonic()), {}, 0)
     assert source.follower_source == "hold"

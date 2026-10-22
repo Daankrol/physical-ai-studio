@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 from physicalai.capture import Frame
@@ -80,7 +82,7 @@ class FakeRobot:
         observation_error: str | None = None,
         connect_delay: float = 0.0,
         disconnect_error: str | None = None,
-        handover_position_space_comparable: bool = False,
+        handover_capabilities: dict[str, Any] | None = None,
         name: str = "fake_robot",
     ) -> None:
         if observations is None:
@@ -97,7 +99,7 @@ class FakeRobot:
         self._observation_error = observation_error
         self._connect_delay = connect_delay
         self._disconnect_error = disconnect_error
-        self.handover_position_space_comparable = handover_position_space_comparable
+        self.handover_capabilities = None if handover_capabilities is None else SimpleNamespace(**handover_capabilities)
         self.name = name
         self.sent_actions: list[np.ndarray] = []
 
@@ -184,6 +186,18 @@ class FakeInferenceModel:
 
     def reset(self) -> None:
         self.reset_calls += 1
+
+
+class ActiveFakeRobot(FakeRobot):
+    def set_torque(self, *, enabled: bool) -> None:
+        if not self._connected:
+            raise ConnectionError("Fake leader is disconnected")
+        self.torque_enabled = enabled
+
+    def send_action(self, action: np.ndarray, *, goal_time: float = 0.1) -> None:
+        if not getattr(self, "torque_enabled", False):
+            raise RuntimeError("Fake leader torque is off")
+        super().send_action(action, goal_time=goal_time)
 
 
 class FakeCamera:

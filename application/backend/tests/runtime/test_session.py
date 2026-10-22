@@ -7,11 +7,10 @@ from unittest.mock import MagicMock
 import pytest
 from physicalai.config import Config
 from physicalai.robot import SharedRobot
-from physicalai_so101_plugin import SO101
 
 from runtime.contract import DisconnectCommand, QueueEventSink
-from runtime.session import RuntimeSession, _position_spaces_comparable
-from tests.runtime.fakes import FakeRobot, max_concurrent_connects, reset_connect_tracking
+from runtime.session import RuntimeSession
+from tests.runtime.fakes import max_concurrent_connects, reset_connect_tracking
 
 
 def _fake_robot_args(**kwargs: Any) -> dict[str, Any]:
@@ -63,82 +62,50 @@ def _document_with_leader(*, leader_kwargs: dict[str, Any] | None = None, **foll
     return document
 
 
-def _so101_recipe(role: str, *, unit: str = "normalized", calibrated: bool = True, offset: int = 0) -> dict:
-    names = SO101.JOINT_ORDER
-    calibration = {
-        name: {
-            "id": index + 1,
-            "drive_mode": 0,
-            "homing_offset": offset,
-            "range_min": 0,
-            "range_max": 4095,
-        }
-        for index, name in enumerate(names)
-    }
+def _capabilities(position_space: str = "plugin.radians.v1") -> dict[str, Any]:
     return {
-        "class_path": "physicalai.robot.SharedRobot",
-        "init_args": {
-            "robot": {
-                "class_path": "physicalai_so101_plugin.SO101",
-                "init_args": {
-                    "role": role,
-                    "unit": unit,
-                    "calibration": calibration if calibrated else None,
-                },
-            }
-        },
+        "position_space": position_space,
+        "position_tolerance": [0.01],
+        "max_position_step": [0.02],
+        "supports_alignment": False,
     }
 
 
-def test_so101_position_space_requires_valid_normalized_calibrations() -> None:
-    joints = SO101.JOINT_ORDER
-    follower = FakeRobot(positions=[[0] * len(joints)], joint_names=joints)
-    leader = FakeRobot(positions=[[0] * len(joints)], joint_names=joints)
+@pytest.mark.parametrize("leader_space", ["plugin.radians.v1", "plugin.degrees.v1", None])
+async def test_session_uses_plugin_coordinate_declarations(leader_space: str | None) -> None:
+    document = _document_with_leader(
+        handover_capabilities=_capabilities(),
+        leader_kwargs={"handover_capabilities": None if leader_space is None else _capabilities(leader_space)},
+    )
+    session = RuntimeSession(document, event_sink=QueueEventSink())
+    try:
+        await session.setup()
+        session._preconnect_devices()
+        assert session._action_source is not None
+        session._action_source.connect(bus=object(), session_id="test-session")
 
-    assert _position_spaces_comparable(
-        _so101_recipe("follower", offset=3), _so101_recipe("leader", offset=17), follower, leader
-    )
-    assert not _position_spaces_comparable(
-        _so101_recipe("follower", calibrated=False), _so101_recipe("leader"), follower, leader
-    )
-    assert not _position_spaces_comparable(
-        _so101_recipe("follower", unit="ticks"), _so101_recipe("leader"), follower, leader
-    )
-    assert not _position_spaces_comparable(
-        _so101_recipe("follower"), _so101_recipe("leader", unit="ticks"), follower, leader
-    )
-    assert not _position_spaces_comparable(
-        _so101_recipe("follower"),
-        _so101_recipe("leader"),
-        follower,
-        FakeRobot(positions=[[0] * len(joints)], joint_names=list(reversed(joints))),
-    )
-
-
-def test_unknown_plugin_position_space_requires_opt_in_from_both_robots() -> None:
-    recipe = {"class_path": "plugin.SharedRobot", "init_args": {}}
-    follower = FakeRobot(positions=[[0]], joint_names=["joint"])
-    leader = FakeRobot(positions=[[0]], joint_names=["joint"])
-
-    assert not _position_spaces_comparable(recipe, recipe, follower, leader)
-    follower.handover_position_space_comparable = True
-    leader.handover_position_space_comparable = True
-    assert _position_spaces_comparable(recipe, recipe, follower, leader)
+        assert session._action_source._position_space_comparable is (leader_space == "plugin.radians.v1")
+        assert not session._action_source._automatic_alignment_supported
+    finally:
+        await session.teardown()
 
 
 @pytest.mark.parametrize("with_leader", [False, True])
 async def test_session_defers_shared_robot_metadata_reads_until_connected(mocker, with_leader: bool) -> None:
     document = _document()
-    follower_recipe = _so101_recipe("follower")
-    follower_recipe["init_args"]["name"] = "test-follower"
-    document["init_args"]["robot"] = follower_recipe
+
+    def recipe(name: str) -> dict[str, Any]:
+        return {
+            "class_path": "physicalai.robot.SharedRobot",
+            "init_args": {"name": name, "robot": _document()["init_args"]["robot"]},
+        }
+
+    document["init_args"]["robot"] = recipe("test-follower")
     if with_leader:
-        leader_recipe = _so101_recipe("leader")
-        leader_recipe["init_args"]["name"] = "test-leader"
-        document["init_args"]["action_source"] = {"init_args": {"leader": leader_recipe}}
+        document["init_args"]["action_source"] = {"init_args": {"leader": recipe("test-leader")}}
 
     def connect(robot: SharedRobot) -> None:
-        robot._metadata = {"joint_names": SO101.JOINT_ORDER}
+        robot._metadata = {"joint_names": ["joint"], "handover_capabilities": _capabilities()}
         robot._connected = True
 
     connect_mock = mocker.patch.object(SharedRobot, "connect", autospec=True, side_effect=connect)
@@ -154,7 +121,8 @@ async def test_session_defers_shared_robot_metadata_reads_until_connected(mocker
         session._action_source.connect(bus=object(), session_id="test-session")
 
         assert connect_mock.call_count == (2 if with_leader else 1)
-        assert session._action_source._position_space_comparable is with_leader
+        supports_metadata = hasattr(SharedRobot, "handover_capabilities")
+        assert session._action_source._position_space_comparable is (with_leader and supports_metadata)
     finally:
         await session.teardown()
 

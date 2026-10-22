@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import Future
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -23,7 +24,7 @@ from runtime.contract import (
 from runtime.policy_loader import PolicyLoader, model_identity, requires_task
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from physicalai.capture.frame import Frame
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
 class StudioActionSource:
     """Select actions and guard every transition into leader teleoperation."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(  # noqa: PLR0913, PLR0915
         self,
         *,
         follower: Robot,
@@ -48,11 +49,10 @@ class StudioActionSource:
         fps: float,
         camera_keys: Sequence[str] = (),
         models_dir: Path | None = None,
-        position_space_check: Callable[[], bool] | None = None,
         leader_alignment_goal_time_s: float = 3.0,
-        alignment_tolerance: float = 0.5,
+        alignment_tolerance: float | None = None,
         alignment_timeout_s: float = 15.0,
-        max_follower_step: float = 0.5,
+        max_follower_step: float | None = None,
     ) -> None:
         self._follower = follower
         self._leader = leader
@@ -61,16 +61,13 @@ class StudioActionSource:
         self._max_leader_failures = max(1, int(3 * fps))
         self._alignment_goal_time_s = leader_alignment_goal_time_s
         self._alignment_interval_s = 1.0 / fps
-        self._alignment_tolerance = alignment_tolerance
+        self._alignment_tolerance_override, self._max_follower_step_override = alignment_tolerance, max_follower_step
+        self._alignment_tolerance: float | np.ndarray = 0.5 if alignment_tolerance is None else alignment_tolerance
         self._alignment_timeout_s = alignment_timeout_s
-        self._max_follower_step = max_follower_step
-        self._position_space_check = position_space_check
+        self._max_follower_step: float | np.ndarray = 0.5 if max_follower_step is None else max_follower_step
         self._position_space_comparable = False
-        self._automatic_alignment_supported = (
-            leader is not None
-            and callable(getattr(leader, "set_torque", None))
-            and callable(getattr(leader, "send_action", None))
-        )
+        self._correction_takeover_confirmed = False
+        self._automatic_alignment_supported = False
         self._follower_source: FollowerSource = "hold"
         self._handover_state: HandoverState = "idle"
         self._hold_target: np.ndarray | None = None
@@ -98,6 +95,7 @@ class StudioActionSource:
         self._last_follower_timestamp: float | None = None
         self._follower_revision = 0
         self._follower_observation: tuple[np.ndarray, float, int] | None = None
+        self._follower_feedback_barrier: Future[tuple[int, float]] | None = None
         self._handover_lock = threading.Condition(threading.RLock())
         self._handover_generation = 0
         self._handover_cancel: threading.Event | None = None
@@ -165,8 +163,38 @@ class StudioActionSource:
             self._leader.connect()
         if self._leader is not None and self._leader.joint_names != self._follower.joint_names:
             raise ValueError("Leader and follower joint names must match for teleoperation")
-        # SharedRobot joint metadata is only available after connection.
-        self._position_space_comparable = self._position_space_check is not None and self._position_space_check()
+        # SharedRobot capabilities, like joint names, arrive only after connection.
+        follower_capabilities = getattr(self._follower, "handover_capabilities", None)
+        leader_capabilities = getattr(self._leader, "handover_capabilities", None)
+        position_space = getattr(follower_capabilities, "position_space", None)
+        self._position_space_comparable = (
+            isinstance(position_space, str)
+            and bool(position_space.strip())
+            and position_space == getattr(leader_capabilities, "position_space", None)
+        )
+        self._automatic_alignment_supported = False
+        self._correction_takeover_confirmed = False
+        if not self._position_space_comparable or follower_capabilities is None or leader_capabilities is None:
+            return
+        shape = (len(self._follower.joint_names),)
+        limits = [
+            np.asarray(follower_capabilities.position_tolerance, dtype=np.float32),
+            np.asarray(leader_capabilities.position_tolerance, dtype=np.float32),
+            np.asarray(follower_capabilities.max_position_step, dtype=np.float32),
+        ]
+        if any(limit.shape != shape or not np.all(np.isfinite(limit) & (limit > 0)) for limit in limits):
+            raise ValueError("Plugin handover limits must be finite positive values for every joint")
+        self._alignment_tolerance = np.minimum(limits[0], limits[1])
+        self._max_follower_step = limits[2]
+        if self._alignment_tolerance_override is not None:
+            self._alignment_tolerance = np.minimum(self._alignment_tolerance, self._alignment_tolerance_override)
+        if self._max_follower_step_override is not None:
+            self._max_follower_step = np.minimum(self._max_follower_step, self._max_follower_step_override)
+        self._automatic_alignment_supported = (
+            getattr(leader_capabilities, "supports_alignment", False) is True
+            and callable(getattr(self._leader, "set_torque", None))
+            and callable(getattr(self._leader, "send_action", None))
+        )
 
     def update(
         self,
@@ -236,6 +264,7 @@ class StudioActionSource:
         """Cancel and drain alignment before the session disconnects the leader."""
         with self._handover_lock:
             self._shutting_down = True
+            self._correction_takeover_confirmed = False
             thread = self._handover_thread
             if self._handover_cancel is not None:
                 self._handover_generation += 1
@@ -259,6 +288,11 @@ class StudioActionSource:
             policy.disconnect()
 
     def _observe_follower(self, robot_state: RobotObservation) -> bool:
+        with self._handover_lock:
+            barrier = self._follower_feedback_barrier
+        if barrier is not None and not barrier.done():
+            self._complete_follower_barrier(barrier)
+            return False
         timestamp = float(robot_state.timestamp)
         positions = np.array(robot_state.joint_positions, dtype=np.float32, copy=True)
         with self._handover_lock:
@@ -270,6 +304,54 @@ class StudioActionSource:
                 self._handover_lock.notify_all()
             return fresh
 
+    def _complete_follower_barrier(self, barrier: Future[tuple[int, float]]) -> None:
+        """Drain on the control thread so no in-flight or queued pre-release sample counts."""
+        try:
+            capture = getattr(self._follower, "get_fresh_observation", None)
+            observation = capture() if callable(capture) else self._follower.get_observation()
+            timestamp = float(observation.timestamp)
+            positions = np.array(observation.joint_positions, dtype=np.float32, copy=True)
+            if (
+                positions.shape != (len(self._follower.joint_names),)
+                or not np.all(np.isfinite(positions))
+                or not np.isfinite(timestamp)
+            ):
+                raise ValueError("Follower returned invalid feedback after torque-off")
+            with self._handover_lock:
+                if self._follower_feedback_barrier is not barrier or barrier.done():
+                    return
+                if self._last_follower_timestamp is not None and timestamp < self._last_follower_timestamp:
+                    raise ValueError("Follower feedback regressed after torque-off")
+                self._last_follower_timestamp = timestamp
+                self._follower_revision += 1
+                self._follower_observation = positions, timestamp, self._follower_revision
+                barrier.set_result((self._follower_revision, timestamp))
+                self._handover_lock.notify_all()
+        except Exception as exc:
+            with self._handover_lock:
+                if self._follower_feedback_barrier is barrier and not barrier.done():
+                    barrier.set_exception(exc)
+                    self._handover_lock.notify_all()
+
+    def _drain_follower_feedback(self, deadline: float, generation: int, cancel: threading.Event) -> tuple[int, float]:
+        """Ask the control thread to resample after torque-off and return that baseline."""
+        barrier: Future[tuple[int, float]] = Future()
+        with self._handover_lock:
+            self._raise_if_cancelled(generation, cancel)
+            self._follower_feedback_barrier = barrier
+            try:
+                while not barrier.done():
+                    self._raise_if_cancelled(generation, cancel)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("No control-thread follower resample followed torque-off")
+                    self._handover_lock.wait(timeout=min(0.05, remaining))
+                self._raise_if_cancelled(generation, cancel)
+                return barrier.result()
+            finally:
+                if self._follower_feedback_barrier is barrier:
+                    self._follower_feedback_barrier = None
+
     def _limit_initial_teleop_step(self, leader_action: np.ndarray) -> tuple[np.ndarray, bool]:
         if not self._teleop_guard:
             return np.array(leader_action, dtype=np.float32, copy=True), False
@@ -280,7 +362,7 @@ class StudioActionSource:
             self._teleop_guard = False
             return np.array(leader_action, dtype=np.float32, copy=True), False
         # Limit catch-up separately from human motion so a moving leader cannot prolong the guard.
-        max_step = np.full_like(leader_action, self._max_follower_step)
+        max_step = np.broadcast_to(self._max_follower_step, leader_action.shape).copy()
         if self._last_guarded_leader_action is not None:
             max_step += np.abs(leader_action - self._last_guarded_leader_action)
         self._last_guarded_leader_action = np.array(leader_action, dtype=np.float32, copy=True)
@@ -358,6 +440,8 @@ class StudioActionSource:
             with self._handover_lock:
                 ready = (
                     self._model_loaded
+                    and self._position_space_comparable
+                    and self._correction_takeover_confirmed
                     and self._leader is not None
                     and self._leader_reads_enabled
                     and self._follower_source == "teleop"
@@ -433,6 +517,7 @@ class StudioActionSource:
                     "leader_torque_cleanup_active",
                 )
                 return
+            self._correction_takeover_confirmed = False
             self._cancel_arming()
             if self._follower_source != "hold" or self._hold_target is None:
                 self._latch_hold(robot_state)
@@ -524,6 +609,7 @@ class StudioActionSource:
                     return
             self._follower_source = "teleop"
             self._handover_state = "idle"
+            self._correction_takeover_confirmed = True
             self._emit_state()
             return
         self._handover_state = "manual_required"
@@ -564,6 +650,7 @@ class StudioActionSource:
             self._policy_error_emitted = False
             self._arm_generation += 1
             generation = self._arm_generation
+            self._correction_takeover_confirmed = False
             self._arming = True
         self._warn_if_prompt_missing(policy, task)
         snapshot = self._latest_observation()
@@ -631,6 +718,10 @@ class StudioActionSource:
             self._cancel_handover_locked()
 
     def _cancel_handover_locked(self) -> None:
+        self._correction_takeover_confirmed = False
+        if self._follower_feedback_barrier is not None:
+            self._follower_feedback_barrier.cancel()
+            self._follower_feedback_barrier = None
         thread = self._handover_thread
         if thread is not None and thread.is_alive():
             self._handover_generation += 1
@@ -725,7 +816,7 @@ class StudioActionSource:
                     worst = int(np.argmax(errors))
                     message += (
                         f"; largest leader error: {self._follower.joint_names[worst]}={errors[worst]:.3f} "
-                        f"(tolerance={self._alignment_tolerance:.3f})"
+                        f"(tolerance={np.broadcast_to(self._alignment_tolerance, target.shape)[worst]:.3f})"
                     )
                 logger.warning(message)
             with self._handover_lock:
@@ -743,9 +834,6 @@ class StudioActionSource:
                 if positions.shape != target.shape or not np.all(np.isfinite(positions)):
                     raise ValueError("Leader returned an invalid pose while waiting for release")
             self._raise_if_cancelled(generation, cancel)
-            with self._handover_lock:
-                follower_revision = self._follower_revision
-                follower_timestamp = self._last_follower_timestamp
         except Exception as exc:
             failure = exc
         finally:
@@ -754,12 +842,20 @@ class StudioActionSource:
         if not torque_off_confirmed:
             failure = RuntimeError("Leader torque-off could not be confirmed; leader cleanup remains active")
         elif failure is None:
-            if leader_timestamp is None or follower_timestamp is None:
+            if leader_timestamp is None:
                 failure = RuntimeError("Fresh leader and follower timestamps were lost during alignment")
             else:
                 try:
                     deadline = time.monotonic() + self._alignment_timeout_s
-                    post_off = self._next_fresh_leader(leader_timestamp, deadline, generation, cancel)
+                    follower_revision, follower_timestamp = self._drain_follower_feedback(deadline, generation, cancel)
+                    capture = getattr(self._leader, "get_fresh_observation", None)
+                    if callable(capture):
+                        post_off = capture()
+                        if not np.isfinite(post_off.timestamp) or post_off.timestamp <= leader_timestamp:
+                            raise ValueError("Leader capture did not advance after torque-off")
+                    else:
+                        drained = self._next_fresh_leader(leader_timestamp, deadline, generation, cancel)
+                        post_off = self._next_fresh_leader(float(drained.timestamp), deadline, generation, cancel)
                     follower = self._wait_for_follower_after(
                         follower_revision,
                         follower_timestamp,
@@ -780,6 +876,7 @@ class StudioActionSource:
                         if generation == self._handover_generation and not cancel.is_set() and not self._shutting_down:
                             self._follower_source = "teleop"
                             self._handover_state = "idle"
+                            self._correction_takeover_confirmed = True
                             self._torque_cleanup_active = False
                             self._last_leader_timestamp = float(post_off.timestamp)
                             self._handover_thread = None
@@ -896,7 +993,7 @@ class StudioActionSource:
         return first.shape == second.shape and bool(
             np.all(np.isfinite(first))
             and np.all(np.isfinite(second))
-            and np.max(np.abs(first - second), initial=0.0) <= self._alignment_tolerance
+            and np.all(np.abs(first - second) <= self._alignment_tolerance)
         )
 
     def _read_leader(self, robot_state: RobotObservation) -> tuple[np.ndarray | None, bool]:

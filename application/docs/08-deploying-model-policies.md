@@ -26,7 +26,7 @@ To collect recovery demonstrations while running a policy, choose **Collect corr
 
 The original demonstrations stay in the dataset. Retrain from the model on that dataset so training sees both the original task demonstrations and the new recovery examples. Studio currently uses the human-gated variant of DAgger: it records corrections when a person takes over, not expert labels for every state the policy visits. The intervention flag identifies frames in the dataset; it is not a reward or training-loss function.
 
-**Hardware note:** the pinned Runtime and SO101 plugin do not support automatic SO101 alignment. See [Test Studio DAgger handover](./testing-auto-alignment.md) for the dependency requirements and hardware checks. With the pinned dependencies, take hold of the leader and use **Release alignment** without powered movement. Keep a hand on the stop control and test takeover in a clear workspace; the full handover has not been validated on hardware.
+**Hardware note:** model takeover requires compatible plugin handover declarations carried through Runtime. The pinned dependencies do not provide them, so takeover stays in hold until the Runtime and robot-plugin updates are installed. Compatible passive leaders can use **Release alignment** without powered movement; unknown coordinates cannot. See [Test Studio DAgger handover](./testing-auto-alignment.md) for dependency requirements and hardware checks. Keep the stop control reachable and test in a clear workspace; the full handover has not been hardware-validated.
 
 ## Next
 

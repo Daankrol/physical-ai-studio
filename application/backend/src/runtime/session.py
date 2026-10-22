@@ -4,14 +4,12 @@ import contextlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from loguru import logger
 from physicalai.config import Config
 from physicalai.robot import RobotError
 from physicalai.runtime import RobotRuntime
-from physicalai_so101_plugin import SO101, SO101Calibration
 
 from internal_datasets.access_mode import DatasetAccessMode
 from internal_datasets.lerobot.lerobot_dataset import InternalLeRobotDataset
@@ -45,7 +43,6 @@ if TYPE_CHECKING:
 # to waiting is deleting the cache without copying it back.
 RECORDING_TEARDOWN_TIMEOUT_S = 60.0
 _DEVICE_READY_TIMEOUT_S = 30.0
-_SO101_DRIVER_CLASS = "physicalai_so101_plugin.SO101"
 
 
 class _Connectable(Protocol):
@@ -57,59 +54,6 @@ def _is_connected(device: object) -> bool:
     """Return connection state for a robot (method) or camera (property)."""
     connected = getattr(device, "is_connected", False)
     return bool(connected() if callable(connected) else connected)
-
-
-def _driver_recipe(recipe: object) -> dict[str, Any] | None:
-    if not isinstance(recipe, dict):
-        return None
-    init_args = recipe.get("init_args")
-    if isinstance(init_args, dict) and isinstance(init_args.get("robot"), dict):
-        return init_args["robot"]
-    return recipe
-
-
-def _valid_so101_calibration(recipe: object, *, role: str, joint_names: list[str]) -> bool:
-    driver = _driver_recipe(recipe)
-    if driver is None or driver.get("class_path") != _SO101_DRIVER_CLASS:
-        return False
-    args = driver.get("init_args")
-    if not isinstance(args, dict) or args.get("role") != role or args.get("unit") != "normalized":
-        return False
-    calibration = args.get("calibration")
-    if not isinstance(calibration, dict) or set(calibration) != set(joint_names):
-        return False
-    if list(joint_names) != SO101.JOINT_ORDER:
-        return False
-    try:
-        SO101Calibration.from_dict(calibration)
-    except (TypeError, ValueError):
-        return False
-    return True
-
-
-def _position_spaces_comparable(
-    follower_recipe: object,
-    leader_recipe: object,
-    follower: Robot,
-    leader: Robot | None,
-) -> bool:
-    """Trust validated SO101 recipes or an explicit opt-in on both plugin robots."""
-    if leader is None or follower.joint_names != leader.joint_names:
-        return False
-    if _valid_so101_calibration(
-        follower_recipe, role="follower", joint_names=follower.joint_names
-    ) and _valid_so101_calibration(leader_recipe, role="leader", joint_names=leader.joint_names):
-        return True
-    follower_driver = _driver_recipe(follower_recipe)
-    leader_driver = _driver_recipe(leader_recipe)
-    if follower_driver is not None and follower_driver.get("class_path") == _SO101_DRIVER_CLASS:
-        return False
-    if leader_driver is not None and leader_driver.get("class_path") == _SO101_DRIVER_CLASS:
-        return False
-    return (
-        getattr(follower, "handover_position_space_comparable", False) is True
-        and getattr(leader, "handover_position_space_comparable", False) is True
-    )
 
 
 class RuntimeSession:
@@ -168,9 +112,6 @@ class RuntimeSession:
             event_sink=self._event_sink,
             fps=float(init_args["fps"]),
             camera_keys=tuple(self._cameras),
-            position_space_check=partial(
-                _position_spaces_comparable, follower_config, leader_config, self._follower, self._leader
-            ),
             leader_alignment_goal_time_s=settings.leader_alignment_goal_time_s,
             alignment_tolerance=settings.leader_alignment_position_tolerance,
             alignment_timeout_s=settings.leader_alignment_timeout_s,
