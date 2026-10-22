@@ -40,26 +40,9 @@ builds and `set_torque` is `True`. Do not patch site-packages or commit
 machine-local dependency overrides. Update Studio's lockfiles only after both
 dependency changes are reviewed.
 
-## Reset speed limits left by earlier alignment tests
-
-Stop Studio and all robot owner processes before opening the serial port.
-Support the leader and use its port, not the follower's. For standard servo
-IDs 1-6, run from `application/backend/`:
-
-```bash
-uv run --no-sync python scripts/reset_so101_speeds.py --port /dev/serial/by-id/<leader>
-uv run --no-sync python scripts/reset_so101_speeds.py --port /dev/serial/by-id/<leader> --reset
-```
-
-The first command only reads. The second sets `GOAL_SPEED` (address 46) to
-`0`, meaning no speed limit, and verifies each servo's readback. The script
-refuses to write if any servo has torque enabled or cannot be read. It does
-not enable torque, send position targets, or change calibration. Stop on any
-error; a failed write can leave only part of the arm reset.
-
-Install the position-only SO101 plugin fix before trying alignment again, or
-the old driver will overwrite the reset values. Restart owners after installation.
-The reset script's checks use mocked hardware; verify its output on the rig.
+If earlier experimental builds changed servo speed limits, inspect and restore
+them before testing powered alignment. Restart owners after installing the
+reviewed position-only plugin build.
 
 ## 2. Start Studio
 
