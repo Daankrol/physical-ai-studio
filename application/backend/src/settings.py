@@ -375,6 +375,8 @@ class Settings(BaseSettings):
     # wants it shorter.
     runtime_idle_timeout_s: float = Field(default=45.0, alias="RUNTIME_IDLE_TIMEOUT_S")
 
+    aws_enabled: bool = Field(default=False, alias="AWS_ENABLED")
+
     # Server
     host: str = Field(default="127.0.0.1", alias="HOST")
     port: int = Field(default=7860, alias="PORT")
