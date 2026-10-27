@@ -3,7 +3,7 @@ model:
   class_path: physicalai.policies.LingBotVLA2
   init_args:
     pretrained_name_or_path: robbyant/lingbot-vla-v2-6b
-    robot_layout: so101
+    image_key_reorder_map: { front: 0, wrist: 1 }
     chunk_size: 50
     n_action_steps: 50
     num_denoise_steps: 10

@@ -8,6 +8,8 @@ import torch
 from physicalai.policies.lingbotvla2.config import LingBotVLA2Config
 from physicalai.policies.lingbotvla2.model import LingBotVLA2Model, _masked_mean
 
+SO101 = {"arm.position": [(0, 5)], "effector.position": [(5, 6)]}
+
 
 def test_flow_mask_ignores_unmapped_dimensions_and_episode_padding() -> None:
     errors = torch.tensor([[[1.0, 100.0], [100.0, 100.0]]])
@@ -19,7 +21,7 @@ def test_flow_mask_ignores_unmapped_dimensions_and_episode_padding() -> None:
 
 def test_tiny_model_train_and_cached_sample() -> None:
     config = LingBotVLA2Config(
-        robot_layout="so101",
+        state_map=SO101, action_map=SO101,
         chunk_size=2,
         n_action_steps=1,
         num_denoise_steps=2,

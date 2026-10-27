@@ -12,6 +12,8 @@ from physicalai.data import Feature, FeatureType, NormalizationParameters
 from physicalai.policies.lingbotvla2.config import LingBotVLA2Config
 from physicalai.policies.lingbotvla2.postprocessor import make_lingbotvla2_processors
 
+SO101 = {"arm.position": [(0, 5)], "effector.position": [(5, 6)]}
+
 
 class StubTokenizer:
     def save_pretrained(self, path):
@@ -36,7 +38,7 @@ def test_joint_and_image_processors_roundtrip() -> None:
     action = Feature(name="action", ftype=FeatureType.ACTION, shape=(6,), normalization_data=stats)
     image = Feature(name="images.front", ftype=FeatureType.VISUAL, shape=(3, 32, 32))
     config = LingBotVLA2Config(
-        robot_layout="so101",
+        state_map=SO101, action_map=SO101,
         input_features=[state, image],
         output_features=[action],
         camera_map={"images.front": "top"},

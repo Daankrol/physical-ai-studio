@@ -23,12 +23,6 @@ DEFAULT_JOINT_LAYOUT = (
     ("hand.position", 12),
 )
 
-# Each slice is in dataset order; slices within a group fill its canonical slots in order.
-_LAYOUT_MAPS = {
-    "so101": {"arm.position": [(0, 5)], "effector.position": [(5, 6)]},
-    "bimanual_6dof": {"arm.position": [(0, 6), (7, 13)], "effector.position": [(6, 7), (13, 14)]},
-}
-
 
 @dataclass(frozen=True, kw_only=True)
 class LingBotVLA2Config(PeftConfigMixin, Config):
@@ -36,7 +30,6 @@ class LingBotVLA2Config(PeftConfigMixin, Config):
 
     input_features: list[Feature] = field(default_factory=list)
     output_features: list[Feature] = field(default_factory=list)
-    robot_layout: Literal["so101", "bimanual_6dof"] | None = None
     joint_layout: tuple[tuple[str, int], ...] = DEFAULT_JOINT_LAYOUT
     state_map: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
     action_map: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
@@ -118,24 +111,9 @@ class LingBotVLA2Config(PeftConfigMixin, Config):
         """
         super().__post_init__()
         self._validate_geometry()
-        if not self.state_map:
-            if self.robot_layout is None:
-                msg = "Supply state_map and action_map or select robot_layout"
-                raise ValueError(msg)
-            object.__setattr__(
-                self,
-                "state_map",
-                {key: list(slices) for key, slices in _LAYOUT_MAPS[self.robot_layout].items()},
-            )
-        if not self.action_map:
-            if self.robot_layout is None:
-                msg = "Supply state_map and action_map or select robot_layout"
-                raise ValueError(msg)
-            object.__setattr__(
-                self,
-                "action_map",
-                {key: list(slices) for key, slices in _LAYOUT_MAPS[self.robot_layout].items()},
-            )
+        if not self.state_map or not self.action_map:
+            msg = "Supply state_map and action_map; training infers them from recorded joint names"
+            raise ValueError(msg)
 
         self._validate_map(self.state_map, self.input_features, FeatureType.STATE, "state_map")
         self._validate_map(self.action_map, self.output_features, FeatureType.ACTION, "action_map")
@@ -156,9 +134,6 @@ class LingBotVLA2Config(PeftConfigMixin, Config):
     def _validate_geometry(self) -> None:  # noqa: C901, PLR0912, PLR0915
         if self.chunk_size < 1 or not 1 <= self.n_action_steps <= self.chunk_size or self.num_denoise_steps < 1:
             msg = "chunk_size, n_action_steps and num_denoise_steps must be positive; n_action_steps <= chunk_size"
-            raise ValueError(msg)
-        if self.robot_layout is not None and self.robot_layout not in _LAYOUT_MAPS:
-            msg = f"Unknown robot_layout: {self.robot_layout}"
             raise ValueError(msg)
         if self.moe_backend not in {"dense", "triton"} or self.attention_backend not in {"sdpa", "flex"}:
             msg_0 = "Unknown LingBot attention or MoE backend"

@@ -4,7 +4,8 @@ model:
   class_path: physicalai.policies.LingBotVLA2
   init_args:
     pretrained_name_or_path: robbyant/lingbot-vla-v2-6b
-    robot_layout: so101
+    # Joint groups come from the dataset's recorded joint names; map its cameras to slots 0-2.
+    image_key_reorder_map: { front: 0, wrist: 1 }
     training_recipe: upstream
     distillation_heads: true
     relative_action_groups: [arm.position]

@@ -44,7 +44,7 @@ upstream training parity. Checkpoint save/resume and offline inference also pass
 
 ## Joint and camera layout
 
-The policy does not infer a robot's gripper position from its vector width. Pass `robot_layout="so101"` for `[five arm joints, gripper]`, `"bimanual_6dof"` for `[left six joints, left gripper, right six joints, right gripper]`, or explicit `state_map` and `action_map`. The RoboTwin maps are:
+Training infers the joint groups from the joint names recorded with the dataset, so any robot whose driver follows the plugin naming convention works without robot-specific settings. Joints named `gripper` (or `*_gripper`) fill `effector.position`; all other joints fill `arm.position`. Bimanual robots prefix joints with `left_` and `right_`, and the left arm comes first. A `.pos` suffix is ignored, and each group is packed in recorded order, as upstream does. Training stops with an error when names are missing, duplicated, mix prefixed and unprefixed joints, or are not positions. For those datasets, pass explicit `state_map` and `action_map` instead. The RoboTwin maps are:
 
 ```yaml
 state_map:
@@ -55,7 +55,7 @@ action_map:
   effector.position: [[6, 7], [13, 14]]
 ```
 
-When camera names differ from the presets (`front`/`wrist` for SO-101, `cam_high`/`cam_left_wrist`/`cam_right_wrist` for bimanual), pass `image_key_reorder_map={"camera_name": 0, ...}`. Slots 0, 1 and 2 are `camera_top`, `camera_wrist_left` and `camera_wrist_right`; unused slots are masked. Every dataset camera must have a slot. The checkpoint's remaining joint-group order follows upstream's `real_robot.yaml`; it has not been verified zero-shot for hand, waist, head or base control.
+Map dataset cameras with `image_key_reorder_map={"camera_name": 0, ...}` unless they are already named after the slots. Slots 0, 1 and 2 are `camera_top`, `camera_wrist_left` and `camera_wrist_right`; unused slots are masked. Every dataset camera must have a slot. The checkpoint's remaining joint-group order follows upstream's `real_robot.yaml`; it has not been verified zero-shot for hand, waist, head or base control.
 
 ## Checkpoints and Torch export
 

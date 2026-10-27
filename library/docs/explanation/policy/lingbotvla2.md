@@ -1,6 +1,6 @@
 # LingBot-VLA 2.0
 
-LingBot-VLA 2.0 combines a Qwen3-VL-4B vision-language backbone with a 36-layer MoE action expert. Its 50-step action chunk is sampled by flow matching. Training needs an explicit robot joint layout so that gripper values do not land in arm-joint slots.
+LingBot-VLA 2.0 combines a Qwen3-VL-4B vision-language backbone with a 36-layer MoE action expert. Its 50-step action chunk is sampled by flow matching. Training reads the joint names recorded with the dataset to keep gripper values out of arm-joint slots.
 
 For the SO-101 example, install the `lingbotvla2` and `cu128` library extras, then run:
 

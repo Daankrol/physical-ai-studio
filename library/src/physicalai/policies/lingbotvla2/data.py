@@ -13,7 +13,10 @@ from torch import Tensor
 
 from physicalai.data import FeatureType, NormalizationParameters
 
+from .layout import joint_map
+
 if TYPE_CHECKING:
+    from physicalai.data.dataset import Dataset
     from physicalai.data.lerobot.dataset import _LeRobotDatasetAdapter
 
     from .config import LingBotVLA2Config
@@ -74,6 +77,31 @@ def training_statistics(
         absolute_value[:, relative] = horizon_value[:, relative]
         updates[field] = absolute_value.tolist()
     return _statistics(state), replace(per_horizon, **updates)
+
+
+def recorded_joint_maps(dataset: Dataset) -> tuple[dict[str, list[tuple[int, int]]], dict[str, list[tuple[int, int]]]]:
+    """Infer state and action maps from the joint names recorded with a dataset.
+
+    Returns:
+        State and action maps for the canonical joint groups.
+
+    Raises:
+        ValueError: If a state or action column lacks recorded joint names.
+    """
+    maps = []
+    for columns in (
+        getattr(dataset, "_state_columns", None) or ["observation.state"],
+        getattr(dataset, "_action_columns", None) or ["action"],
+    ):
+        names: list[str] = []
+        for column in columns:
+            recorded = dataset.raw_features.get(column, {}).get("names")
+            if not isinstance(recorded, list) or not all(isinstance(name, str) for name in recorded):
+                msg = f"{column} has no recorded joint names; pass state_map and action_map"
+                raise ValueError(msg)
+            names += recorded
+        maps.append(joint_map(names))
+    return maps[0], maps[1]
 
 
 def adopt_training_statistics(dataset: _LeRobotDatasetAdapter, config: LingBotVLA2Config) -> LingBotVLA2Config:

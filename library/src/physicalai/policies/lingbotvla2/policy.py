@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 
 class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
-    """Fine-tune or sample from the released LingBot checkpoint with an explicit robot layout."""
+    """Fine-tune or sample from the released LingBot checkpoint; joint groups come from recorded joint names."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -43,7 +43,6 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         output_features: list[Feature] | None = None,
         pretrained_name_or_path: str | Path | None = "robbyant/lingbot-vla-v2-6b",
         *,
-        robot_layout: str | None = None,
         state_map: dict[str, list[tuple[int, int]]] | None = None,
         action_map: dict[str, list[tuple[int, int]]] | None = None,
         image_key_reorder_map: dict[str, int] | None = None,
@@ -84,7 +83,6 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         self.input_features = input_features
         self.output_features = output_features
         self.pretrained_name_or_path = pretrained_name_or_path
-        self.robot_layout = robot_layout
         self.state_map = state_map
         self.action_map = action_map
         self.image_key_reorder_map = image_key_reorder_map
@@ -131,12 +129,8 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
             self.configure_model()
 
     @staticmethod
-    def _camera_map(features: list[Feature], reorder: dict[str, int] | None, layout: str | None) -> dict[str, str]:
+    def _camera_map(features: list[Feature], reorder: dict[str, int] | None) -> dict[str, str]:
         slots = ("camera_top", "camera_wrist_left", "camera_wrist_right")
-        aliases = {
-            "so101": {"front": 0, "wrist": 1},
-            "bimanual_6dof": {"cam_high": 0, "cam_left_wrist": 1, "cam_right_wrist": 2},
-        }
         result = {}
         for feature in features:
             if feature.ftype != FeatureType.VISUAL or feature.name is None:
@@ -146,10 +140,12 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
             position = (
                 reorder.get(name, reorder.get(short, reorder.get(f"images.{short}")))
                 if reorder is not None
-                else aliases.get(layout or "", {}).get(short, slots.index(short) if short in slots else None)
+                else slots.index(short)
+                if short in slots
+                else None
             )
             if position is None or position not in range(len(slots)):
-                msg = f"No LingBot camera slot selected for {name!r}"
+                msg = f"No LingBot camera slot selected for {name!r}; set image_key_reorder_map"
                 raise ValueError(msg)
             result[name] = slots[position]
         return result
@@ -221,10 +217,9 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
             config_fields.update(
                 input_features=self.input_features,
                 output_features=self.output_features,
-                robot_layout=self.robot_layout,
                 state_map=self.state_map or {},
                 action_map=self.action_map or {},
-                camera_map=self._camera_map(self.input_features, self.image_key_reorder_map, self.robot_layout),
+                camera_map=self._camera_map(self.input_features, self.image_key_reorder_map),
                 chunk_size=self.chunk_size,
                 n_action_steps=self.n_action_steps,
                 num_denoise_steps=self.num_denoise_steps,
@@ -390,6 +385,11 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
             raise ValueError(msg)
         if self.model is None:
             self.input_features, self.output_features = inputs, outputs
+            if not self.state_map or not self.action_map:
+                from .data import recorded_joint_maps  # noqa: PLC0415
+
+                state_map, action_map = recorded_joint_maps(dataset)
+                self.state_map, self.action_map = self.state_map or state_map, self.action_map or action_map
             self.configure_model()
         elif self.config is not None and (
             inputs != self.config.input_features or outputs != self.config.output_features

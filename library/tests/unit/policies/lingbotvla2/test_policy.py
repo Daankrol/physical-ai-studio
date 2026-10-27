@@ -16,6 +16,8 @@ from physicalai.policies.lingbotvla2.policy import LingBotVLA2
 
 from .test_processors import StubTokenizer
 
+SO101 = {"arm.position": [(0, 5)], "effector.position": [(5, 6)]}
+
 
 def tiny_config() -> LingBotVLA2Config:
     stats = NormalizationParameters(q01=[0.0] * 6, q99=[10.0] * 6)
@@ -23,7 +25,7 @@ def tiny_config() -> LingBotVLA2Config:
     action = Feature(name="action", ftype=FeatureType.ACTION, shape=(6,), normalization_data=stats)
     image = Feature(name="images.front", ftype=FeatureType.VISUAL, shape=(3, 32, 32))
     return LingBotVLA2Config(
-        robot_layout="so101",
+        state_map=SO101, action_map=SO101,
         input_features=[state, image],
         output_features=[action],
         camera_map={"images.front": "camera_top"},
@@ -95,8 +97,8 @@ def test_renaming_camera_rebuilds_processors_without_reloading_model() -> None:
 
 def test_camera_mapping_accepts_studio_feature_keys() -> None:
     images = [Feature(name="top", ftype=FeatureType.VISUAL, shape=(3, 32, 32))]
-    assert LingBotVLA2._camera_map(images, {"images.top": 0}, "so101") == {"top": "camera_top"}
-    assert LingBotVLA2._camera_map(images, {"top": 0}, "so101") == {"top": "camera_top"}
+    assert LingBotVLA2._camera_map(images, {"images.top": 0}) == {"top": "camera_top"}
+    assert LingBotVLA2._camera_map(images, {"top": 0}) == {"top": "camera_top"}
 
 
 def test_lora_keeps_expert_trainable_and_restores_adapters() -> None:

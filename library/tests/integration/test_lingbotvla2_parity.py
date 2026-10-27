@@ -24,6 +24,8 @@ from physicalai.policies.lingbotvla2.model import LingBotVLA2Model
 from physicalai.policies.lingbotvla2.preprocessor import LingBotVLA2Preprocessor
 from physicalai.policies.lingbotvla2.pretrained import resolve_pretrained
 
+SO101 = {"arm.position": [(0, 5)], "effector.position": [(5, 6)]}
+
 
 @pytest.mark.integration
 @pytest.mark.requires_download
@@ -37,7 +39,7 @@ def test_released_checkpoints_match_upstream_dense_reference(variant: str) -> No
     torch.set_float32_matmul_precision("highest")
     stats = NormalizationParameters(q01=[0.0] * 6, q99=[1.0] * 6)
     config = LingBotVLA2Config(
-        robot_layout="so101",
+        state_map=SO101, action_map=SO101,
         input_features=[
             Feature(name="state", ftype=FeatureType.STATE, shape=(6,), normalization_data=stats),
             Feature(name="images.front", ftype=FeatureType.VISUAL, shape=(3, 256, 256)),

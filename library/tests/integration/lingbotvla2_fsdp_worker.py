@@ -23,6 +23,8 @@ from physicalai.policies.lingbotvla2.optimizer import MuonAdamW
 from physicalai.policies.lingbotvla2.policy import LingBotVLA2
 from tests.unit.policies.lingbotvla2.test_training import training_batch, training_config
 
+SO101 = {"arm.position": [(0, 5)], "effector.position": [(5, 6)]}
+
 
 class PreparedPolicy(LingBotVLA2):
     """Use fixed teacher targets to isolate student sharding from teacher packaging."""
@@ -42,7 +44,7 @@ def main() -> None:
     batch = training_batch()
     if full:
         config = LingBotVLA2Config(
-            robot_layout="so101", input_features=config.input_features, output_features=config.output_features,
+            state_map=SO101, action_map=SO101, input_features=config.input_features, output_features=config.output_features,
             camera_map=config.camera_map, training_recipe="upstream", distillation_heads=True,
             loss_type="fm", action_fp32=True,
             moe_backend=os.environ.get("LINGBOT_MOE", "dense"),

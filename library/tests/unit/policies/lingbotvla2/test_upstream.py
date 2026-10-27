@@ -14,11 +14,13 @@ from physicalai.policies.lingbotvla2.model import sample_upstream_time
 from physicalai.policies.lingbotvla2.postprocessor import make_lingbotvla2_processors
 from tests.unit.policies.lingbotvla2.test_processors import StubTokenizer
 
+SO101 = {"arm.position": [(0, 5)], "effector.position": [(5, 6)]}
+
 
 def config(**changes) -> LingBotVLA2Config:
     stats = NormalizationParameters(mean=[0.] * 6, std=[1.] * 6, q01=[0.] * 6, q99=[0.] * 6)
     base = LingBotVLA2Config(
-        robot_layout="so101", training_recipe="upstream", relative_action_groups=("arm.position",),
+        state_map=SO101, action_map=SO101, training_recipe="upstream", relative_action_groups=("arm.position",),
         normalization_mode="MEAN_STD", image_size=32, chunk_size=2, n_action_steps=2, dataset_fps=30,
         input_features=[
             Feature(name="state", ftype=FeatureType.STATE, shape=(6,), normalization_data=stats),
