@@ -68,10 +68,11 @@ async def interrupt_job(
         return
     if job.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
         raise InvalidJobStateError("Cannot stop a finished job")
-    if job.status == JobStatus.RUNNING and isinstance(job, TrainJob):
-        # Keep the job RUNNING until the worker has stopped and flushed progress.
-        # Otherwise Delete can remove it while the worker still owns it.
-        scheduler.job_interrupt_flags[str(job_id)] = True
+    if isinstance(job, TrainJob):
+        # Claiming and queued cancellation compete atomically. Once claimed,
+        # keep RUNNING until the worker releases its files and flushes progress.
+        if await job_service.cancel_pending_train_job(job_id) is None:
+            scheduler.cancel_job(job_id)
         return
     await job_service.update_job_status(job_id, status=JobStatus.CANCELED)
 
