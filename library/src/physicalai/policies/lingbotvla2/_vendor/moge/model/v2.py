@@ -13,7 +13,6 @@ import torch.utils.checkpoint
 import torch.amp
 import torch.version
 import utils3d
-from huggingface_hub import hf_hub_download
 
 from ..utils.geometry_torch import normalized_view_plane_uv, recover_focal_shift, angle_diff_vec3
 from .utils import wrap_dinov2_attention_with_sdpa, wrap_module_with_gradient_checkpointing, unwrap_module_with_gradient_checkpointing
@@ -73,34 +72,6 @@ class MoGeModel(nn.Module):
     def onnx_compatible_mode(self, value: bool):
         self._onnx_compatible_mode = value
         self.encoder.onnx_compatible_mode = value
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, Path, IO[bytes]], model_kwargs: Optional[Dict[str, Any]] = None, **hf_kwargs) -> 'MoGeModel':
-        """
-        Load a model from a checkpoint file.
-
-        ### Parameters:
-        - `pretrained_model_name_or_path`: path to the checkpoint file or repo id.
-        - `compiled`
-        - `model_kwargs`: additional keyword arguments to override the parameters in the checkpoint.
-        - `hf_kwargs`: additional keyword arguments to pass to the `hf_hub_download` function. Ignored if `pretrained_model_name_or_path` is a local path.
-
-        ### Returns:
-        - A new instance of `MoGe` with the parameters loaded from the checkpoint.
-        """
-        if Path(pretrained_model_name_or_path).exists():
-            checkpoint_path = pretrained_model_name_or_path
-        else:
-            raise ValueError("Resolve pinned teacher assets through Studio before loading")
-        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
-
-        model_config = checkpoint['model_config']
-        if model_kwargs is not None:
-            model_config.update(model_kwargs)
-        model = cls(**model_config)
-        model.load_state_dict(checkpoint['model'], strict=False)
-
-        return model
 
     def init_weights(self):
         self.encoder.init_weights()

@@ -152,7 +152,7 @@ class LingBotVLA2Model(PeftModelMixin, Model):
                 "head_dim": head_dim,
                 "vocab_size": vocab_size,
                 "intermediate_size": intermediate_size,
-                "eos_token_id": 151645,
+                "eos_token_id": 151645,  # nosec B105 -- Qwen token ID, not a secret
                 "rope_parameters": {
                     "rope_type": "default",
                     "rope_theta": rope_theta,

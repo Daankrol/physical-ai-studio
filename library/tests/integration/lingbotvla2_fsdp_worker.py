@@ -89,6 +89,8 @@ def main() -> None:
         optimizer.step()
     if full:
         results = [None] * dist.get_world_size()
+        # reason: ranks of this local test job exchange their own metric dicts.
+        # nosemgrep: trailofbits.python.pickles-in-pytorch-distributed.pickles-in-pytorch-distributed
         dist.all_gather_object(results, {"rank": dist.get_rank(), "loss": loss.item(),
             "peak_allocated_bytes": torch.cuda.max_memory_allocated(), "synthetic_teacher_targets": True})
         if dist.get_rank() == 0:
@@ -112,6 +114,8 @@ def main() -> None:
         target = expected[name].to_local() if isinstance(expected[name], DTensor) else expected[name]
         torch.testing.assert_close(actual, target, atol=0, rtol=0)
     results = [None] * dist.get_world_size()
+    # reason: ranks of this local test job exchange their own metric dicts.
+    # nosemgrep: trailofbits.python.pickles-in-pytorch-distributed.pickles-in-pytorch-distributed
     dist.all_gather_object(results, {"rank": dist.get_rank(), "loss": loss.item(),
         "max_update_error": maximum_error, "peak_allocated_bytes": torch.cuda.max_memory_allocated()})
     if dist.get_rank() == 0:

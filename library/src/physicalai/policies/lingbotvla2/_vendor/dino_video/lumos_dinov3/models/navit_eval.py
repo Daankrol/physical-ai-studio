@@ -33,6 +33,8 @@ def detect_checkpoint_format(ckpt_path: str):
     Strips a leading "backbone." prefix, and detects 3D RoPE via the presence of
     ``rope_embed.periods_t``.
     """
+    # reason: weights_only=True restricts unpickling to tensors + safe primitives; no arbitrary code runs.
+    # nosemgrep: trailofbits.python.pickles-in-pytorch.pickles-in-pytorch
     raw = torch.load(ckpt_path, map_location="cpu", weights_only=True)
 
     if "teacher" in raw:

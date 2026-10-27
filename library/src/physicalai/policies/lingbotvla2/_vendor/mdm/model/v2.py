@@ -2,7 +2,6 @@
 from typing import *
 from numbers import Number
 from functools import partial
-from pathlib import Path
 import warnings
 
 import torch
@@ -12,7 +11,6 @@ import torch.utils
 import torch.utils.checkpoint
 import torch.amp
 import torch.version
-from huggingface_hub import hf_hub_download
 
 from .modules_rgbd_encoder import DINOv2_RGBD_Encoder
 from .modules_decoder import MLP, ConvStack
@@ -64,26 +62,6 @@ class MDMModel(nn.Module):
     @property
     def dtype(self) -> torch.dtype:
         return next(self.parameters()).dtype
-
-    @classmethod
-    def from_pretrained(
-        cls,
-        pretrained_model_name_or_path: Union[str, Path, IO[bytes]],
-        model_kwargs: Optional[Dict[str, Any]] = None,
-        **hf_kwargs) -> 'MDMModel':
-        if Path(pretrained_model_name_or_path).exists():
-            checkpoint_path = pretrained_model_name_or_path
-        else:
-            raise ValueError("Resolve pinned teacher assets through Studio before loading")
-        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
-
-        model_config = dict(checkpoint['model_config'])
-        if model_kwargs is not None:
-            model_config.update(model_kwargs)
-        model = cls(**model_config)
-        model.load_state_dict(checkpoint['model'], strict=False)
-
-        return model
 
     def init_weights(self):
         self.encoder.init_weights()

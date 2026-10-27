@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import torch
 from huggingface_hub import hf_hub_download
@@ -61,7 +61,12 @@ def teacher_asset(name: str, root: str | Path | None = None) -> Path:
     return Path(hf_hub_download(repo_id=repo, revision=revision, filename=filename))  # nosec B615 -- fixed asset names and pinned revisions
 
 
-def _geometry_model[ModelT: nn.Module](model_type: type[ModelT], path: Path) -> ModelT:
+ModelT = TypeVar("ModelT", bound=nn.Module)
+
+
+def _geometry_model(model_type: type[ModelT], path: Path) -> ModelT:  # noqa: UP047 -- CI Bandit parses with Python 3.10
+    # reason: weights_only=True restricts unpickling to tensors + safe primitives; no arbitrary code runs.
+    # nosemgrep: trailofbits.python.pickles-in-pytorch.pickles-in-pytorch
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if (
         not isinstance(checkpoint, Mapping)
