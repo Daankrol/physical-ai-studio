@@ -1,0 +1,43 @@
+# LingBot-VLA 2.0 SO101 post-training. Requires the lingbotvla2 and cu128 extras.
+model:
+  class_path: physicalai.policies.LingBotVLA2
+  init_args:
+    pretrained_name_or_path: robbyant/lingbot-vla-v2-6b
+    image_key_reorder_map: { front: 0, wrist: 1 }
+    chunk_size: 50
+    n_action_steps: 50
+    num_denoise_steps: 10
+    normalization_mode: QUANTILES
+    lora_enabled: true
+    lora_rank: 32
+    gradient_checkpointing: true
+    optimizer_lr: 1e-5
+    optimizer_vit_lr: 1e-6
+    scheduler_warmup_steps: 200
+    scheduler_decay_lr: 5e-6
+
+data:
+  class_path: physicalai.data.lerobot.LeRobotDataModule
+  init_args:
+    repo_id: est4ever/so101-green-left
+    data_format: physicalai
+    train_batch_size: 1
+    val_batch_size: 1
+    val_split: 0.1
+    val_split_seed: 42
+    num_workers: 4
+
+trainer:
+  accelerator: gpu
+  devices: 1
+  precision: bf16-mixed
+  max_epochs: 8
+  gradient_clip_val: 1.0
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val/loss
+        mode: min
+        save_top_k: 2
+        save_last: true
+        save_weights_only: true
