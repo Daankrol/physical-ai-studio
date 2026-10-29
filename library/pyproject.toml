@@ -40,6 +40,8 @@ dependencies = [
     "openvino_tokenizers>=2026.4",
     "onnxscript",
     "peft>=0.20.0,<1.0.0",
+    # bf16 stochastic-rounding AdamW (private API, so pinned to a minor release)
+    "torchao>=0.18.0,<0.19",
     "jsonargparse[signatures]>=4.50,<5", # This could be extra
     "pydantic",                         # This could be extra
     # Provides the `physicalai` CLI host and the `physicalai.cli._spec`
