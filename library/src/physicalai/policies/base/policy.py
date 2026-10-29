@@ -10,13 +10,13 @@ from collections import deque
 from typing import TYPE_CHECKING, Any
 
 import lightning as L  # noqa: N812
+import torch
+from lightning.pytorch.plugins.precision import MixedPrecision
 
 from physicalai.data import Observation
 from physicalai.eval import Rollout
 
 if TYPE_CHECKING:
-    import torch
-
     from physicalai.gyms import Gym
 
     from .model import Model
@@ -51,6 +51,20 @@ class Policy(L.LightningModule, ABC):
         # Initialize torchmetrics-based rollout metrics for validation and testing
         self.val_rollout = Rollout()
         self.test_rollout = Rollout()
+
+    def configure_model(self) -> None:
+        """Keep trainable AMP weights in fp32 so small optimizer updates do not round away.
+
+        Runs before checkpoint restore, distributed wrapping, and optimizer setup.
+        Subclasses building models here must call ``super().configure_model()`` afterwards.
+        Frozen parameters and buffers keep their configured dtype.
+        """
+        trainer = self._trainer
+        if trainer is None or not trainer.training or not isinstance(trainer.precision_plugin, MixedPrecision):
+            return
+        for parameter in self.parameters():
+            if parameter.requires_grad and parameter.dtype in {torch.float16, torch.bfloat16}:
+                parameter.data = parameter.data.float()
 
     def transfer_batch_to_device(
         self,

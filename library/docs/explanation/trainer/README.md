@@ -70,6 +70,25 @@ class Trainer(lightning.Trainer):
 | `default_root_dir`     | Current directory | `"experiments"`    | Cleaner project structure                        |
 | `num_sanity_val_steps` | 2                 | 0                  | Embodied AI typically doesn't need sanity checks |
 
+## Weight precision
+
+With `bf16-mixed` or `16-mixed`, policies keep trainable fp16/bf16 parameters in
+fp32 so small optimizer updates do not round away. Frozen parameters and buffers
+keep their original dtypes; Lightning's autocast controls computation precision.
+The extra weight memory depends on how many parameters are trainable, not the
+size of the frozen backbone.
+
+The shared `Policy.configure_model()` hook promotes weights after `setup()` and
+before checkpoint restore, DDP wrapping, and optimizer creation. Policies that
+build their model in `configure_model()` must call `super().configure_model()`
+after building it. True-precision modes and precision managed by FSDP or
+DeepSpeed are unchanged.
+
+Trainable weights remain fp32 after fitting. For standalone inference or export,
+reload the saved checkpoint to reconstruct the policy's configured inference
+dtypes. Inference-only loads do not promote weights. Keep the original fp32
+checkpoint for resuming training; casting it to bf16 discards small updates.
+
 ## Callbacks
 
 ### PolicyDatasetInteraction
