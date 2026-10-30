@@ -3784,7 +3784,6 @@ dependencies = [
     { name = "pillow" },
     { name = "pydantic" },
     { name = "pymunk" },
-    { name = "torchao" },
 ]
 
 [package.optional-dependencies]
@@ -3963,7 +3962,6 @@ requires-dist = [
     { name = "torch", marker = "extra == 'cpu'", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "physicalai-train", extra = "cpu" } },
     { name = "torch", marker = "extra == 'cu128'", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "physicalai-train", extra = "cu128" } },
     { name = "torch", marker = "extra == 'xpu'", index = "https://download.pytorch.org/whl/xpu", conflict = { package = "physicalai-train", extra = "xpu" } },
-    { name = "torchao", specifier = ">=0.18.0,<0.19" },
     { name = "torchvision", marker = "extra == 'cpu'", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "physicalai-train", extra = "cpu" } },
     { name = "torchvision", marker = "extra == 'cu128'", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "physicalai-train", extra = "cu128" } },
     { name = "torchvision", marker = "extra == 'xpu'", index = "https://download.pytorch.org/whl/xpu", conflict = { package = "physicalai-train", extra = "xpu" } },
