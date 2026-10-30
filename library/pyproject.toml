@@ -40,6 +40,8 @@ dependencies = [
     "openvino_tokenizers>=2026.4",
     "onnxscript",
     "peft>=0.20.0,<1.0.0",
+    # bf16 stochastic-rounding AdamW (private API, so pinned to a minor release)
+    "torchao>=0.18.0,<0.19",
     "jsonargparse[signatures]>=4.50,<5", # This could be extra
     "pydantic",                         # This could be extra
     # Provides the `physicalai` CLI host and the `physicalai.cli._spec`
@@ -124,6 +126,13 @@ xr0 = [
     "Pillow>=10.0.0,<13.0.0",
 ]
 
+# VLA-JEPA (native Qwen3-VL backbone and flow-matching DiT)
+vla_jepa = [
+    "transformers>=5.15.1,<5.16.0",
+    "safetensors>=0.4.3,<1.0.0",
+    "diffusers>=0.38.0",
+]
+
 # ExecuTorch runtime for edge/mobile deployment
 executorch = ["executorch>=1.1.0"]
 
@@ -139,6 +148,7 @@ policies = [
     "physicalai-train[rldx1]",
     "physicalai-train[xr0]",
     "physicalai-train[cosmos3]",
+    "physicalai-train[vla_jepa]",
 ]
 
 # All optional dependencies except hardware (torch) variant.
