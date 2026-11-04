@@ -1,0 +1,49 @@
+# LingBot-VLA 2.0 RoboTwin post-training (two or more 80 GB CUDA GPUs).
+# Replace repo_id with a LeRobot conversion of your RoboTwin episodes.
+model:
+  class_path: physicalai.policies.LingBotVLA2
+  init_args:
+    pretrained_name_or_path: robbyant/lingbot-vla-v2-6b-robotwin
+    # Explicit maps for conversions that do not record joint names.
+    state_map:
+      arm.position: [[0, 6], [7, 13]]
+      effector.position: [[6, 7], [13, 14]]
+    action_map:
+      arm.position: [[0, 6], [7, 13]]
+      effector.position: [[6, 7], [13, 14]]
+    image_key_reorder_map:
+      { cam_high: 0, cam_left_wrist: 1, cam_right_wrist: 2 }
+    chunk_size: 50
+    n_action_steps: 50
+    num_denoise_steps: 10
+    normalization_mode: QUANTILES
+    gradient_checkpointing: true
+    optimizer_lr: 1e-4
+    optimizer_vit_lr: 1e-6
+    scheduler_decay_lr: 5e-5
+
+data:
+  class_path: physicalai.data.lerobot.LeRobotDataModule
+  init_args:
+    repo_id: YOUR_ORG/robotwin-lerobot
+    data_format: physicalai
+    train_batch_size: 1
+    val_batch_size: 1
+    val_split: 0.1
+    num_workers: 4
+
+trainer:
+  accelerator: gpu
+  devices: 2
+  strategy: fsdp
+  precision: bf16-mixed
+  max_epochs: 8
+  gradient_clip_val: 1.0
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val/loss
+        mode: min
+        save_top_k: 2
+        save_last: true
+        save_weights_only: true
