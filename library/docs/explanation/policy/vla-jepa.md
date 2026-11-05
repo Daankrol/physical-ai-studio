@@ -63,7 +63,12 @@ supplies ordered camera/state/action features and normalization statistics.
 `configure_model()` builds the resolved architecture once. The model itself
 receives network arguments, not dataset features or a policy config.
 
-By default, backbone and action-head learning rates are `1e-5` and `1e-4`.
+Learning rates follow the author's fine-tuning recipe: `1e-5` for Qwen, `1e-4`
+for the action head and `5e-4` for the JEPA predictor. Every group warms up
+linearly over the first sixth of the run, then decays with a cosine to a third
+of its peak, matching upstream's `cosine_with_min_lr` schedule. Set
+`scheduler_warmup_steps` or `scheduler_decay_lr` (the Qwen floor; other groups
+keep the same ratio) to override them.
 `train_action_head_only=True` freezes Qwen, including the learned readout tokens;
 this saves training memory but limits adaptation to a different robot. It also
 disables JEPA supervision, matching the upstream head-only behavior.
@@ -118,6 +123,24 @@ and the scheduler's decay rate. Set it to `1.0` if your learning rates already
 account for adapter training. Lightning checkpoints retain adapters and their
 configuration for offline resume. These paths have smoke-test coverage, not a
 validated robot-task LoRA recipe or a measured memory-reduction claim.
+
+## SnapFlow one-step sampling
+
+[SnapFlow](../../how-to/training/snapflow_distillation.md) distills the 4-step
+sampler into a single DiT pass. Phase 2 freezes Qwen and the JEPA predictor,
+skips the world-model loss, and trains the action head plus a zero-initialized
+target-time embedding. Run both phases in one job with
+[`configs/physicalai/vla_jepa/so101_snapflow.yaml`](../../../configs/physicalai/vla_jepa/so101_snapflow.yaml),
+or distill an already fine-tuned checkpoint directly:
+
+```python
+policy = VLAJEPA.load_from_checkpoint("phase1.ckpt", snapflow_enabled=True)
+```
+
+The released checkpoints have a trained flow head, so `VLAJEPA(snapflow_enabled=True)`
+can also skip phase 1. Distilled checkpoints reload, export and run in one step.
+With LoRA enabled, phase 2 trains the action-head adapters and the full
+target-time embedding. Checkpoints saved before SnapFlow support still load.
 
 ## Inference and checkpoints
 

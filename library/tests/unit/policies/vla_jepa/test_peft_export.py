@@ -78,7 +78,10 @@ def test_adapters_train_and_restore(
 
 
 def test_default_targets_cover_active_linears_only(jepa_config: VLAJEPAConfig) -> None:
-    """Default targets include each active head/predictor Linear, but no frozen encoders."""
+    """Default targets include each active head/predictor Linear, but no frozen encoders.
+
+    SnapFlow's target-time embedding is idle outside distillation, which trains it in full.
+    """
     model = VLAJEPAModel.from_config(jepa_config)
     targets = model.get_default_peft_targets()
     matched = {name for name, module in model.named_modules() if re.fullmatch(targets, name)}
@@ -88,6 +91,7 @@ def test_default_targets_cover_active_linears_only(jepa_config: VLAJEPAConfig) -
         if isinstance(module, nn.Linear)
         and name.startswith(("qwen.language_model.", "action_model.", "video_predictor."))
         and module.weight.requires_grad
+        and ".target_time_encoder." not in name
     }
     assert matched == expected
 
@@ -97,7 +101,7 @@ def test_lora_optimizer_scales_both_learning_rates(tiny_config: VLAJEPAConfig, *
     """Adapter LR scaling preserves the backbone/head ratio and covers all trainable weights."""
     config = replace(tiny_config, lora_enabled=use_lora, lora_rank=2, lora_lr_scale=4)
     policy = VLAJEPA.from_config(config, scheduler_warmup_steps=0)
-    policy._trainer = SimpleNamespace(estimated_stepping_batches=10)
+    policy._trainer = SimpleNamespace(estimated_stepping_batches=10, global_step=0)
     optimizer = policy.configure_optimizers()["optimizer"]
     scale = 4 if use_lora else 1
     assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([1e-5 * scale, 1e-4 * scale])
@@ -106,12 +110,29 @@ def test_lora_optimizer_scales_both_learning_rates(tiny_config: VLAJEPAConfig, *
     }
 
 
+def test_default_schedule_matches_upstream_finetuning(jepa_config: VLAJEPAConfig) -> None:
+    """Per-module peaks, warmup over a sixth of the run, then cosine decay to a third of each peak."""
+    policy = VLAJEPA.from_config(jepa_config)
+    policy._trainer = SimpleNamespace(estimated_stepping_batches=60, global_step=0)
+    optimizers = policy.configure_optimizers()
+    optimizer, scheduler = optimizers["optimizer"], optimizers["lr_scheduler"]["scheduler"]
+    peaks = [1e-5, 1e-4, 5e-4]
+    lrs = []
+    for _ in range(60):
+        lrs.append([group["lr"] for group in optimizer.param_groups])
+        optimizer.step()
+        scheduler.step()
+    assert lrs[0] == pytest.approx([0, 0, 0])
+    assert lrs[10] == pytest.approx(peaks)
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([peak / 3 for peak in peaks])
+
+
 
 @pytest.mark.parametrize(("dtype", "stochastic"), [("float32", False), ("bfloat16", True)])
 def test_bf16_weights_use_stochastic_rounding_adamw(tiny_config: VLAJEPAConfig, dtype: str, *, stochastic: bool) -> None:
     """bf16 weights get torchao's stochastic-rounding AdamW so small updates are not rounded away."""
     policy = VLAJEPA.from_config(replace(tiny_config, dtype=dtype), scheduler_warmup_steps=0)
-    policy._trainer = SimpleNamespace(estimated_stepping_batches=10)
+    policy._trainer = SimpleNamespace(estimated_stepping_batches=10, global_step=0)
     assert isinstance(policy.configure_optimizers()["optimizer"], _AdamW) == stochastic
 
 @pytest.mark.parametrize("use_lora,use_dora", [(False, False), (True, False), (True, True)])
