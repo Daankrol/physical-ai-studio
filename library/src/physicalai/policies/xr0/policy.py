@@ -19,7 +19,7 @@ from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, Feature, Fe
 from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.export.backends import ExportParameters, OpenVINOExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy
-from physicalai.train.optimizers import adamw
+from physicalai.train.optimizers import build_adamw_auto_precision
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 from physicalai.train.utils import reformat_dataset_to_match_policy
 
@@ -623,7 +623,7 @@ class XR0(XR0ExportablePolicyMixin, Policy):
             else:
                 decay_params.append(param)
 
-        optimizer = adamw(
+        optimizer = build_adamw_auto_precision(
             [
                 {"params": decay_params, "weight_decay": self.config.optimizer_weight_decay},
                 {"params": no_decay_params, "weight_decay": 0.0},

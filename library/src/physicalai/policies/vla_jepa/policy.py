@@ -29,7 +29,7 @@ from physicalai.policies.mixins.snapflow import (
     SNAPFLOW_DEFAULT_NUM_INFERENCE_STEPS,
     SnapFlowPolicyMixin,
 )
-from physicalai.train.optimizers import adamw
+from physicalai.train.optimizers import build_adamw_auto_precision
 from physicalai.train.utils import reformat_dataset_to_match_policy
 
 from .config import VLAJEPAConfig, feature_dimension
@@ -560,7 +560,7 @@ class VLAJEPA(PeftPolicyMixin, SnapFlowPolicyMixin, ExportablePolicyMixin, Polic
                 ],
                 "lr": self.optimizer_predictor_lr * lr_scale,
             })
-        optimizer = adamw(
+        optimizer = build_adamw_auto_precision(
             [group for group in groups if group["params"]],
             betas=(0.9, 0.95),
             eps=1e-8,
