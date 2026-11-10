@@ -14,7 +14,6 @@ import lightning
 import numpy as np
 import pytest
 import torch
-from torchao.optim import _AdamW
 from physicalai.inference.manifest import Manifest
 from torch import nn
 from torch.utils.data import DataLoader
@@ -25,6 +24,7 @@ from physicalai.export import ExportBackend
 from physicalai.inference import InferenceModel
 from physicalai.policies.mixins.peft import is_lora_injected
 from physicalai.policies.vla_jepa import VLAJEPA, VLAJEPAConfig, VLAJEPAModel
+from physicalai.train.optimizers import AdamWBF16Kahan
 
 
 @pytest.mark.parametrize("use_dora", [False, True])
@@ -128,12 +128,12 @@ def test_default_schedule_matches_upstream_finetuning(jepa_config: VLAJEPAConfig
 
 
 
-@pytest.mark.parametrize(("dtype", "stochastic"), [("float32", False), ("bfloat16", True)])
-def test_bf16_weights_use_stochastic_rounding_adamw(tiny_config: VLAJEPAConfig, dtype: str, *, stochastic: bool) -> None:
-    """bf16 weights get torchao's stochastic-rounding AdamW so small updates are not rounded away."""
+@pytest.mark.parametrize(("dtype", "kahan"), [("float32", False), ("bfloat16", True)])
+def test_bf16_weights_use_kahan_adamw(tiny_config: VLAJEPAConfig, dtype: str, *, kahan: bool) -> None:
+    """bf16 weights get Kahan-compensated AdamW so small updates are not rounded away."""
     policy = VLAJEPA.from_config(replace(tiny_config, dtype=dtype), scheduler_warmup_steps=0)
     policy._trainer = SimpleNamespace(estimated_stepping_batches=10, global_step=0)
-    assert isinstance(policy.configure_optimizers()["optimizer"], _AdamW) == stochastic
+    assert isinstance(policy.configure_optimizers()["optimizer"], AdamWBF16Kahan) == kahan
 
 @pytest.mark.parametrize("use_lora,use_dora", [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("joint", [False, True])
