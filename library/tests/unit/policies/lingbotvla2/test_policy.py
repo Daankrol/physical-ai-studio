@@ -4,6 +4,7 @@
 """Policy construction and checkpoint restore must never contact the pretrained hub."""
 
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -108,7 +109,37 @@ def test_lora_keeps_expert_trainable_and_restores_adapters() -> None:
     assert policy.model.qwenvl_with_expert.qwen_expert.model.layers[0].mlp.experts.gate_proj.requires_grad
     checkpoint: dict[str, Any] = {}
     policy.on_save_checkpoint(checkpoint)
-    restored = LingBotVLA2(model_config=checkpoint["hyper_parameters"]["model_config"], pretrained_name_or_path=None)
-    restored.configure_model()
+    restored = LingBotVLA2(pretrained_name_or_path=None)
     restored.on_load_checkpoint(checkpoint)
     restored.load_state_dict(policy.state_dict())
+
+
+def test_unresolved_features_defer_construction() -> None:
+    policy = LingBotVLA2(pretrained_name_or_path=None)
+    policy.configure_model()
+    assert policy.model is None
+    assert policy._preprocessor is None
+    with pytest.raises(RuntimeError, match="not initialized"):
+        _ = policy.config
+
+
+def test_statistics_refresh_processors_but_architecture_changes_fail(dummy_dataset) -> None:
+    config = tiny_config()
+    policy = LingBotVLA2.from_config(config)
+    model, preprocessor = policy.model, policy._preprocessor
+    policy.configure_model()
+    assert policy._preprocessor is preprocessor
+    stats = NormalizationParameters(q01=[1.0] * 6, q99=[2.0] * 6)
+    state = replace(config.input_features[0], normalization_data=stats)
+    checkpoint = {"model_config": replace(config, input_features=[state, config.input_features[1]]).to_dict()}
+    policy.on_load_checkpoint(checkpoint)
+    assert policy.model is model
+    assert policy._preprocessor is not preprocessor
+    assert policy.config.input_features[0].normalization_data == stats
+    checkpoint = {"model_config": replace(config, chunk_size=3, n_action_steps=1).to_dict()}
+    with pytest.raises(ValueError, match="does not match"):
+        policy.on_load_checkpoint(checkpoint)
+    policy._trainer = SimpleNamespace(datamodule=SimpleNamespace(train_dataset=dummy_dataset()))
+    with pytest.raises(ValueError, match="do not match"):
+        policy.setup("fit")
+    assert policy.model is model

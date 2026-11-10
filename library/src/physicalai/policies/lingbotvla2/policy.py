@@ -34,6 +34,27 @@ if TYPE_CHECKING:
     from .teachers import TeacherTargets
 
 
+def _without_normalization(features: list[Feature]) -> list[Feature]:
+    return [replace(feature, normalization_data=None) for feature in features]
+
+
+def _same_architecture(left: LingBotVLA2Config, right: LingBotVLA2Config) -> bool:
+    """Compare configs while ignoring feature statistics, which only processors consume.
+
+    Returns:
+        Whether both configs describe the same model and ordered feature contract.
+    """
+    return replace(
+        left,
+        input_features=_without_normalization(left.input_features),
+        output_features=_without_normalization(left.output_features),
+    ) == replace(
+        right,
+        input_features=_without_normalization(right.input_features),
+        output_features=_without_normalization(right.output_features),
+    )
+
+
 class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
     """Fine-tune or sample from the released LingBot checkpoint; joint groups come from recorded joint names."""
 
@@ -74,11 +95,10 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         optimizer_weight_decay: float = 0.0,
         scheduler_warmup_steps: int = 0,
         scheduler_decay_lr: float = 5e-5,
-        model_config: dict[str, Any] | None = None,
         tokenizer_dir_override: str | Path | None = None,
         teachers: TeacherTargets | None = None,
     ) -> None:
-        """Defer hub resolution until the dataset features and layout are known."""
+        """Build eagerly from features, or defer until the dataset supplies them."""
         super().__init__(n_action_steps=n_action_steps)
         self.input_features = input_features
         self.output_features = output_features
@@ -118,15 +138,30 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         self.teachers = teachers
         self.teacher_references: dict[str, str] = {}
         self.tokenizer_dir_override = tokenizer_dir_override
-        self.config: LingBotVLA2Config | None = None
-        self._config: LingBotVLA2Config | None = LingBotVLA2Config.from_dict(model_config) if model_config else None
+        self._config: LingBotVLA2Config | None = None
+        self._processor_config: LingBotVLA2Config | None = None
+        self._pretrained_fields: dict[str, Any] = {}
+        self._base_weights: Path | None = None
         self._preprocessor: LingBotVLA2Preprocessor | None = None  # pyrefly: ignore[bad-override-mutable-attribute]
         self._postprocessor: LingBotVLA2Postprocessor | None = None
         self.save_hyperparameters(
-            ignore=["input_features", "output_features", "model_config", "tokenizer_dir_override", "teachers"],
+            ignore=["input_features", "output_features", "tokenizer_dir_override", "teachers"],
         )
         if input_features is not None and output_features is not None:
+            self._resolve_pretrained()
             self.configure_model()
+
+    @property
+    def config(self) -> LingBotVLA2Config:
+        """Resolved policy-owned config.
+
+        Raises:
+            RuntimeError: If no config has been resolved yet.
+        """
+        if self._config is None:
+            msg = "LingBot policy config is not initialized"
+            raise RuntimeError(msg)
+        return self._config
 
     @staticmethod
     def _camera_map(features: list[Feature], reorder: dict[str, int] | None) -> dict[str, str]:
@@ -189,69 +224,82 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
             **kwargs,
         )
 
-    def configure_model(self) -> None:  # noqa: PLR0912
-        """Build once from a saved config or selected features, then load optional pretrained weights.
+    def _resolve_pretrained(self) -> None:
+        """Fetch checkpoint metadata and weights before Lightning enters ``configure_model()``."""
+        if self.pretrained_name_or_path is not None and self._base_weights is None and self.model is None:
+            self._pretrained_fields, self._base_weights = resolve_pretrained(self.pretrained_name_or_path)
+
+    def _new_config(self) -> LingBotVLA2Config | None:
+        """Resolve a config from constructor values and features, or None while features are unknown.
+
+        Returns:
+            Resolved config, or None when features are not yet available.
 
         Raises:
-            ValueError: If input/output features or canonical joint mappings are absent.
+            RuntimeError: If pretrained weights were requested but not resolved first.
         """
-        if self.model is not None:
-            mesh = getattr(self, "_device_mesh", None)
-            if mesh is not None and not getattr(self, "_fsdp_configured", False):
-                from .distributed import shard_policy  # noqa: PLC0415
+        if self.input_features is None or self.output_features is None:
+            return None
+        if self.pretrained_name_or_path is not None and self._base_weights is None:
+            msg = "Resolve the pretrained checkpoint before configuring LingBot"
+            raise RuntimeError(msg)
+        fields: dict[str, Any] = {
+            **self._pretrained_fields,
+            "input_features": self.input_features,
+            "output_features": self.output_features,
+            "state_map": self.state_map or {},
+            "action_map": self.action_map or {},
+            "camera_map": self._camera_map(self.input_features, self.image_key_reorder_map),
+            "chunk_size": self.chunk_size,
+            "n_action_steps": self.n_action_steps,
+            "num_denoise_steps": self.num_denoise_steps,
+            "normalization_mode": self.normalization_mode,
+            "training_recipe": self.training_recipe,
+            "moe_backend": self.moe_backend,
+            "attention_backend": self.attention_backend,
+            "relative_action_groups": self.relative_action_groups,
+            "distillation_heads": self.distillation_heads,
+            "loss_type": self.loss_type
+            or ("fm" if self.training_recipe == "upstream" else self._pretrained_fields.get("loss_type", "L1_fm")),
+            "action_fp32": self.training_recipe == "upstream",
+            "lora_enabled": self.lora_enabled,
+            "lora_rank": self.lora_rank,
+            "lora_alpha": self.lora_alpha,
+            "lora_dropout": self.lora_dropout,
+            "lora_use_dora": self.lora_use_dora,
+            "lora_target_modules": self.lora_target_modules,
+            "freeze_vision_encoder": self.freeze_vision_encoder,
+            "train_expert_only": self.train_expert_only,
+        }
+        return LingBotVLA2Config(**fields)
 
-                shard_policy(self, mesh["data_parallel"])
-                self._fsdp_configured = True
+    def configure_model(self) -> None:
+        """Create the model once, then keep processors and FSDP sharding in sync with the config."""
+        config = self._config if self._config is not None else self._new_config()
+        if config is None:
             return
-        weights = None
-        if self._config is not None:
-            config = self._config
-        else:
-            if self.input_features is None or self.output_features is None:
-                msg = "Input and output features are required to build LingBot-VLA 2.0"
-                raise ValueError(msg)
-            pretrained_fields, weights = (
-                resolve_pretrained(self.pretrained_name_or_path) if self.pretrained_name_or_path else ({}, None)
-            )
-            config_fields = dict(pretrained_fields)
-            config_fields.update(
-                input_features=self.input_features,
-                output_features=self.output_features,
-                state_map=self.state_map or {},
-                action_map=self.action_map or {},
-                camera_map=self._camera_map(self.input_features, self.image_key_reorder_map),
-                chunk_size=self.chunk_size,
-                n_action_steps=self.n_action_steps,
-                num_denoise_steps=self.num_denoise_steps,
-                normalization_mode=self.normalization_mode,
-                training_recipe=self.training_recipe,
-                moe_backend=self.moe_backend,
-                attention_backend=self.attention_backend,
-                relative_action_groups=self.relative_action_groups,
-                distillation_heads=self.distillation_heads,
-                loss_type=self.loss_type
-                or ("fm" if self.training_recipe == "upstream" else pretrained_fields.get("loss_type", "L1_fm")),
-                action_fp32=self.training_recipe == "upstream",
-                lora_enabled=self.lora_enabled,
-                lora_rank=self.lora_rank,
-                lora_alpha=self.lora_alpha,
-                lora_dropout=self.lora_dropout,
-                lora_use_dora=self.lora_use_dora,
-                lora_target_modules=self.lora_target_modules,
-                freeze_vision_encoder=self.freeze_vision_encoder,
-                train_expert_only=self.train_expert_only,
-            )
-            config = LingBotVLA2Config(**config_fields)
-        self.config = config
-        self.input_features, self.output_features = config.input_features, config.output_features
-        model = LingBotVLA2Model.from_config(config)
-        self.model = model
-        self._preprocessor, self._postprocessor = make_lingbotvla2_processors(config)
-        if self.tokenizer_dir_override is not None:
-            self._preprocessor.tokenizer_name_or_path = str(self.tokenizer_dir_override)
-            self._preprocessor.tokenizer_revision = None
-        if weights is not None:
-            model.load_weights(weights)
+        self._config = config
+        if self.model is None:
+            self.model = LingBotVLA2Model.from_config(config)
+            if self._base_weights is not None:
+                self.model.load_weights(self._base_weights)
+            self._apply_model_modifications(self.model, config)
+        if config != self._processor_config or self._preprocessor is None or self._postprocessor is None:
+            pre, post = make_lingbotvla2_processors(config)
+            if self.tokenizer_dir_override is not None:
+                pre.tokenizer_name_or_path = str(self.tokenizer_dir_override)
+                pre.tokenizer_revision = None
+            device = next(self.model.parameters()).device
+            self._preprocessor, self._postprocessor = pre.to(device), post.to(device)
+            self._processor_config = config
+        mesh = getattr(self, "_device_mesh", None)
+        if mesh is not None and not getattr(self, "_fsdp_configured", False):
+            from .distributed import shard_policy  # noqa: PLC0415
+
+            shard_policy(self, mesh["data_parallel"])
+            self._fsdp_configured = True
+
+    def _apply_model_modifications(self, model: LingBotVLA2Model, config: LingBotVLA2Config) -> None:
         if config.train_expert_only or config.freeze_vision_encoder:
             tower = model.qwenvl_with_expert.qwenvl
             if config.train_expert_only:
@@ -276,14 +324,12 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
             model.predict_action_chunk = torch.compile(model.predict_action_chunk)  # type: ignore[method-assign]
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-        """Persist resolved architecture and dataset maps for offline restoration."""
+        """Persist resolved architecture, features and joint maps for offline restoration."""
         super().on_save_checkpoint(checkpoint)
         references = self.teachers.references if self.teachers is not None else self.teacher_references
         if references:
             checkpoint["teacher_references"] = dict(references)
-        if self.config is not None:
-            checkpoint["model_config"] = self.config.to_dict()
-            checkpoint.setdefault("hyper_parameters", {})["model_config"] = self.config.to_dict()
+        checkpoint["model_config"] = self.config.to_dict()
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """Construct the exact saved model before Lightning loads its parameters.
@@ -306,12 +352,9 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
             msg = "LingBot checkpoint is missing model_config"
             raise TypeError(msg)
         config = LingBotVLA2Config.from_dict(data)
-        if self.model is not None:
-            current = self.config.to_dict() if self.config is not None else {}
-            if current != config.to_dict():
-                msg = "Initialized LingBot config does not match the checkpoint"
-                raise ValueError(msg)
-            return
+        if self.model is not None and not _same_architecture(self.config, config):
+            msg = "Initialized LingBot config does not match the checkpoint"
+            raise ValueError(msg)
         self._config = config
         self.configure_model()
 
@@ -321,11 +364,10 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         Raises:
             RuntimeError: If the policy has no model yet.
         """
-        if self.config is None or self.model is None:
+        if self.model is None:
             msg = "Initialize the policy before replacing features"
             raise RuntimeError(msg)
-        config = replace(self.config, input_features=input_features, output_features=output_features)
-        self._set_config(config)
+        self._adapt(replace(self.config, input_features=input_features, output_features=output_features))
 
     def rename_features(self, mapping: Mapping[str, str]) -> None:
         """Rename selected input features and their camera-slot mappings.
@@ -334,7 +376,7 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
             ValueError: If a source name is unknown or the new names collide.
             RuntimeError: If the policy has not been initialized.
         """
-        if self.config is None or self.model is None:
+        if self.model is None:
             msg = "Initialize the policy before renaming features"
             raise RuntimeError(msg)
         known = {feature.name for feature in self.config.input_features}
@@ -349,29 +391,20 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
             msg = "Feature renames create duplicate names"
             raise ValueError(msg)
         cameras = {mapping.get(name, name): slot for name, slot in self.config.camera_map.items()}
-        self._set_config(replace(self.config, input_features=renamed, camera_map=cameras))
+        self._adapt(replace(self.config, input_features=renamed, camera_map=cameras))
 
-    def _set_config(self, config: LingBotVLA2Config) -> None:
-        if self.model is None:
-            msg = "Initialize the policy before updating features"
-            raise RuntimeError(msg)
-        pre, post = make_lingbotvla2_processors(config)
-        if self.tokenizer_dir_override is not None:
-            pre.tokenizer_name_or_path = str(self.tokenizer_dir_override)
-            pre.tokenizer_revision = None
-        parameter = next(self.model.parameters())
-        self._preprocessor = pre.to(parameter.device)
-        self._postprocessor = post.to(parameter.device)
-        self.config = config
-        self.input_features, self.output_features = config.input_features, config.output_features
+    def _adapt(self, config: LingBotVLA2Config) -> None:
+        """Adopt a validated feature change; ``configure_model()`` refreshes only the processors."""
+        self._config = config
+        self.configure_model()
         self.reset()
 
     def setup(self, stage: str) -> None:
-        """Adopt dataset features once, or validate and replace only processors.
+        """Adopt or validate dataset features and statistics; ``configure_model()`` builds modules.
 
         Raises:
             TypeError: If the datamodule supplies an unsupported dataset type.
-            ValueError: If state or action features do not match the policy.
+            ValueError: If dataset features do not match the policy.
         """
         if stage != "fit":
             return
@@ -383,27 +416,32 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         if sum(feature.ftype == FeatureType.STATE for feature in inputs) != 1 or len(outputs) != 1:
             msg = "LingBot training requires one state vector and one action vector"
             raise ValueError(msg)
-        if self.model is None:
+        if self._config is None:
             self.input_features, self.output_features = inputs, outputs
             if not self.state_map or not self.action_map:
                 from .data import recorded_joint_maps  # noqa: PLC0415
 
                 state_map, action_map = recorded_joint_maps(dataset)
                 self.state_map, self.action_map = self.state_map or state_map, self.action_map or action_map
-            self.configure_model()
-        elif self.config is not None and (
-            inputs != self.config.input_features or outputs != self.config.output_features
-        ):
-            self.set_features(inputs, outputs)
-        if self.config is not None and self.config.training_recipe == "upstream":
+            self._resolve_pretrained()
+            config = self._new_config()
+        else:
+            if _without_normalization(inputs) != _without_normalization(self._config.input_features) or (
+                _without_normalization(outputs) != _without_normalization(self._config.output_features)
+            ):
+                msg = "Dataset features do not match the initialized LingBot policy"
+                raise ValueError(msg)
+            config = replace(self._config, input_features=inputs, output_features=outputs)
+        if config is not None and config.training_recipe == "upstream":
             from physicalai.data.lerobot.dataset import _LeRobotDatasetAdapter  # noqa: PLC0415, PLC2701
 
             from .data import adopt_training_statistics  # noqa: PLC0415
 
             if not isinstance(dataset, _LeRobotDatasetAdapter):
-                msg_0 = "The upstream recipe requires a LeRobot training dataset for train-only statistics"
-                raise TypeError(msg_0)
-            self._set_config(adopt_training_statistics(dataset, self.config))
+                msg = "The upstream recipe requires a LeRobot training dataset for train-only statistics"
+                raise TypeError(msg)
+            config = adopt_training_statistics(dataset, config)
+        self._config = config
 
     @override
     def forward(self, batch: Observation) -> Tensor | tuple[Tensor, dict[str, Tensor | float]]:
@@ -468,7 +506,7 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         return self.model.compute_val_loss(self._training_batch(batch))
 
     def _training_batch(self, batch: Observation) -> dict[str, Tensor]:
-        if self._preprocessor is None or self.config is None:
+        if self._preprocessor is None or self._config is None:
             msg = "Configure LingBot before preparing a training batch"
             raise RuntimeError(msg)
         processed = self._preprocessor(batch.to_dict())
@@ -492,7 +530,7 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         Raises:
             RuntimeError: If the policy is not yet configured.
         """
-        if self.model is None or self.config is None:
+        if self.model is None or self._config is None:
             msg = "LingBot policy is not configured"
             raise RuntimeError(msg)
         scale = self.config.lora_lr_scale if self.config.use_lora else 1.0

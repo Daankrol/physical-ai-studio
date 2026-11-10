@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 class LingBotVLA2ExportMixin(ExportablePolicyMixin):
     """Export Torch checkpoints with the raw observation and trimmed action schema."""
 
-    config: LingBotVLA2Config | None
+    _config: LingBotVLA2Config | None
 
     @override
     def to_torch(self, checkpoint_path: str | PathLike[str]) -> None:
@@ -35,13 +35,13 @@ class LingBotVLA2ExportMixin(ExportablePolicyMixin):
             RuntimeError: If the policy is not initialized.
             ValueError: If the pinned tokenizer cannot be loaded.
         """
-        if self.config is None:
+        if self._config is None:
             msg = "Initialize LingBot before Torch export"
             raise RuntimeError(msg)
         model_path = self._prepare_export_path(checkpoint_path, ".pt")
         tokenizer = AutoTokenizer.from_pretrained(
-            self.config.tokenizer_name_or_path,
-            revision=self.config.tokenizer_revision,
+            self._config.tokenizer_name_or_path,
+            revision=self._config.tokenizer_revision,
             local_files_only=True,
         )
         if tokenizer is None:
@@ -61,10 +61,10 @@ class LingBotVLA2ExportMixin(ExportablePolicyMixin):
         Raises:
             ValueError: If a selected input feature has no shape.
         """
-        if self.config is None:
+        if self._config is None:
             return None
         schema = []
-        for feature in self.config.input_features:
+        for feature in self._config.input_features:
             if feature.ftype not in {FeatureType.STATE, FeatureType.VISUAL}:
                 continue
             if feature.shape is None:
@@ -101,16 +101,16 @@ class LingBotVLA2ExportMixin(ExportablePolicyMixin):
         Raises:
             ValueError: If the action feature is absent or lacks a shape.
         """
-        if self.config is None:
+        if self._config is None:
             return None
-        actions = [feature for feature in self.config.output_features if feature.ftype == FeatureType.ACTION]
+        actions = [feature for feature in self._config.output_features if feature.ftype == FeatureType.ACTION]
         if len(actions) != 1 or actions[0].shape is None:
             msg = "Export requires one action feature with a concrete shape"
             raise ValueError(msg)
         return [
             InferenceFeature(
                 name=ACTION,
-                shape=(self.config.n_action_steps, *actions[0].shape),
+                shape=(self._config.n_action_steps, *actions[0].shape),
                 ftype=InferenceFeatureType.ACTION,
                 dtype=InferenceFeatureDtype.FLOAT32,
             ),

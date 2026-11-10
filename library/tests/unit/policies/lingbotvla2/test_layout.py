@@ -107,7 +107,7 @@ def test_recorded_names_build_maps_and_missing_names_fail() -> None:
         recorded_joint_maps(_LeRobotDatasetAdapter.from_lerobot(SimpleNamespace(features=unnamed)))
 
 
-def test_training_setup_infers_maps_from_dataset(dummy_dataset, monkeypatch) -> None:
+def test_training_setup_infers_maps_from_dataset(dummy_dataset) -> None:
     class NamedDataset(dummy_dataset):
         @property
         def raw_features(self) -> dict:
@@ -116,12 +116,12 @@ def test_training_setup_infers_maps_from_dataset(dummy_dataset, monkeypatch) -> 
             features["action"] = {**features["action"], "names": pos(["a", "gripper"])}
             return features
 
-    policy = LingBotVLA2(pretrained_name_or_path=None)
-    monkeypatch.setattr(policy, "configure_model", lambda: None)
+    policy = LingBotVLA2(pretrained_name_or_path=None, image_key_reorder_map={"camera": 0})
     policy._trainer = SimpleNamespace(datamodule=SimpleNamespace(train_dataset=NamedDataset()))
     policy.setup("fit")
-    assert policy.state_map == {"arm.position": [(0, 3)], "effector.position": [(3, 4)]}
-    assert policy.action_map == {"arm.position": [(0, 1)], "effector.position": [(1, 2)]}
+    assert policy.model is None
+    assert policy.config.state_map == {"arm.position": [(0, 3)], "effector.position": [(3, 4)]}
+    assert policy.config.action_map == {"arm.position": [(0, 1)], "effector.position": [(1, 2)]}
 
 
 def test_roundtrip_config_preserves_maps() -> None:
