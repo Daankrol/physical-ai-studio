@@ -93,10 +93,10 @@ class VLAJEPA(PeftPolicyMixin, SnapFlowPolicyMixin, ExportablePolicyMixin, Polic
         snapflow_num_inference_steps: int = SNAPFLOW_DEFAULT_NUM_INFERENCE_STEPS,
         optimizer_lr: float = 1e-5,
         optimizer_action_head_lr: float = 1e-4,
-        optimizer_predictor_lr: float = 5e-4,
+        optimizer_predictor_lr: float = 1e-5,
         optimizer_weight_decay: float = 1e-8,
-        scheduler_warmup_steps: int | None = None,
-        scheduler_decay_lr: float | None = None,
+        scheduler_warmup_steps: int = 1000,
+        scheduler_decay_lr: float = 1e-6,
     ) -> None:
         """Store construction and training settings; defer feature-free initialization.
 
@@ -113,11 +113,11 @@ class VLAJEPA(PeftPolicyMixin, SnapFlowPolicyMixin, ExportablePolicyMixin, Polic
         if (
             min(optimizer_lr, optimizer_action_head_lr, optimizer_predictor_lr) <= 0
             or optimizer_weight_decay < 0
-            or (scheduler_warmup_steps is not None and scheduler_warmup_steps < 0)
+            or scheduler_warmup_steps < 0
         ):
             msg = "Invalid optimizer settings."
             raise ValueError(msg)
-        if scheduler_decay_lr is not None and not 0 <= scheduler_decay_lr <= optimizer_lr:
+        if not 0 <= scheduler_decay_lr <= optimizer_lr:
             msg = "scheduler_decay_lr must be between zero and optimizer_lr."
             raise ValueError(msg)
         if lora_enabled and train_action_head_only:
@@ -191,10 +191,10 @@ class VLAJEPA(PeftPolicyMixin, SnapFlowPolicyMixin, ExportablePolicyMixin, Polic
         compile_model: bool = False,
         optimizer_lr: float = 1e-5,
         optimizer_action_head_lr: float = 1e-4,
-        optimizer_predictor_lr: float = 5e-4,
+        optimizer_predictor_lr: float = 1e-5,
         optimizer_weight_decay: float = 1e-8,
-        scheduler_warmup_steps: int | None = None,
-        scheduler_decay_lr: float | None = None,
+        scheduler_warmup_steps: int = 1000,
+        scheduler_decay_lr: float = 1e-6,
     ) -> Self:
         """Return a policy built from resolved config without network access.
 
@@ -530,11 +530,10 @@ class VLAJEPA(PeftPolicyMixin, SnapFlowPolicyMixin, ExportablePolicyMixin, Polic
             self._snapflow_overrides[key] = self.hparams[key] = getattr(self.config, key)
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
-        """Return per-module optimizer groups and the upstream cosine schedule with a floor.
+        """Return per-module optimizer groups and a shared cosine schedule with a floor.
 
-        Matches the author's fine-tuning recipe: linear warmup over the first sixth of the run
-        unless ``scheduler_warmup_steps`` is set, then cosine decay of every group to
-        ``scheduler_decay_lr / optimizer_lr`` (default one third) of its peak.
+        Every group warms up linearly over ``scheduler_warmup_steps``, then decays with a cosine
+        to ``scheduler_decay_lr / optimizer_lr`` of its peak.
 
         Raises:
             TypeError: If the policy has not been initialized.
@@ -575,13 +574,11 @@ class VLAJEPA(PeftPolicyMixin, SnapFlowPolicyMixin, ExportablePolicyMixin, Polic
         # shortcut: resuming after a SnapFlow boundary rebuilds the full-run horizon; store the
         # phase start in the checkpoint if phase-2 resumes become common.
         total_steps = max(1, int(self.trainer.estimated_stepping_batches) - self.trainer.global_step)
-        warmup_steps = self.scheduler_warmup_steps
-        decay_lr = self.scheduler_decay_lr
         scheduler = get_cosine_with_min_lr_schedule_with_warmup(
             optimizer,
-            num_warmup_steps=total_steps // 6 if warmup_steps is None else min(warmup_steps, total_steps),
+            num_warmup_steps=min(self.scheduler_warmup_steps, total_steps),
             num_training_steps=total_steps,
-            min_lr_rate=1 / 3 if decay_lr is None else decay_lr / self.optimizer_lr,
+            min_lr_rate=self.scheduler_decay_lr / self.optimizer_lr,
         )
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "step"}}
 

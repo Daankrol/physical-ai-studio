@@ -237,9 +237,8 @@ and constructs a fresh `Trainer` — Option 2's `--fit.ckpt_path` is a full
 resume and has the same combined-horizon behavior as Option 1.
 
 VLA-JEPA is the exception: its scheduler spans only the steps left at the
-boundary, so phase 2 warms up over its first sixth and decays to the floor by the
-last step. Resuming a VLA-JEPA run after the boundary still restarts the full-run
-horizon.
+boundary, so phase 2 warms up again and decays to the floor by the last step.
+Resuming a VLA-JEPA run after the boundary still restarts the full-run horizon.
 
 ---
 

@@ -63,12 +63,12 @@ supplies ordered camera/state/action features and normalization statistics.
 `configure_model()` builds the resolved architecture once. The model itself
 receives network arguments, not dataset features or a policy config.
 
-Learning rates follow the author's fine-tuning recipe: `1e-5` for Qwen, `1e-4`
-for the action head and `5e-4` for the JEPA predictor. Every group warms up
-linearly over the first sixth of the run, then decays with a cosine to a third
-of its peak, matching upstream's `cosine_with_min_lr` schedule. Set
-`scheduler_warmup_steps` or `scheduler_decay_lr` (the Qwen floor; other groups
-keep the same ratio) to override them.
+Learning rates are `1e-5` for Qwen and the JEPA predictor and `1e-4` for the
+action head. Every group warms up linearly over `scheduler_warmup_steps` (1000),
+then decays with a cosine to `scheduler_decay_lr` (`1e-6`, the Qwen floor; other
+groups keep the same ratio). On LIBERO this recipe matched the author's (5e-4
+predictor, warmup over a sixth of the run, floor at a third of each peak) after
+25k to 30k steps and learned faster before that.
 `train_action_head_only=True` freezes Qwen, including the learned readout tokens;
 this saves training memory but limits adaptation to a different robot. It also
 disables JEPA supervision, matching the upstream head-only behavior.

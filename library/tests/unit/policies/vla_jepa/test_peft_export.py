@@ -110,22 +110,15 @@ def test_lora_optimizer_scales_both_learning_rates(tiny_config: VLAJEPAConfig, *
     }
 
 
-def test_default_schedule_matches_upstream_finetuning(jepa_config: VLAJEPAConfig) -> None:
-    """Per-module peaks, warmup over a sixth of the run, then cosine decay to a third of each peak."""
+def test_default_schedule(jepa_config: VLAJEPAConfig) -> None:
+    """Per-module peaks, 1000 warmup steps, then cosine decay to a 1e-6 floor on the backbone's scale."""
     policy = VLAJEPA.from_config(jepa_config)
-    policy._trainer = SimpleNamespace(estimated_stepping_batches=60, global_step=0)
+    policy._trainer = SimpleNamespace(estimated_stepping_batches=2000, global_step=0)
     optimizers = policy.configure_optimizers()
     optimizer, scheduler = optimizers["optimizer"], optimizers["lr_scheduler"]["scheduler"]
-    peaks = [1e-5, 1e-4, 5e-4]
-    lrs = []
-    for _ in range(60):
-        lrs.append([group["lr"] for group in optimizer.param_groups])
-        optimizer.step()
-        scheduler.step()
-    assert lrs[0] == pytest.approx([0, 0, 0])
-    assert lrs[10] == pytest.approx(peaks)
-    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx([peak / 3 for peak in peaks])
-
+    assert [group["initial_lr"] for group in optimizer.param_groups] == pytest.approx([1e-5, 1e-4, 1e-5])
+    multiplier = scheduler.lr_lambdas[0]
+    assert [multiplier(step) for step in (0, 500, 1000, 2000)] == pytest.approx([0, 0.5, 1, 0.1])
 
 
 @pytest.mark.parametrize(("dtype", "kahan"), [("float32", False), ("bfloat16", True)])

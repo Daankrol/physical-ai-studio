@@ -140,7 +140,7 @@ def test_torch_export_keeps_one_step_sampler(
 
 def test_phase_two_schedule_spans_the_remaining_steps(tiny_config: VLAJEPAConfig) -> None:
     """Rebuilding at the boundary warms up again and reaches the head's floor at the end of the run."""
-    policy = VLAJEPA.from_config(tiny_config)
+    policy = VLAJEPA.from_config(tiny_config, scheduler_warmup_steps=4)
     policy.enable_snapflow()
     policy._trainer = SimpleNamespace(estimated_stepping_batches=60, global_step=36)
     optimizers = policy.configure_optimizers()
@@ -152,4 +152,4 @@ def test_phase_two_schedule_spans_the_remaining_steps(tiny_config: VLAJEPAConfig
         optimizer.step()
         scheduler.step()
     assert lrs[4] == pytest.approx(1e-4)
-    assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-4 / 3)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-4 * 1e-6 / 1e-5)
