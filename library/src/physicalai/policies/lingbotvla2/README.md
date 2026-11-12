@@ -12,6 +12,8 @@ The SO-101 example uses a public LeRobot dataset with front and wrist views, qua
 
 MoE backend `triton` uses PyTorch grouped GEMM and native autograd; the name is retained for saved configurations. The `dense` backend remains the FP32 reference.
 
+The default recipe trains with AdamW. Routed experts use `optimizer_lr * sqrt(experts / top_k)`, as upstream does, and the vision tower uses `optimizer_vit_lr`. With LoRA, only the adapters get `lora_lr_scale`. `dtype="bfloat16"` stores the weights in bf16 and switches to Kahan-compensated AdamW, which roughly halves weight and optimizer memory; keep the trainer at `precision: bf16-mixed`. The upstream recipe (Muon, FP32 action expert) requires `float32`.
+
 ## Upstream fine-tuning
 
 `configs/physicalai/lingbotvla2/real_robot.yaml` runs full fine-tuning on four CUDA GPUs with

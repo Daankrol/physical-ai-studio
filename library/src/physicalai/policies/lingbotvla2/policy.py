@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, override
@@ -18,6 +19,7 @@ from physicalai.data import Feature, FeatureType, Observation
 from physicalai.data.dataset import Dataset
 from physicalai.policies.base import Policy
 from physicalai.policies.mixins.peft import PeftPolicyMixin
+from physicalai.train.optimizers import build_adamw_auto_precision
 
 from .config import LingBotVLA2Config
 from .export import LingBotVLA2ExportMixin
@@ -58,7 +60,7 @@ def _same_architecture(left: LingBotVLA2Config, right: LingBotVLA2Config) -> boo
 class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
     """Fine-tune or sample from the released LingBot checkpoint; joint groups come from recorded joint names."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(  # noqa: PLR0913, PLR0915
         self,
         input_features: list[Feature] | None = None,
         output_features: list[Feature] | None = None,
@@ -72,6 +74,7 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         n_action_steps: int = 50,
         num_denoise_steps: int = 10,
         normalization_mode: str = "QUANTILES",
+        dtype: str = "float32",
         training_recipe: str = "action_only",
         moe_backend: str = "dense",
         attention_backend: str = "sdpa",
@@ -111,6 +114,7 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         self.n_action_steps = n_action_steps
         self.num_denoise_steps = num_denoise_steps
         self.normalization_mode = normalization_mode
+        self.model_dtype = dtype  # LightningModule owns `dtype`
         self.training_recipe = training_recipe
         self.moe_backend = moe_backend
         self.attention_backend = attention_backend
@@ -254,6 +258,7 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
             "n_action_steps": self.n_action_steps,
             "num_denoise_steps": self.num_denoise_steps,
             "normalization_mode": self.normalization_mode,
+            "dtype": self.model_dtype,
             "training_recipe": self.training_recipe,
             "moe_backend": self.moe_backend,
             "attention_backend": self.attention_backend,
@@ -283,6 +288,10 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
             self.model = LingBotVLA2Model.from_config(config)
             if self._base_weights is not None:
                 self.model.load_weights(self._base_weights)
+            if config.dtype == "bfloat16":
+                # Parameters only: buffers such as RoPE frequencies stay fp32.
+                for parameter in self.model.parameters():
+                    parameter.data = parameter.data.to(torch.bfloat16)
             self._apply_model_modifications(self.model, config)
         if config != self._processor_config or self._preprocessor is None or self._postprocessor is None:
             pre, post = make_lingbotvla2_processors(config)
@@ -458,7 +467,8 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         if self.model is None or self._preprocessor is None:
             msg = "LingBot policy is not configured"
             raise RuntimeError(msg)
-        return self.model(self._training_batch(batch))
+        with self._autocast():
+            return self.model(self._training_batch(batch))
 
     @torch.no_grad()
     @override
@@ -476,7 +486,9 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
             raise RuntimeError(msg)
         batch = batch.to(self.device)
         processed = self._preprocessor({**batch.to_dict(), "action": None})
-        return self._postprocessor(self.model.predict_action_chunk(processed), batch.state)
+        with self._autocast():
+            actions = self.model.predict_action_chunk(processed)
+        return self._postprocessor(actions.float(), batch.state)
 
     def training_step(self, batch: Observation, batch_idx: int) -> Tensor:
         """Log the flow and MoE losses for Lightning.
@@ -503,7 +515,19 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         if self.model is None or self._preprocessor is None:
             msg = "LingBot policy is not configured"
             raise RuntimeError(msg)
-        return self.model.compute_val_loss(self._training_batch(batch))
+        with self._autocast():
+            return self.model.compute_val_loss(self._training_batch(batch))
+
+    def _autocast(self) -> AbstractContextManager:
+        """Compute in bf16 when the weights are bf16 and no outer autocast (e.g. a bf16-mixed trainer) is active.
+
+        Returns:
+            Autocast context, or a no-op that leaves any outer autocast in effect.
+        """
+        weight = self.model.state_proj.weight if self.model is not None else None
+        if weight is None or weight.dtype != torch.bfloat16 or torch.is_autocast_enabled(weight.device.type):
+            return nullcontext()
+        return torch.autocast(weight.device.type, dtype=torch.bfloat16)
 
     def _training_batch(self, batch: Observation) -> dict[str, Tensor]:
         if self._preprocessor is None or self._config is None:
@@ -522,7 +546,7 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         return processed
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
-        """Use AdamW with a low-rate vision group and a warmup-cosine schedule.
+        """Use AdamW (Kahan-compensated for bf16 weights) with per-group rates and a warmup-cosine schedule.
 
         Returns:
             Lightning optimizer and step scheduler.
@@ -533,28 +557,31 @@ class LingBotVLA2(PeftPolicyMixin, LingBotVLA2ExportMixin, Policy):
         if self.model is None or self._config is None:
             msg = "LingBot policy is not configured"
             raise RuntimeError(msg)
-        scale = self.config.lora_lr_scale if self.config.use_lora else 1.0
-        vision: list[torch.nn.Parameter] = []
-        other: list[torch.nn.Parameter] = []
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                (vision if ".qwenvl.model.visual." in name else other).append(param)
+        lora_scale = self.config.lora_lr_scale if self.config.use_lora else 1.0
+        expert_scale = math.sqrt(self.config.token_num_experts / self.config.token_top_k)
         if self.config.training_recipe == "upstream":
             from .optimizer import MuonAdamW  # noqa: PLC0415
 
             optimizer = MuonAdamW(
                 self.model,
-                lr=self.optimizer_lr * scale,
+                lr=self.optimizer_lr * lora_scale,
                 weight_decay=self.optimizer_weight_decay,
                 betas=self.optimizer_betas,
-                expert_scale=math.sqrt(self.config.token_num_experts / self.config.token_top_k),
+                expert_scale=expert_scale,
             )
         else:
-            optimizer = torch.optim.AdamW(
-                [
-                    {"params": other, "lr": self.optimizer_lr * scale},
-                    {"params": vision, "lr": self.optimizer_vit_lr * scale},
-                ],
+            # Routed experts train at lr * sqrt(experts / top_k) as upstream; only LoRA adapters get the LoRA scale.
+            groups: dict[float, list[torch.nn.Parameter]] = {}
+            for name, param in self.model.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if ".qwenvl.model.visual." in name:
+                    lr = self.optimizer_vit_lr
+                else:
+                    lr = self.optimizer_lr * (expert_scale if ".mlp.experts." in name else 1.0)
+                groups.setdefault(lr * (lora_scale if "lora_" in name else 1.0), []).append(param)
+            optimizer = build_adamw_auto_precision(
+                [{"params": params, "lr": lr} for lr, params in groups.items()],
                 betas=self.optimizer_betas,
                 weight_decay=self.optimizer_weight_decay,
             )

@@ -143,3 +143,39 @@ def test_statistics_refresh_processors_but_architecture_changes_fail(dummy_datas
     with pytest.raises(ValueError, match="do not match"):
         policy.setup("fit")
     assert policy.model is model
+
+
+def test_bf16_weights_train_with_kahan_and_scale_only_lora_and_experts() -> None:
+    from physicalai.train.optimizers import AdamWBF16Kahan
+
+    policy = LingBotVLA2.from_config(replace(tiny_config(), dtype="bfloat16", lora_enabled=True))
+    policy._preprocessor._tokenizer = StubTokenizer()
+    assert policy.model.state_proj.weight.dtype == torch.bfloat16
+    assert policy.model.qwenvl_with_expert.qwenvl.model.language_model.rotary_emb.inv_freq.dtype == torch.float32
+    policy._trainer = SimpleNamespace(estimated_stepping_batches=10)
+    optimizer = policy.configure_optimizers()["optimizer"]
+    assert isinstance(optimizer, AdamWBF16Kahan)
+    rates = {id(p): group["lr"] for group in optimizer.param_groups for p in group["params"]}
+    named = dict(policy.model.named_parameters())
+    lr = policy.optimizer_lr
+    assert rates[id(named["state_proj.weight"])] == pytest.approx(lr)
+    expert = next(p for n, p in named.items() if ".mlp.experts." in n and p.requires_grad)
+    assert rates[id(expert)] == pytest.approx(lr * 2**0.5)  # sqrt(4 experts / top-2)
+    lora = next(p for n, p in named.items() if "lora_A" in n and ".visual." not in n)
+    assert rates[id(lora)] == pytest.approx(lr * policy.config.lora_lr_scale)
+
+    observation = Observation(
+        state=torch.ones(1, 6), action=torch.ones(1, 2, 6), images={"front": torch.rand(1, 3, 32, 32)}, task=["move"]
+    )
+    policy.train()
+    with torch.autocast("cpu", dtype=torch.bfloat16):  # as under a bf16-mixed trainer
+        policy(observation)
+    loss, _ = policy(observation)
+    loss.backward()
+    optimizer.step()
+    policy.eval()
+    output = policy.predict_action_chunk(observation)
+    assert output.dtype == torch.float32
+    assert torch.isfinite(output).all()
+    with pytest.raises(ValueError, match="bfloat16"):
+        replace(tiny_config(), dtype="bfloat16", training_recipe="upstream")

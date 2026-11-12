@@ -95,6 +95,7 @@ class LingBotVLA2Config(PeftConfigMixin, Config):
     action_fp32: bool = False
     attention_fp32: bool = True
     normalization_mode: Literal["QUANTILES", "MEAN_STD"] = "QUANTILES"
+    dtype: Literal["float32", "bfloat16"] = "float32"
     freeze_vision_encoder: bool = False
     train_expert_only: bool = False
 
@@ -146,6 +147,13 @@ class LingBotVLA2Config(PeftConfigMixin, Config):
             raise ValueError(msg)
         if self.training_recipe not in {"action_only", "upstream"}:
             msg = f"Unsupported training_recipe: {self.training_recipe}"
+            raise ValueError(msg)
+        if self.dtype not in {"float32", "bfloat16"}:
+            msg = f"Unsupported dtype: {self.dtype}"
+            raise ValueError(msg)
+        # Muon and the FP32 action expert have no compensated bf16 update.
+        if self.dtype == "bfloat16" and (self.action_fp32 or self.training_recipe == "upstream"):
+            msg = "bfloat16 weights need the action_only recipe without action_fp32"
             raise ValueError(msg)
         if set(self.relative_action_groups) - {"arm.position"}:
             msg = "Only arm.position supports relative actions; grippers and poses stay absolute"
