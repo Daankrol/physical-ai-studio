@@ -187,3 +187,16 @@ def test_camera_selection_is_explicit() -> None:
     assert config.camera_map["front"] == "camera_top"
     with pytest.raises(ValueError, match="image_key_reorder_map"):
         LingBotVLA2._camera_map(inputs, None)
+
+
+def test_default_layout_matches_pretraining_offsets() -> None:
+    from itertools import accumulate
+
+    from physicalai.policies.lingbotvla2.config import DEFAULT_JOINT_LAYOUT
+
+    names = [name for name, _ in DEFAULT_JOINT_LAYOUT]
+    starts = dict(zip(names, accumulate([0] + [width for _, width in DEFAULT_JOINT_LAYOUT]), strict=False))
+    assert starts == {
+        "arm.position": 0, "end.position": 14, "effector.position": 28, "hand.position": 30,
+        "waist.position": 42, "head.position": 46, "base.velocity": 48,
+    }

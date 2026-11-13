@@ -1,4 +1,4 @@
-# LingBot-VLA 2.0 RoboTwin post-training (two or more 80 GB CUDA GPUs).
+# LingBot-VLA 2.0 RoboTwin full fine-tune: bf16 weights with Kahan AdamW, DDP on 80 GB CUDA GPUs.
 # Replace repo_id with a LeRobot conversion of your RoboTwin episodes.
 model:
   class_path: physicalai.policies.LingBotVLA2
@@ -17,10 +17,12 @@ model:
     n_action_steps: 50
     num_denoise_steps: 10
     normalization_mode: QUANTILES
+    dtype: bfloat16
     gradient_checkpointing: true
-    optimizer_lr: 1e-4
-    optimizer_vit_lr: 1e-6
-    scheduler_decay_lr: 5e-5
+    optimizer_lr: 2e-5
+    optimizer_vit_lr: 2e-5
+    scheduler_warmup_steps: 500
+    scheduler_decay_lr: 2e-6
 
 data:
   class_path: physicalai.data.lerobot.LeRobotDataModule
@@ -35,7 +37,11 @@ data:
 trainer:
   accelerator: gpu
   devices: 2
-  strategy: fsdp
+  strategy:
+    class_path: lightning.pytorch.strategies.DDPStrategy
+    init_args:
+      find_unused_parameters: true # MoE routing leaves some experts without gradients
+      gradient_as_bucket_view: true # no second copy of the bf16 gradients
   precision: bf16-mixed
   max_epochs: 8
   gradient_clip_val: 1.0

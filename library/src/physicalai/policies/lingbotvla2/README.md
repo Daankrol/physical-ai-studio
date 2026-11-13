@@ -8,7 +8,7 @@ uv sync --frozen --extra tests --extra cu128 --extra lingbotvla2
 uv run --no-sync physicalai fit --config configs/physicalai/lingbotvla2/so101.yaml
 ```
 
-The SO-101 example uses a public LeRobot dataset with front and wrist views, quantile statistics, a batch size of one, and LoRA on the VLM plus a trainable action expert. A batch-one bf16-mixed optimizer step with gradient checkpointing peaked at 56.2 GB of allocated GPU memory on an H100. Leave room for allocator overhead and other processes. Full fine-tuning needs a sharded multi-GPU setup; `configs/physicalai/lingbotvla2/robotwin.yaml` is a starting point, but its dataset ID must be replaced with a LeRobot conversion of RoboTwin episodes.
+The SO-101 example uses a public LeRobot dataset with front and wrist views, quantile statistics, a batch size of one, and LoRA on the VLM plus a trainable action expert. A batch-one bf16-mixed optimizer step with gradient checkpointing peaked at 56.2 GB of allocated GPU memory on an H100. Leave room for allocator overhead and other processes. For full fine-tuning, `configs/physicalai/lingbotvla2/robotwin.yaml` stores the weights in bf16 and uses DDP. Replace its dataset ID with a LeRobot conversion of RoboTwin episodes. The same recipe on LIBERO (6 A100s, batch 8 per GPU with 2-step accumulation, learning rate 2e-5, 8000 steps) peaked at about 76 GB per GPU and reached 97 / 100 / 92 / 91% on the spatial, object, goal and LIBERO-10 suites (10 episodes per task).
 
 MoE backend `triton` uses PyTorch grouped GEMM and native autograd; the name is retained for saved configurations. The `dense` backend remains the FP32 reference.
 
@@ -57,7 +57,7 @@ action_map:
   effector.position: [[6, 7], [13, 14]]
 ```
 
-Map dataset cameras with `image_key_reorder_map={"camera_name": 0, ...}` unless they are already named after the slots. Slots 0, 1 and 2 are `camera_top`, `camera_wrist_left` and `camera_wrist_right`; unused slots are masked. Every dataset camera must have a slot. The checkpoint's remaining joint-group order follows upstream's `real_robot.yaml`; it has not been verified zero-shot for hand, waist, head or base control.
+Map dataset cameras with `image_key_reorder_map={"camera_name": 0, ...}` unless they are already named after the slots. Slots 0, 1 and 2 are `camera_top`, `camera_wrist_left` and `camera_wrist_right`; unused slots are masked. Every dataset camera must have a slot. The canonical groups follow the pretraining layout in the technical report: `arm.position` (14), `end.position` (14, XYZ plus quaternion per arm), `effector.position` (2), `hand.position` (12), `waist.position` (4), `head.position` (2) and `base.velocity` (3), with 4 reserved dimensions. Upstream's example `real_robot.yaml` lists waist, head and base before the hand; its fine-tuning layout is configurable and does not describe the pretrained checkpoint. Zero-shot hand, waist, head and base control has not been verified.
 
 ## Checkpoints and Torch export
 

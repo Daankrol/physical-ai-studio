@@ -13,14 +13,16 @@ from physicalai.config import Config
 from physicalai.data import Feature, FeatureType
 from physicalai.policies.mixins.peft import PeftConfigMixin
 
+# Pretraining layout from the technical report (arXiv 2607.06403, sec. 3.1.3); the last 4 of 55 dims are reserved.
+# End-effector poses are XYZ + quaternion, 7 per arm.
 DEFAULT_JOINT_LAYOUT = (
     ("arm.position", 14),
     ("end.position", 14),
     ("effector.position", 2),
+    ("hand.position", 12),
     ("waist.position", 4),
     ("head.position", 2),
-    ("base.position", 3),
-    ("hand.position", 12),
+    ("base.velocity", 3),
 )
 
 
