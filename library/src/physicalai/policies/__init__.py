@@ -17,7 +17,7 @@ from .lerobot import get_lerobot_policy
 if TYPE_CHECKING:
     from .act import ACT, ACTConfig, ACTModel  # noqa: F401
     from .cosmos3 import Cosmos3, Cosmos3Config, Cosmos3Model  # noqa: F401
-    from .molmoact2 import MolmoAct2, MolmoAct2Config, MolmoAct2Model  # noqa: F401
+    from .lingbotvla2 import LingBotVLA2, LingBotVLA2Config, LingBotVLA2Model  # noqa: F401    from .molmoact2 import MolmoAct2, MolmoAct2Config, MolmoAct2Model  # noqa: F401
     from .pi05 import Pi05, Pi05Config, Pi05Model  # noqa: F401
     from .rldx1 import Rldx1, Rldx1Config, Rldx1Model  # noqa: F401
     from .smolvla import SmolVLA, SmolVLAConfig, SmolVLAModel  # noqa: F401
