@@ -248,6 +248,11 @@ package (`physicalai`), not `physicalai-train` or PyTorch. Inference supports
 batch size one; cameras may have any resolution and either channel layout, and
 task length can vary between calls.
 
+Qwen3's residual activations exceed the f16 range, so the export marks the
+language model to stay in f32 when a device compiles at f16, as Intel GPUs do by
+default. The vision encoder and action head can still run in f16. Without the
+marking, f16 inference returned unusable actions.
+
 Each call samples fresh Gaussian flow noise outside the graph. For numerical
 comparisons, pass `noise` with shape `(1, chunk_size, action_dim)` in the Runtime
 input dictionary and use the same noise in the Torch model. Set

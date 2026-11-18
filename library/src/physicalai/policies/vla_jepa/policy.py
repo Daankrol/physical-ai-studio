@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, replace
@@ -36,6 +37,9 @@ from .config import VLAJEPAConfig, feature_dimension
 from .model import VLAJEPAModel
 from .pretrained import DEFAULT_CHECKPOINT, resolve_pretrained
 from .processors import VLAJEPAPostprocessor, VLAJEPAPreprocessor, _batch_key
+
+# Nodes traced from VLAJEPAOpenVINOModel.text (the Qwen language model).
+_TEXT_NODE = re.compile(r"__module\.text[./]")
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -674,6 +678,15 @@ class VLAJEPA(PeftPolicyMixin, SnapFlowPolicyMixin, ExportablePolicyMixin, Polic
             if node.get_type_name() not in {"Parameter", "Result"}:
                 for output in node.outputs():
                     output.tensor.set_names(set())
+        # Qwen3's residual stream exceeds f16's range (~1.6e5 > 65504), so devices that compile at
+        # f16 (Intel GPU's default) must keep the language model in f32. "precise_0" is OpenVINO's
+        # disable-f16-conversion marker; the vision tower and action head stay free to run in f16.
+        text = [node for node in converted.get_ordered_ops() if _TEXT_NODE.match(node.get_friendly_name())]
+        if not text:
+            msg = "Could not find the Qwen language model in the traced OpenVINO graph."
+            raise RuntimeError(msg)
+        for node in text:
+            node.get_rt_info()["precise_0"] = ""
         return converted
 
     @property

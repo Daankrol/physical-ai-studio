@@ -4,6 +4,7 @@
 
 """Offline OpenVINO conversion and Runtime parity on a real tiny Qwen/DiT."""
 
+import re
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -102,6 +103,21 @@ def test_openvino_runtime_parity(
         inputs = {name: value.numpy() if isinstance(value, torch.Tensor) else value for name, value in raw.items()}
         actual = runtime({**inputs, "task": np.array([task]), "noise": noise.numpy()})["action"]
         np.testing.assert_allclose(actual, expected[:, : config.n_action_steps].numpy(), rtol=1e-4, atol=1e-4)
+
+
+def test_openvino_keeps_language_model_out_of_f16(tiny_config: VLAJEPAConfig, tmp_path: Path) -> None:
+    """Qwen3 activations overflow f16, so only the language model is pinned against f16 conversion."""
+    VLAJEPA.from_config(tiny_config).export(tmp_path, backend="openvino")
+    layers = re.findall(r'<layer id="\d+" name="([^"]+)".*?</layer>', (tmp_path / "vlajepa.xml").read_text(), re.S)
+    pinned = re.findall(
+        r'<layer id="\d+" name="([^"]+)"(?:(?!</layer>).)*DisablePrecisionConversion',
+        (tmp_path / "vlajepa.xml").read_text(),
+        re.S,
+    )
+    assert pinned
+    assert all(re.match(r"__module\.text[./]", name) for name in pinned)
+    assert any(name.startswith("__module.visual") for name in layers)
+    assert any(name.startswith("__module.action_model") for name in layers)
 
 
 def test_openvino_rejects_batched_trace(tiny_config: VLAJEPAConfig, observation: Observation, tmp_path: Path) -> None:
