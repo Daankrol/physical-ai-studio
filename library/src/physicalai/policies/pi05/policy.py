@@ -18,11 +18,12 @@ from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, I
 from physicalai.inference.manifest import ComponentSpec
 from safetensors.torch import load_file
 
-from physicalai.data.constants import RTC_EXECUTION_HORIZON, RTC_INFERENCE_DELAY, RTC_MAX_GUIDANCE_WEIGHT
+from physicalai.data.constants import NOISE, RTC_EXECUTION_HORIZON, RTC_INFERENCE_DELAY, RTC_MAX_GUIDANCE_WEIGHT
 from physicalai.data.dataset import Dataset
 from physicalai.data.observation import ACTION, IMAGES, PREV_CHUNK_LEFT_OVER, STATE, TASK, FeatureType
 from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.export.backends import (
+    ExecuTorchExportParameters,
     ExportParameters,
     ONNXExportParameters,
     OpenVINOExportParameters,
@@ -563,6 +564,14 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
 
         return config, dataset_stats, weights_file
 
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Migrate vision-tower keys from checkpoints saved before Transformers 5.15."""
+        super().on_load_checkpoint(checkpoint)
+        checkpoint["state_dict"] = {
+            key.replace(".vision_tower.vision_model.", ".vision_tower."): value
+            for key, value in checkpoint["state_dict"].items()
+        }
+
     def setup(self, stage: str) -> None:
         """Set up model from datamodule (lazy or fine-tuning path).
 
@@ -655,17 +664,18 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
             batch: Observation batch (must contain ground-truth actions).
 
         Returns:
-            Tuple of (MSE loss tensor, loss dict).
+            Tuple of (MSE loss tensor, loss dict), with the denormalized prediction under ``"action_pred"``.
 
         Raises:
             ValueError: If the model is not initialized.
         """
-        if self.model is None or self._preprocessor is None:
+        if self.model is None or self._preprocessor is None or self._postprocessor is None:
             msg = "Model is not initialized"
             raise ValueError(msg)
 
-        processed_batch = self._preprocessor(batch.to_dict())
-        return self.model.compute_val_loss(processed_batch)
+        loss, loss_dict = self.model.compute_val_loss(self._preprocessor(batch.to_dict()))
+        loss_dict["action_pred"] = self._postprocessor({ACTION: loss_dict["action_pred"]})[ACTION]
+        return loss, loss_dict
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
@@ -807,7 +817,7 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
         Returns:
             list[str | ExportBackend]: A list of supported export backends.
         """
-        return [ExportBackend.TORCH, ExportBackend.OPENVINO]
+        return [ExportBackend.TORCH, ExportBackend.OPENVINO, ExportBackend.EXECUTORCH]
 
     # export() is provided by PeftPolicyMixin (merges LoRA adapters into a disposable
     # copy of self.model before delegating to ExportablePolicyMixin.export() via
@@ -868,6 +878,17 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
                 dtype=InferenceFeatureDtype.STRING,
             ),
         )
+        # The start noise is a graph input: OpenVINO's GPU plugin repeats in-graph random values.
+        # Without random noise the graph keeps its zero start, like eager inference.
+        if self.config.use_random_input_noise:
+            schema.append(
+                InferenceFeature(
+                    ftype=InferenceFeatureType.COMMON,
+                    shape=(self.config.chunk_size, self.config.max_action_dim),
+                    name=NOISE,
+                    dtype=InferenceFeatureDtype.FLOAT32,
+                ),
+            )
 
         if self.rtc_enabled:
             action_shape = cast("tuple", self._dataset_stats[ACTION]["shape"])
@@ -947,6 +968,11 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
         if self.rtc_enabled:
             normalize_stats[PREV_CHUNK_LEFT_OVER] = self._dataset_stats[ACTION]
 
+        noise_specs = (
+            [ComponentSpec(type="noise", shape=[self.config.chunk_size, self.config.max_action_dim])]
+            if self.config.use_random_input_noise
+            else []
+        )
         base_preproc_specs = [
             ComponentSpec(
                 type="normalize",
@@ -958,6 +984,7 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
                 image_resolution=self.config.image_resolution,
                 empty_cameras=self.config.empty_cameras,
             ),
+            *noise_specs,
         ]
         postproc_specs = [
             ComponentSpec(
@@ -1009,8 +1036,22 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
             postprocessors_specs=postproc_specs,
         )
         extra_args["torch"] = TorchExportParameters(
+            # Eager torch samples the noise itself; Observation has no noise field.
             preprocessors_specs=[ComponentSpec(type="to_float_tensor")],
             postprocessors_specs=torch_postproc_specs,
+        )
+        extra_args["executorch"] = ExecuTorchExportParameters(
+            preprocessors_specs=[
+                *base_preproc_specs,
+                ComponentSpec(
+                    type="hf_tokenizer",
+                    tokenizer_name="google/paligemma-3b-pt-224",
+                    revision="35e4f46485b4d07967e7e9935bc3786aad50687c",
+                    max_token_len=self.config.tokenizer_max_length,
+                ),
+            ],
+            postprocessors_specs=postproc_specs,
+            delegate="portable",
         )
 
         return extra_args

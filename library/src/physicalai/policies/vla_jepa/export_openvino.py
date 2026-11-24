@@ -77,9 +77,7 @@ class VLAJEPAOpenVINOModel(nn.Module):
         hidden = visual.patch_embed(pixels.to(visual.dtype))
         positions = (visual.pos_embed(self.interp_indices) * self.interp_weights[:, :, None]).sum(1)
         hidden = torch.add(hidden, positions.to(hidden.dtype))
-        rotary = visual.rotary_pos_emb(self.position_ids).reshape(hidden.shape[0], -1)
-        rotary = torch.cat((rotary, rotary), dim=-1)
-        embeddings = (rotary.cos(), rotary.sin())
+        embeddings = visual.rotary_pos_emb(hidden, self.position_ids)
         deepstack = []
         for index, block in enumerate(visual.blocks):
             hidden = torch.add(

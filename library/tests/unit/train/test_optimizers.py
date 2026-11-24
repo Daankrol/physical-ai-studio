@@ -6,8 +6,9 @@
 import pytest
 import torch
 
-from physicalai.train import optimizers
-from physicalai.train.optimizers import AdamWBF16Kahan, build_adamw_auto_precision
+from physicalai.train.optimizers import AdamWBF16Kahan, adamw_bf16_kahan, build_adamw_auto_precision
+
+_ACCELERATOR = "cuda" if torch.cuda.is_available() else "xpu" if torch.xpu.is_available() else None
 
 
 def _params(dtype: torch.dtype) -> list[torch.nn.Parameter]:
@@ -65,7 +66,7 @@ class TestAdamW:
     @pytest.mark.parametrize("chunk_numel", [None, 1000])
     def test_bfloat16_tracks_float32_weights(self, monkeypatch: pytest.MonkeyPatch, chunk_numel: int | None) -> None:
         if chunk_numel is not None:
-            monkeypatch.setattr(optimizers, "_CHUNK_NUMEL", chunk_numel)
+            monkeypatch.setattr(adamw_bf16_kahan, "_CHUNK_NUMEL", chunk_numel)
         kwargs = {"lr": 1e-5, "betas": (0.9, 0.95), "weight_decay": 0.01}
         reference, plain, compensated = _params(torch.float32), _params(torch.bfloat16), _params(torch.bfloat16)
         _train(reference, torch.optim.AdamW(reference, **kwargs), steps=50)
@@ -125,20 +126,20 @@ class TestAdamW:
         restored.load_state_dict(optimizer.state_dict())
         assert torch.equal(restored.state[params[0]]["exp_avg_sq"], state["exp_avg_sq"])
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel runs on CUDA")
+    @pytest.mark.skipif(_ACCELERATOR is None, reason="Triton kernel runs on CUDA or XPU")
     @pytest.mark.parametrize("betas", [(0.9, 0.95), (0.9, 0.999)])
     def test_fused_kernel_matches_eager(self, monkeypatch: pytest.MonkeyPatch, betas: tuple[float, float]) -> None:
         pytest.importorskip("triton")
-        init = (torch.randn(1031, 517, device="cuda") * 0.02).bfloat16()
+        init = (torch.randn(1031, 517, device=_ACCELERATOR) * 0.02).bfloat16()
 
         def train(fused: bool) -> tuple[torch.Tensor, dict]:
             if not fused:
-                monkeypatch.setattr(optimizers, "_fused_update", lambda: None)
+                monkeypatch.setattr(adamw_bf16_kahan, "_fused_update", lambda: None)
             params = [torch.nn.Parameter(init.clone())]
             optimizer = build_adamw_auto_precision(params, lr=1e-5, betas=betas, weight_decay=0.01)
-            generator = torch.Generator(device="cuda").manual_seed(0)
+            generator = torch.Generator(device=_ACCELERATOR).manual_seed(0)
             for _ in range(20):
-                params[0].grad = torch.randn(init.shape, device="cuda", generator=generator).bfloat16()
+                params[0].grad = torch.randn(init.shape, device=_ACCELERATOR, generator=generator).bfloat16()
                 optimizer.step()
             return params[0].detach(), optimizer.state[params[0]]
 
