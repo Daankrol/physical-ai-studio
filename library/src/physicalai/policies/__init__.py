@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from .pi05 import Pi05, Pi05Config, Pi05Model  # noqa: F401
     from .rldx1 import Rldx1, Rldx1Config, Rldx1Model  # noqa: F401
     from .smolvla import SmolVLA, SmolVLAConfig, SmolVLAModel  # noqa: F401
+    from .vla_jepa import VLAJEPA, VLAJEPAConfig, VLAJEPAModel  # noqa: F401
     from .xr0 import XR0, XR0Config, XR0Model  # noqa: F401
 
 
@@ -70,6 +71,8 @@ def __getattr__(name: str) -> Any:  # noqa: ANN401
     if name not in _LAZY_EXPORTS:
         msg = f"module {__name__!r} has no attribute {name!r}"
         raise AttributeError(msg)
+    # Module name comes from policy directories discovered on disk, not external input.
+    # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import
     value = getattr(import_module(f".{_LAZY_EXPORTS[name]}", __name__), name)
     globals()[name] = value
     return value
@@ -94,7 +97,7 @@ def get_policy(policy_name: str, *, source: str = "physicalai", **kwargs) -> Pol
 
     Args:
         policy_name: Name of the policy to create. Supported values depend on source:
-            - physicalai: "act", "cosmos3", "molmoact2", "pi05", "rldx1", "smolvla", "xr0"
+            - physicalai: "act", "cosmos3", "molmoact2", "pi05", "rldx1", "smolvla", "vla_jepa", "xr0"
             - lerobot: "act", "diffusion", "smolvla", "pi0", "pi05", "pi0_fast", "groot", "xvla"
         source: Where the policy implementation comes from. Options:
             - "physicalai": First-party implementations (default)

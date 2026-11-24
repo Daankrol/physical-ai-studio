@@ -58,7 +58,7 @@ SNAPFLOW_CHECKPOINT_NAME = f"{SNAPFLOW_CHECKPOINT_PREFIX}{CHECKPOINT_NAME}"
 reaches its phase boundary. Preferred over :data:`CHECKPOINT_NAME` by export,
 resume, and download whenever it exists; see :func:`resolve_checkpoint`."""
 
-SNAPFLOW_POLICIES = frozenset({"pi05", "smolvla"})
+SNAPFLOW_POLICIES = frozenset({"pi05", "smolvla", "vla_jepa"})
 """Policies that implement ``enable_snapflow()`` and can be distilled.
 
 SnapFlow is a flow-matching technique; only the flow-matching policies mix in
@@ -76,11 +76,12 @@ PRETRAINED_BASE_CHECKPOINTS: dict[str, str] = {
     "pi05": "lerobot/pi05_base",
     "rldx1": "RLWRLD/RLDX-1-PT",
     "smolvla": "lerobot/smolvla_base",
+    "vla_jepa": "lerobot/VLA-JEPA-Pretrain",
     "xr0": "XiaomiRobotics/Xiaomi-Robotics-0-Pretrain",
 }
 """Hub checkpoints used to initialize policies that only fine-tune from pretrained weights."""
 
-PEFT_POLICIES = frozenset({"pi05", "molmoact2"})
+PEFT_POLICIES = frozenset({"pi05", "molmoact2", "vla_jepa"})
 """Policies whose ``Config`` mixes in ``physicalai.policies.mixins.peft.PeftConfigMixin`` and
 support LoRA/DoRA fine-tuning."""
 
@@ -127,6 +128,13 @@ class TrainingJobSpec(BaseModel):
     val_split: float = Field(default=0.1, ge=0.0, lt=1.0, description="Fraction of episodes held out for validation.")
     precision: str = Field(default="bf16-mixed", description="Lightning precision, e.g. '32-true' or 'bf16-mixed'.")
     compile_model: bool = Field(default=False, description="Whether to torch.compile the policy forward pass.")
+    enable_world_model: bool | None = Field(
+        default=None,
+        description=(
+            "VLA-JEPA: enable joint JEPA/action fine-tuning. None uses full training for new runs "
+            "or the checkpoint's saved mode on resume."
+        ),
+    )
     augment_images: bool = Field(
         default=False,
         description="Whether to augment training images with the default pipeline.",
@@ -178,6 +186,16 @@ class TrainingJobSpec(BaseModel):
         description="Use DoRA (Weight-Decomposed LoRA) instead of plain LoRA. Ignored unless lora_enabled.",
     )
     run_options: RunOptions = Field(default_factory=RunOptions)
+
+    @model_validator(mode="after")
+    def validate_world_model(self) -> TrainingJobSpec:
+        """Reject JEPA options on policies that cannot honor them."""
+        if self.enable_world_model is not None and (
+            self.policy.lower() != "vla_jepa" or self.policy_source != "physicalai"
+        ):
+            msg = "enable_world_model is only supported by the native VLA-JEPA policy."
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def validate_lora(self) -> TrainingJobSpec:
@@ -256,6 +274,8 @@ def build_policy(spec: TrainingJobSpec, *, resume_from: Path | str | None = None
         pretrained = PRETRAINED_BASE_CHECKPOINTS.get(spec.policy.lower())
         if pretrained is not None:
             kwargs["pretrained_name_or_path"] = pretrained
+    if spec.policy.lower() == "vla_jepa" and spec.policy_source == "physicalai":
+        kwargs["enable_world_model"] = spec.enable_world_model
     kwargs.update(_camera_layout_kwargs(spec))
     if spec.lora_enabled:
         kwargs.update(
@@ -416,7 +436,7 @@ def run_training_job(
             logger=CSVLogger(cache_dir.parent, name=cache_dir.stem),
             callbacks=callbacks,
             accelerator=accelerator,
-            strategy=resolve_strategy(spec.device_type),
+            strategy=resolve_strategy(accelerator, spec.device_index),
             devices=resolve_devices(spec.device_index),
             max_epochs=spec.max_epochs,
             auto_scale_batch_size=spec.auto_scale_batch_size,
@@ -433,10 +453,10 @@ def run_training_job(
         _finalize_checkpoints(trainer, cache_dir, snapflow_callback=snapflow_callback)
         _publish(cache_dir, output_dir)
 
-        export_policy = _export_policy(spec, policy, output_dir)
         _detach_trainer(policy, trainer)
         del trainer, datamodule, policy
         _release_memory()
+        export_policy = _export_policy(spec, output_dir)
         _export(export_policy, output_dir, report, spec.export_backends)
 
 
@@ -473,7 +493,10 @@ def _load_policy_from_checkpoint(spec: TrainingJobSpec, checkpoint: Path) -> Pol
         from physicalai.policies import get_physicalai_policy_class
 
         policy_class = get_physicalai_policy_class(spec.policy)
-        policy = policy_class.load_from_checkpoint(str(checkpoint))
+        kwargs: dict[str, Any] = (
+            {"enable_world_model": spec.enable_world_model} if spec.enable_world_model is not None else {}
+        )
+        policy = policy_class.load_from_checkpoint(str(checkpoint), **kwargs)
 
     if spec.compile_model:
         import torch
@@ -554,30 +577,22 @@ def resolve_checkpoint(model_dir: Path | str) -> Path:
     return model_dir / CHECKPOINT_NAME
 
 
-def _export_policy(spec: TrainingJobSpec, policy: Policy, output_dir: Path) -> Policy:
-    """Return the policy to export: reloaded from disk when that changes what gets exported.
+def _export_policy(spec: TrainingJobSpec, output_dir: Path) -> Policy:
+    """Return the selected checkpoint reloaded for export.
 
-    For SnapFlow runs, export reloads the distilled checkpoint so the exported
-    artifact matches what ``resolve_checkpoint`` (and therefore resume/download)
-    picks, rather than the final-epoch weights left in memory.
-
-    Falls back to the trained policy if the reload fails — a failed export is
-    better than a failed job.
+    Export must match ``resolve_checkpoint`` (and therefore resume/download),
+    rather than the final-epoch weights left in memory.  This matters for every
+    policy: an ordinary ``ModelCheckpoint`` selects the best validation epoch,
+    while the live policy contains the final epoch.  For SnapFlow,
+    ``resolve_checkpoint`` additionally selects the distilled checkpoint.
 
     Returns:
         The policy instance to hand to the export backends.
     """
     resolved = resolve_checkpoint(output_dir)
-    if resolved.name != SNAPFLOW_CHECKPOINT_NAME:
-        return policy
-
-    try:
-        logger.info("Reloading policy from %s for export", resolved.name)
-        uncompiled = spec.model_copy(update={"compile_model": False})
-        return _load_policy_from_checkpoint(uncompiled, resolved)
-    except Exception:  # reload is best-effort; the trained policy is a valid fallback
-        logger.warning("Failed to reload policy for export; using trained policy", exc_info=True)
-        return policy
+    logger.info("Reloading selected checkpoint %s for export", resolved.name)
+    uncompiled = spec.model_copy(update={"compile_model": False})
+    return _load_policy_from_checkpoint(uncompiled, resolved)
 
 
 def _detach_trainer(policy: Policy, trainer: Any) -> None:

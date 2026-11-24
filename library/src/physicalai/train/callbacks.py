@@ -7,7 +7,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Any, Protocol, cast, override, runtime_checkable
 
 import lightning as L  # noqa: N812
 import torch
@@ -36,6 +36,39 @@ SNAPFLOW_CHECKPOINT_KEY = "snapflow"
 """Checkpoint dict key holding the SnapFlow phase metadata stamped at save time."""
 
 _PARAM_COUNT_MILLIONS_THRESHOLD = 1_000_000
+
+
+class NonFiniteGuard(Callback):
+    """Reject non-finite losses and gradient norms before an optimizer update."""
+
+    @override
+    def on_before_backward(self, trainer: L.Trainer, pl_module: L.LightningModule, loss: torch.Tensor) -> None:
+        """Reject a non-finite training loss before backward.
+
+        Raises:
+            FloatingPointError: If the loss contains NaN or infinity.
+        """
+        del pl_module
+        if not torch.isfinite(loss).all():
+            msg = f"Non-finite training loss at step {trainer.global_step}."
+            raise FloatingPointError(msg)
+
+    @override
+    def on_before_optimizer_step(
+        self,
+        trainer: L.Trainer,
+        pl_module: L.LightningModule,
+        optimizer: torch.optim.Optimizer,
+    ) -> None:
+        """Reject non-finite gradient norms before clipping can contaminate other gradients."""
+        del trainer, pl_module
+        gradients = [
+            parameter.grad
+            for group in optimizer.param_groups
+            for parameter in group["params"]
+            if parameter.grad is not None
+        ]
+        torch.nn.utils.get_total_norm(gradients, error_if_nonfinite=True)
 
 
 class RolloutVideoRecorderCallback(Callback):
@@ -156,8 +189,9 @@ class SnapFlowCapable(Protocol):
 
     Satisfied by any policy mixing in
     :class:`~physicalai.policies.mixins.SnapFlowPolicyMixin`, which covers
-    :class:`~physicalai.policies.Pi05` and
-    :class:`~physicalai.policies.SmolVLA`.
+    :class:`~physicalai.policies.Pi05`,
+    :class:`~physicalai.policies.SmolVLA` and
+    :class:`~physicalai.policies.VLAJEPA`.
 
     Note:
         Used for static typing and documentation. Runtime detection goes through
@@ -431,9 +465,9 @@ class SnapFlowPhaseCallback(Callback):
     when the run is budgeted with ``Trainer(max_epochs=...)`` so the boundary
     does not have to be converted to steps by hand.
 
-    The policy must expose an ``enable_snapflow`` method — both
-    :class:`~physicalai.policies.SmolVLA` and
-    :class:`~physicalai.policies.Pi05` satisfy this contract.
+    The policy must expose an ``enable_snapflow`` method —
+    :class:`~physicalai.policies.SmolVLA`, :class:`~physicalai.policies.Pi05`
+    and :class:`~physicalai.policies.VLAJEPA` satisfy this contract.
 
     Phase 2 is made visible in three ways, so a run never switches objectives
     silently:
@@ -856,12 +890,12 @@ class SnapFlowPhaseCallback(Callback):
 
         Raises:
             TypeError: If ``pl_module`` does not expose an ``enable_snapflow``
-                method (i.e. is not a SmolVLA or Pi05 policy).
+                method (i.e. is not a SmolVLA, Pi05 or VLA-JEPA policy).
         """
         if not hasattr(pl_module, "enable_snapflow"):
             msg = (
                 f"{type(pl_module).__name__} does not implement enable_snapflow(); "
-                "SnapFlowPhaseCallback requires a SmolVLA or Pi05 policy."
+                "SnapFlowPhaseCallback requires a SmolVLA, Pi05 or VLA-JEPA policy."
             )
             raise TypeError(msg)
         policy = cast("SnapFlowCapable", pl_module)

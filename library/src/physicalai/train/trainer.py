@@ -15,6 +15,7 @@ import torch
 from lightning.pytorch.callbacks import BatchSizeFinder, LearningRateMonitor
 from lightning.pytorch.loggers import Logger  # noqa: TC002
 from lightning.pytorch.strategies import DDPStrategy
+from lightning.pytorch.utilities.rank_zero import rank_zero_info
 from physicalai.config import instantiate
 
 from physicalai.train.callbacks import PolicyDatasetInteraction
@@ -70,7 +71,7 @@ class Trainer(lightning.Trainer):
         # physicalai-specific parameters
         experiment_name: str | None = None,
         auto_scale_batch_size: bool = False,
-        allow_tf32: bool = False,
+        allow_tf32: bool = True,
         cudnn_benchmark: bool = True,
         # Hardware
         accelerator: str | Any = "auto",
@@ -136,9 +137,10 @@ class Trainer(lightning.Trainer):
             auto_scale_batch_size: Add a ``BatchSizeFinder`` callback to find the
                 largest batch size that fits in memory before training.
                 ``False`` (default) disables it.  ``True`` enables exponential (power) scaling.
-            allow_tf32: Enable TF32 precision for matmul on Ampere+ GPUs. Provides ~3x speedup
-                for float32 operations with minimal accuracy loss. Defaults to False to match
-                PyTorch's default. Consider enabling when using 32-true precision.
+            allow_tf32: Enable TF32 precision for matmul on Ampere+ GPUs. Speeds up float32
+                matmuls, including float32 modules under bf16 mixed precision, with minimal
+                accuracy loss. Defaults to True, matching LeRobot. Set False for full float32
+                matmul precision.
             cudnn_benchmark: Enable cuDNN benchmark mode to auto-tune convolution algorithms.
                 Speeds up training when input sizes are constant. Defaults to True.
             default_root_dir: Root directory for experiments (default: "experiments" instead of current dir)
@@ -193,9 +195,8 @@ class Trainer(lightning.Trainer):
         if auto_scale_batch_size:
             callbacks.append(BatchSizeFinder(mode="power"))
 
-        if allow_tf32:
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high" if allow_tf32 else "highest")
+        torch.backends.cudnn.allow_tf32 = allow_tf32
 
         if cudnn_benchmark:
             torch.backends.cudnn.benchmark = True
@@ -250,3 +251,14 @@ class Trainer(lightning.Trainer):
             barebones=barebones,
             model_registry=model_registry,
         )
+
+        self._log_training_device()
+
+    def _log_training_device(self) -> None:
+        """Report the selected device, including Intel GPUs omitted by Lightning's GPU log."""
+        device = self.strategy.root_device
+        rank_zero_info(f"Training device: {device}")
+        if device.type == "xpu":
+            rank_zero_info(
+                "Training uses an Intel GPU (XPU). Lightning's 'GPU available' message only checks CUDA/MPS, not XPU.",
+            )
